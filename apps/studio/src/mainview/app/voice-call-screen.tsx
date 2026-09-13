@@ -28,15 +28,9 @@ import { useVoiceCallStore, type CallPhase } from "@stores/voice-call";
 import { useVoiceCallEngine } from "@hooks/use-voice-call";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-import { DEFAULT_REALTIME_MODEL } from "../../bun/realtime-voice";
-
-/** 云端实时模型（qwen-audio-agent 默认即 plus 档）。 */
-const REALTIME_MODEL_OPTIONS = [
-  "qwen-audio-3.0-realtime-plus",
-  "qwen-audio-3.0-realtime-flash",
-  "qwen3.5-omni-flash-realtime",
-  "qwen3.5-omni-plus-realtime",
-];
+// 只从 shared 取值：bun/realtime-voice.ts 会被主进程的 db / paths 拖进来，
+// 而 webview 里没有 os / fs，值导入它等于整页白屏（常量本身也不再重复一份）。
+import { DEFAULT_REALTIME_MODEL, REALTIME_MODELS } from "../../shared/realtime-voice";
 
 /**
  * 实时语音通话（电话式协作）：
@@ -368,7 +362,7 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
                   {[
                     ...new Set([
                       ...(selectedProvider?.models.map((m) => m.id) ?? []),
-                      ...REALTIME_MODEL_OPTIONS,
+                      ...REALTIME_MODELS,
                     ]),
                   ].map((m) => (
                     <SelectItem key={m} value={m}>

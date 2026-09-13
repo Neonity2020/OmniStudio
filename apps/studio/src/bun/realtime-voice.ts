@@ -21,16 +21,21 @@ import * as CloudProviders from "./cloud-providers";
 export type VoiceCallProvider = "local" | "cloud";
 
 /** 可选的云端实时模型（qwen-audio-agent 默认即 plus 档）。 */
-export const REALTIME_MODELS = [
-  "qwen-audio-3.0-realtime-plus",
-  "qwen-audio-3.0-realtime-flash",
-  "qwen3.5-omni-flash-realtime",
-  "qwen3.5-omni-plus-realtime",
-] as const;
+// 常量定义在 shared（通话页也要用；webview 不能值导入本模块，见那边的说明），
+// 这里转出去保持既有导入方不变。
+import {
+  DEFAULT_REALTIME_BASE_URL,
+  DEFAULT_REALTIME_MODEL,
+  DEFAULT_REALTIME_VOICE,
+  REALTIME_MODELS,
+} from "../shared/realtime-voice";
 
-export const DEFAULT_REALTIME_BASE_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
-export const DEFAULT_REALTIME_MODEL = "qwen-audio-3.0-realtime-plus";
-export const DEFAULT_REALTIME_VOICE = "longanqian";
+export {
+  DEFAULT_REALTIME_BASE_URL,
+  DEFAULT_REALTIME_MODEL,
+  DEFAULT_REALTIME_VOICE,
+  REALTIME_MODELS,
+};
 
 export type RealtimeProviderConfig = {
   provider: VoiceCallProvider;

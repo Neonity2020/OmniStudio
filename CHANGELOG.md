@@ -24,6 +24,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ### Fixed / 修复
 
+- **启动白屏：前端包被塞进了主进程代码**：通话页为拿一个模型名常量，从 `bun/realtime-voice.ts` **值导入**了 `DEFAULT_REALTIME_MODEL`；而这次改动又让该模块去 import 云厂商模块（`cloud-providers` → `db` → `paths`），后者在模块级调用 `os.homedir()` —— webview 里没有 Node 内置模块，打包后一加载就抛 `(0, y7.homedir) is not a function`，React 树根本没机会挂载，窗口纯白，**而且因为前端 JS 压根没跑起来，连一条 client 错误日志都不会留下**（事后只能靠「日志里什么都没有」反推）。现在常量搬进 `src/shared/realtime-voice.ts`（两个进程共用一份，不再各写各的），`bun/realtime-voice.ts` 转出以保持既有导入方不变，`update-store.ts` 那处对 `@/bun/updates` 的纯类型引用也改成 `import type`。另加静态守卫 `tests/webview-import-guard.test.ts`：mainview 下任何文件对 `bun/*` 的值导入都会让测试失败（`import type` 放行），并自带判据自检 —— 这类故障在运行时只表现为"白屏且无日志"，必须靠构建/静态检查拦住。
 - **「通话 → 云端模式」整页崩掉（`Cannot access 'providerId' before initialization`）**：云端配置引导在 `.find()` 的回调里读 `providerId`，而那个 `useState` 声明写在下面几行 —— 厂商列表**非空**时渲染即抛 `ReferenceError`，等于选了云端模式就再也打不开这一页。声明挪到读取之前，并补上引导面板的渲染回归测试（原先没有任何用例渲染过它，所以整个套件是绿的）。
 - **云端厂商「启动」时探错地址（Gemini 这类永远启用不了）**：密钥校验按「补 `/v1/models`」拼地址，对 `https://generativelanguage.googleapis.com/v1beta/openai` 这种本身已带版本段的 base 会探到不存在的路径（404）——而启用是各功能页选到该厂商的前提，于是这家在界面里等于不存在。现在按仓库既有的两种约定依次试（先 `/models`，不是模型清单或 404 再补 `/v1/models`），401/403 仍立即判定为密钥无效。
 - **升级时在途的生视频任务被误报「厂商已删除」**：`provider_id` 那一列是新加的，升级前提交的记录没有它，轮询便直接落到「查不到上游」分支 —— 其实那次任务的地址与密钥刚被迁移成当前选中的厂商行。现在旧记录（backend 为 `minimax` / `seedance`）回落到当前厂商去查，与「提交后切厂商也能把在途任务查完」是同一套行为。
