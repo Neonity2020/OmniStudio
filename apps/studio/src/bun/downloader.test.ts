@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -11,6 +11,11 @@ import { downloadWithResume, partialBytesFor, removePartialFiles } from "./downl
  *
  * 数据用 index % 251 生成，逐字节可校验；不依赖外网。
  */
+
+// 每个用例都在回环上真搬 20 MiB（有的还刻意给分片加间隔来制造中断窗口），
+// bun 默认的 5s 在负载高的 CI runner 上会偶发超时 —— 实测「服务器瞬时 503」
+// 就是因为 5002ms 撞线而挂。超时是上限、不是等待，跑得快的用例不受影响。
+setDefaultTimeout(30_000);
 
 function makeData(size: number): Uint8Array {
   const buf = new Uint8Array(size);
@@ -275,7 +280,13 @@ describe("重试与容错", () => {
 describe("远端变化与旧格式", () => {
   test("远端文件大小变了：丢弃旧分片重下，不拼出坏文件", async () => {
     const first = makeData(BIG);
-    const { server: firstServer, requests: firstRequests } = startServer({ data: first });
+    // 分片之间留间隔：否则回环上这份文件可能在第一次进度回调之前就下完，取消落到
+    // 结束之后（sidecar 已被清理），「留下了续传信息」这条断言就会随机失败 ——
+    // 与「暂停后重启」是同一类 flake，CI 上实测挂过。
+    const { server: firstServer, requests: firstRequests } = startServer({
+      data: first,
+      chunkDelayMs: 5,
+    });
     servers.push(firstServer);
     const dest = path.join(dir, "changed.bin");
 
