@@ -1,7 +1,12 @@
 import { existsSync, mkdirSync, renameSync, statSync } from "fs";
 import path from "path";
 import { createHash } from "crypto";
-import { IMAGE_SERVER_HOST, IMAGE_SERVER_PORT, isLocalOrigin, isLoopbackHost } from "../shared/server-info";
+import {
+  IMAGE_SERVER_HOST,
+  imageServerPort,
+  isLocalOrigin,
+  isLoopbackHost,
+} from "../shared/server-info";
 import { getDataDir } from "./paths";
 import { safeJoin } from "./path-safety";
 
@@ -60,7 +65,7 @@ export function getPromptLibraryCacheBase(): string {
 
 /** 提示词库媒体相对路径（如 `awesome/case544.jpg`）对应的本地缓存 URL。 */
 export function promptLibraryLocalUrl(rel: string): string {
-  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/prompt-library/${rel}`;
+  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/prompt-library/${rel}`;
 }
 
 export function getUploadsBaseDir(): string {
@@ -70,6 +75,20 @@ export function getUploadsBaseDir(): string {
   migrateLegacyCwdDir("omni-studio-uploads", base);
   return base;
 }
+
+/**
+ * 本实例媒体目录的指纹（不泄露路径本身）。
+ *
+ * 媒体服务端口是固定的，而 dev / canary / 正式版各有自己的数据目录：端口被别人占用时，
+ * 必须能分辨"占用者是同一份数据的另一个实例"（共用无害）还是"另一个数据目录"
+ * （请求会打到别人的文件上，必须报警）。见 startImageServer。
+ */
+export function mediaServerId(): string {
+  return createHash("sha1").update(path.resolve(getImagesBaseDir())).digest("hex").slice(0, 12);
+}
+
+/** 实例身份路由：探测端口的占用者是不是本应用、服务的是哪份数据目录。 */
+const MEDIA_ID_PATH = "/__omni/media-id";
 
 const MIME: Record<string, string> = {
   ".webp": "image/webp",
@@ -202,11 +221,21 @@ function fileResponse(filePath: string, size: number, rangeHeader: string | null
   });
 }
 
-export function startImageServer() {
+/** 非法百分号编码（如 `/%E0%A4%A`）不能把 handler 抛崩，当作无效请求处理。 */
+function decodePath(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
+/** 立即占用端口开始服务；端口被占时 Bun.serve 直接抛（由 startImageServer 兜住）。 */
+function bindMediaServer(): void {
   const baseDir = getImagesBaseDir();
 
   Bun.serve({
-    port: IMAGE_SERVER_PORT,
+    port: imageServerPort(),
     // 只监听回环：服务无鉴权，绑全网卡等于把文档/图片/音频暴露给同网段。
     hostname: IMAGE_SERVER_HOST,
     async fetch(req) {
@@ -221,10 +250,16 @@ export function startImageServer() {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
       }
 
+      // 实例身份：端口被占时，后启动的实例靠它判断"占着端口的是同一份数据目录还是另一份"。
+      if (url.pathname === MEDIA_ID_PATH) {
+        return Response.json({ id: mediaServerId(), pid: process.pid });
+      }
+
       // 提示词库媒体：优先 vibedesign 的 public 目录，其次本地下载缓存
       // （seed 里的 /prompt-library/... 路径；缓存目录见 getPromptLibraryCacheBase）
       if (url.pathname.startsWith("/prompt-library/")) {
-        const rel = decodeURIComponent(url.pathname.slice("/prompt-library/".length));
+        const rel = decodePath(url.pathname.slice("/prompt-library/".length));
+        if (rel === null) return new Response("Bad request", { status: 400 });
         for (const mediaBase of [getPromptLibraryMediaBase(), getPromptLibraryCacheBase()]) {
           if (!mediaBase) continue;
           const mediaPath = safeJoin(mediaBase, rel);
@@ -240,8 +275,11 @@ export function startImageServer() {
       // 只按登记过的 id 查路径（请求里给不了绝对路径），子路径相对产出物所在目录解析
       // —— 生成的 HTML 引用同目录的 css/js/图片时才能一起加载。
       if (url.pathname.startsWith("/artifact/")) {
-        const rest = decodeURIComponent(url.pathname.slice("/artifact/".length));
-        const [idPart, ...sub] = rest.split("/");
+        const rest = decodePath(url.pathname.slice("/artifact/".length));
+        if (rest === null) return new Response("Bad request", { status: 400 });
+        // 空段（`/artifact/7//a.css`）要丢掉：留下来会让子路径以 "/" 开头，
+        // safeJoin 把它当绝对路径直接 403，看着像"文件不存在"。
+        const [idPart, ...sub] = rest.split("/").filter((s) => s.length > 0);
         const id = Number(idPart);
         const absPath = Number.isInteger(id) && id > 0 ? artifactResolver?.(id) ?? null : null;
         if (!absPath) return new Response("Not found", { status: 404 });
@@ -255,8 +293,9 @@ export function startImageServer() {
 
       // 工作区文件预览：/workspace/<rootId>/<相对路径>（rootId 由主进程登记）。
       if (url.pathname.startsWith("/workspace/")) {
-        const rest = decodeURIComponent(url.pathname.slice("/workspace/".length));
-        const [rootId, ...sub] = rest.split("/");
+        const rest = decodePath(url.pathname.slice("/workspace/".length));
+        if (rest === null) return new Response("Bad request", { status: 400 });
+        const [rootId, ...sub] = rest.split("/").filter((s) => s.length > 0);
         const root = rootId ? workspaceRoots.get(rootId) : undefined;
         if (!root || sub.length === 0) return new Response("Not found", { status: 404 });
         const target = safeJoin(root, sub.join("/"));
@@ -267,12 +306,22 @@ export function startImageServer() {
         return fileResponse(target, statSync(target).size, req.headers.get("range"));
       }
 
-      const filePath = safeJoin(baseDir, decodeURIComponent(url.pathname));
+      // 聊天图片 / 生成图 / OCR 页图 / TTS 音频：/<相对路径>。
+      // pathname 一定带前导 "/"（"/audio/x.mp3"），而 safeJoin 把绝对路径视作越界，
+      // 必须先剥掉再拼——否则这里会对每一个媒体请求回 403，音频预览直接显示「文件不存在」。
+      const decoded = decodePath(url.pathname);
+      if (decoded === null) return new Response("Bad request", { status: 400 });
+      const rel = decoded.replace(/^\/+/, "");
+      if (!rel) {
+        return new Response("Not found", { status: 404 });
+      }
+      const filePath = safeJoin(baseDir, rel);
       if (!filePath) {
         return new Response("Forbidden", { status: 403 });
       }
 
-      if (!existsSync(filePath)) {
+      // 目录本身不是可预览对象（Bun.file 读目录会抛 EISDIR）。
+      if (!existsSync(filePath) || !statSync(filePath).isFile()) {
         return new Response("Not found", { status: 404 });
       }
 
@@ -281,11 +330,127 @@ export function startImageServer() {
     },
   });
 
-  console.log(`Image server running on http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}`);
+  console.log(`Image server running on http://${IMAGE_SERVER_HOST}:${imageServerPort()}`);
+}
+
+// ---------------------------------------------------------------------------
+// 启动 / 端口争用
+// ---------------------------------------------------------------------------
+
+/**
+ * 媒体服务状态：
+ * - `serving`：本实例占着端口，自己的数据自己服务。
+ * - `shared`：端口被**同一个数据目录**的另一个实例占着（同频道开了两个）——效果等同正常。
+ * - `blocked`：端口被别的进程（另一个频道的实例、或不相干的软件）占着——媒体 URL 会打到
+ *   别人的数据目录上，预览要么取不到、要么取到别人的同名文件，必须让用户看到。
+ */
+export type MediaServerState = "serving" | "shared" | "blocked";
+
+export type MediaServerStatus = {
+  state: MediaServerState;
+  /** blocked 时：占用者进程号（探到身份才有）。 */
+  holderPid?: number;
+  /** blocked 时：占用者是本应用的另一个实例（数据目录不同）。 */
+  otherInstance?: boolean;
+};
+
+/** 端口被占时的重试间隔：另一个实例退出后本实例自动接管，不用重启应用。 */
+const MEDIA_RETRY_MS = 5_000;
+
+/**
+ * 初始值取"最坏情况"：绑定成功会立刻改成 serving，绑定失败则由探测结论覆盖。
+ * 宁可短暂地少报"正常"，也不要让界面以为媒体服务在跑（那正是这次要修的坑）。
+ */
+let mediaStatus: MediaServerStatus = { state: "blocked" };
+let retryTimer: ReturnType<typeof setInterval> | null = null;
+const mediaStatusListeners = new Set<(status: MediaServerStatus) => void>();
+
+export function getMediaServerStatus(): MediaServerStatus {
+  return mediaStatus;
+}
+
+export function onMediaServerStatusChange(cb: (status: MediaServerStatus) => void): () => void {
+  mediaStatusListeners.add(cb);
+  return () => {
+    mediaStatusListeners.delete(cb);
+  };
+}
+
+function setMediaStatus(next: MediaServerStatus, force = false): void {
+  if (
+    !force &&
+    next.state === mediaStatus.state &&
+    next.holderPid === mediaStatus.holderPid &&
+    next.otherInstance === mediaStatus.otherInstance
+  ) {
+    return;
+  }
+  mediaStatus = next;
+  for (const cb of mediaStatusListeners) cb(next);
+}
+
+/** 问一句"端口上是谁"：同一份数据目录可以共用，别的数据目录必须报警。 */
+async function probeMediaServer(): Promise<{ pid?: number; sameData: boolean } | null> {
+  try {
+    const res = await fetch(`http://${IMAGE_SERVER_HOST}:${imageServerPort()}${MEDIA_ID_PATH}`, {
+      signal: AbortSignal.timeout(2_000),
+    });
+    if (!res.ok) return null;
+    const json = (await res.json().catch(() => null)) as { id?: unknown; pid?: unknown } | null;
+    if (!json || typeof json.id !== "string") return null;
+    return {
+      pid: typeof json.pid === "number" ? json.pid : undefined,
+      sameData: json.id === mediaServerId(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 端口被占：探明占用者身份，并持续重试，等对方退出后接管。 */
+async function acquireMediaServer(retryMs: number): Promise<void> {
+  const holder = await probeMediaServer();
+  // 初始值只是"还没探明"的占位，探测结论无论是否与它相同都要发出去（通知依赖这次事件）。
+  setMediaStatus(
+    holder?.sameData
+      ? { state: "shared" }
+      : { state: "blocked", holderPid: holder?.pid, otherInstance: !!holder },
+    true,
+  );
+
+  if (retryTimer) return;
+  retryTimer = setInterval(() => {
+    try {
+      bindMediaServer();
+    } catch {
+      return; // 还被占着，下一轮再试
+    }
+    if (retryTimer) clearInterval(retryTimer);
+    retryTimer = null;
+    setMediaStatus({ state: "serving" }, true);
+  }, retryMs);
+  // 不能让重试定时器把进程（或测试进程）挂住。
+  (retryTimer as unknown as { unref?: () => void }).unref?.();
+}
+
+/**
+ * 启动媒体服务。端口被占不再默默降级——过去的写法是 catch 住 EADDRINUSE 就算了，
+ * 于是第二个实例（另一个频道 / 另一个数据目录）整个会话都没有媒体服务，图片、音频预览
+ * 全挂，只在控制台留一行 warn。现在探明占用者、暴露状态、并在对方退出后自动接管。
+ */
+export function startImageServer(opts: { retryMs?: number } = {}): void {
+  try {
+    bindMediaServer();
+  } catch (e) {
+    console.warn(`媒体服务端口 ${imageServerPort()} 被占用，稍后重试`, e);
+    void acquireMediaServer(opts.retryMs ?? MEDIA_RETRY_MS);
+    return;
+  }
+  setMediaStatus({ state: "serving" }, true);
 }
 
 export function imageUrl(docId: number, filename: string): string {
-  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/${docId}/${filename}`;
+  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/${docId}/${filename}`;
 }
 
 // Chat images are stored under images/<...> with a ref like "chat/<convId>/<file>".

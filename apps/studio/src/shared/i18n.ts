@@ -149,6 +149,7 @@ const zh: Record<string, string> = {
   "agent.thinking.streaming": "思考中…",
   "agent.thinking.duration": "思考 · 持续了 {seconds} 秒",
   "agent.tool.terminal": "终端",
+  "agent.tool.interrupted": "没有结果记录",
   "agent.tool.read": "读取",
   "agent.tool.list": "目录",
   "agent.tool.glob": "查找",
@@ -850,6 +851,10 @@ const zh: Record<string, string> = {
   "voice.clone.badge": "克隆",
   "voice.records.empty": "还没有记录",
   "voice.records.missing": "音频文件不存在或已被删除",
+  // 媒体服务（聊天图片 / 生成图 / TTS 音频都由它的本地 HTTP 服务取文件）
+  "media.status.blocked": "媒体不可用",
+  "media.status.blockedHint":
+    "媒体服务端口被另一个 OmniStudio 实例占用（数据目录不同），图片 / 音频预览可能加载失败或显示成对方的数据。关掉那个实例，本窗口会在几秒内自动接管，无需重启。",
   "voice.records.tts": "TTS",
   "voice.records.asr": "ASR",
   "voice.records.clone": "克隆",
@@ -2341,6 +2346,7 @@ const en: Record<string, string> = {
   "agent.thinking.streaming": "Thinking…",
   "agent.thinking.duration": "Thought for {seconds}s",
   "agent.tool.terminal": "Terminal",
+  "agent.tool.interrupted": "No result recorded",
   "agent.tool.read": "Read",
   "agent.tool.list": "List",
   "agent.tool.glob": "Find",
@@ -3094,6 +3100,9 @@ const en: Record<string, string> = {
   "voice.clone.badge": "clone",
   "voice.records.empty": "No records yet",
   "voice.records.missing": "Audio file missing or deleted",
+  "media.status.blocked": "Media unavailable",
+  "media.status.blockedHint":
+    "Another OmniStudio instance (different data directory) is holding the media port, so image/audio previews may fail or show that instance's files. Quit it and this window takes over within seconds — no restart needed.",
   "voice.records.tts": "TTS",
   "voice.records.asr": "ASR",
   "voice.records.clone": "Clone",

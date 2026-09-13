@@ -6,8 +6,9 @@
  * 通知只是"提醒你回来看一眼"，重启后没有保留价值。
  */
 import { randomUUID } from "crypto";
+import { logEvent } from "./app-log";
 
-export type NotificationKind = "run_finished" | "permission" | "automation" | "error";
+export type NotificationKind = "run_finished" | "permission" | "automation" | "error" | "info";
 
 export type AppNotification = {
   id: string;
@@ -50,6 +51,15 @@ export function notify(input: {
   };
   items.unshift(notification);
   if (items.length > MAX_NOTIFICATIONS) items.length = MAX_NOTIFICATIONS;
+  // 通知只活一次运行，但它记的是"后台出过事"—— 顺手进统一日志，
+  // 事后排查时才能在 app.log 里看到自动化失败 / 权限请求这些线索。
+  logEvent({
+    level: input.kind === "error" ? "error" : input.kind === "permission" ? "warn" : "info",
+    source: "notice",
+    event: `notification.${input.kind}`,
+    message: input.title,
+    detail: { body: input.body, conversationId: notification.conversationId },
+  });
   for (const cb of listeners) cb({ notification });
   return notification;
 }

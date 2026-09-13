@@ -10,6 +10,7 @@ import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import * as MlxGen from "./mlx-gen";
 import { findMlxModel } from "./mlx-gen";
+import { logEvent } from "./app-log";
 
 /**
  * AI 生图模块。
@@ -640,6 +641,27 @@ export async function generateImage(
     return { records };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    // 统一日志：失败记录入库之外也落一份现场（含后端与提示词，便于复盘）。
+    // 「没配置后端 / 模型」这类问题看这条就能直接定位，不必重现。
+    logEvent({
+      level: "error",
+      source: "image",
+      event: "image.generate.failed",
+      message,
+      detail: {
+        backend: cfg.backend,
+        model: params.model?.trim() || cfg.model || null,
+        apiBase: cfg.apiBase || null,
+        comfyBase: cfg.comfyBase || null,
+        hasApiKey: Boolean(cfg.apiKey),
+        prompt: prompt.slice(0, 300),
+        width: params.width ?? null,
+        height: params.height ?? null,
+        reference: params.referenceImageRef ?? null,
+        source: params.source ?? "manual",
+        error: e,
+      },
+    });
     insertImageRecord({
       status: "failed",
       source: params.source ?? "manual",

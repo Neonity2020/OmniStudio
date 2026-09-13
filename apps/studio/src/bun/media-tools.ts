@@ -13,6 +13,7 @@ import * as TtsLocal from "./tts-local";
 import { prepareImageGeneration } from "./media-setup";
 import {
   assertInsideWorkspace,
+  assertReadable,
   errorResult,
   resolvePath,
   textResult,
@@ -152,6 +153,11 @@ function kindOfRef(ref: string): MediaKind | null {
 /**
  * 取生成时的参考图 ref。除了库里的素材，还接受工作区内的图片文件
  * （自动暂存进 images/edit/in/）——用户自己放进工作区的图也能被复用。
+ *
+ * 工作区之外的文件要先过读取授权：参考图会被送进（可能是云端的）生图接口，
+ * 等于把本地图片读出应用——被注入的提示词正需要这一步（读权限的策略见 assertReadable）。
+ * 授权与凭据黑名单抛出的原因要让模型和用户看到，所以这两个检查放在 try 之外，
+ * 不并进下面"暂存失败就当没有"的兜底。
  */
 async function resolveReferenceRef(
   ctx: ToolContext,
@@ -162,8 +168,9 @@ async function resolveReferenceRef(
     if (asset.kind !== "image") return null;
     return asset.ref;
   }
+  const abs = resolvePath(ctx.workspace, input);
+  assertReadable(ctx, abs);
   try {
-    const abs = resolvePath(ctx.workspace, input);
     if (!existsSync(abs)) return null;
     const [staged] = await ImageGen.stageEditImage([abs]);
     return staged?.ref ?? null;

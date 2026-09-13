@@ -350,6 +350,27 @@ function stringArg(args: Record<string, unknown>, ...keys: string[]): string {
 }
 
 /**
+ * 生图 / 生视频的参考图参数若是**工作区之外的文件路径**，返回它的绝对路径。
+ *
+ * 这类文件会被送进（往往是云端的）生图接口，读取必须和 read_file 一样过授权；
+ * 而参数里也可能是素材库引用（`#3` / `image#3` / 库里给的 `gen/x.png`），
+ * 那些走素材库、不经文件系统读，所以只在值"看起来是路径"（带分隔符或 `~`）时才判。
+ */
+function externalMediaReference(
+  workspace: string,
+  args: Record<string, unknown>,
+): string | null {
+  const raw = stringArg(args, "reference", "first_frame");
+  if (!raw) return null;
+  if (!/[\\/]/.test(raw) && !raw.startsWith("~")) return null;
+  const expanded = raw.startsWith("~")
+    ? path.join(process.env.HOME ?? "/", raw.slice(1))
+    : raw;
+  const target = path.resolve(workspace, expanded);
+  return isInsideWorkspace(workspace, target) ? null : target;
+}
+
+/**
  * 把一次工具调用翻译成授权请求；返回 null 表示这个工具不需要授权。
  *
  * 注意：这里的 pattern 会同时用于「规则匹配」和「弹窗展示」，
@@ -422,7 +443,17 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
     }
     case "web_search":
       return null; // 有独立开关（WEB_SEARCH_ENABLED），不再弹窗
-    case "generate_image":
+    case "generate_image": {
+      const externalRef = externalMediaReference(workspace, args);
+      if (externalRef) {
+        return {
+          permission: "external_directory",
+          pattern: externalRef,
+          title: "读取工作区之外的图片作为参考图",
+          detail: { 文件: externalRef, 工作区: workspace },
+          always: [path.dirname(externalRef), path.dirname(externalRef) + "/*"],
+        };
+      }
       return {
         permission: "media",
         pattern: "generate_image",
@@ -430,6 +461,7 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
         detail: { 提示词: stringArg(args, "prompt").slice(0, 200) },
         always: ["generate_image"],
       };
+    }
     case "generate_speech":
       return {
         permission: "media",
@@ -438,7 +470,17 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
         detail: { 文本: stringArg(args, "text").slice(0, 200) },
         always: ["generate_speech"],
       };
-    case "generate_video":
+    case "generate_video": {
+      const externalRef = externalMediaReference(workspace, args);
+      if (externalRef) {
+        return {
+          permission: "external_directory",
+          pattern: externalRef,
+          title: "读取工作区之外的图片作为首帧",
+          detail: { 文件: externalRef, 工作区: workspace },
+          always: [path.dirname(externalRef), path.dirname(externalRef) + "/*"],
+        };
+      }
       return {
         permission: "media",
         pattern: "generate_video",
@@ -446,6 +488,7 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
         detail: { 提示词: stringArg(args, "prompt").slice(0, 200) },
         always: ["generate_video"],
       };
+    }
     case "task": {
       const description = stringArg(args, "description", "prompt").slice(0, 120);
       return {

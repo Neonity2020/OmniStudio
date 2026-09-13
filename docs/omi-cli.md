@@ -22,7 +22,7 @@ cd apps/studio && bun link
 OMNI_DATA_DIR=<数据目录> omi models
 ```
 
-默认自动探测最新使用过的 channel 数据目录（macOS：~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>）。无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。
+默认自动探测数据目录：先找正在运行的实例（真的 ping 控制通道，从源码 / build/ 里跑的 dev、canary 包也算），没有则取最近用过的 channel（macOS：~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>）。无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。
 
 ## 启动应用与推理服务器
 
@@ -60,6 +60,19 @@ omi server <list|start|stop|restart|info|logs>
 `omi server list` — 可用引擎清单（● 为活动引擎）。
 `omi server info` — 引擎 / 状态 / PID / 地址。
 `omi server logs` — 最近 200 行服务器日志，排错先看这里。
+
+```bash
+omi logs [--level] [--source] [--search] [-f] [--json]
+```
+
+查看统一应用日志：生图 / 生视频 / 语音 / OCR / 推理服务器 / 下载 / 网关 / Agent 等子系统的失败与关键事件都记在同一份 logs/app.log 里（逐行 JSONL，2MB 轮转，密钥自动脱敏）。应用在运行时读内存 + 文件；应用没运行或已闪退时直接读磁盘 —— 排查「应用起不来」同样可用。
+- 按子系统过滤：--source image | video | tts | asr | ocr | server | agent | download | gateway | client | app …
+- --verbose 打印结构化上下文（后端、模型、地址、堆栈）；-f 持续跟踪，让用户复现时实时看。
+
+`omi logs --level error --limit 50 -v` — 最近 50 条错误及完整上下文。
+`omi logs --source image --verbose` — 生图失败的原因（后端 / 模型 / 提示词）。
+`omi logs -f --source agent` — 跟踪 Agent 运行日志。
+`omi logs --json` — 输出 JSON，交给脚本或 Agent 分析。
 
 ## 无界面常驻运行（serve）
 

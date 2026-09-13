@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ## [未发布] / Unreleased
 
+### Added / 新增
+
+- **统一应用日志（排查任何问题的第一入口）**：过去失败信息散在三处——推理服务器日志只在内存里（停止即丢）、媒体管线失败只有一句瞬时错误、语音调试写 `/tmp/omni-voicecall.log`，"生图为什么失败"这类问题事后没有任何现场可查。现在 `src/bun/app-log.ts` 把**事件级**记录收敛到一处：`<数据目录>/logs/app.log`（逐行 JSONL，2MB 轮转保留 5 份，key/token/secret 等字段自动脱敏成 `***`，单条 detail 有上限），同时保留最近 2000 条内存环形缓冲供实时读取。已接入的失败路径：主进程生命周期与未捕获异常 / 未处理 rejection（含堆栈）、通知中心每一条（自动化失败、权限请求、媒体服务被占…）、生图与生视频（含后端、模型、地址、提示词片段）、TTS / ASR / OCR 三条管线、推理服务器启动失败与运行中崩溃、模型下载失败、Agent 回合错误与工具失败、数据库迁移失败，以及 **webview 侧**的渲染错误与全局未捕获错误（新增 RPC `writeAppLog`，source=client）。读取入口：`omi logs`（新增命令，支持 `--level/--source/--event/--search/--limit/--verbose/-f/--json/--path/--clear`，**应用没运行或已闪退时直接读磁盘文件**）、控制 socket `logs`/`logsPath`/`logsClear`、RPC `getAppLogs`/`getAppLogInfo`/`clearAppLogs`。推理服务器 stdout 仍不进 app.log（逐行刷盘不值得），继续走 `omi server logs` 的内存缓冲。
+- **`omi-doctor` 排障技能 + 一条命令的现场采集**：`.agents/skills/omni-doctor/`（SKILL.md + 日志 / 接口 / 故障手册 / 升级判断四份参考）把"应用某个功能不好使"变成有据可依的流程：先采证 → 按错误原文对到成因 → 给出界面或命令级修复动作 → 配置与环境都无问题时按模板判定为代码缺陷并说明需要升级。**技能随应用打包内置**（`src/bun/builtin-skills/` → bundle 的 `bun/builtin-skills`），启动时由 `builtin-skills.ts` 播种进中央技能库（`~/.agents/skills`），装完应用就能在 Skills 中心看到、也能同步给 Claude Code / Cursor 等工具；播种规则是"绝不碰用户的东西"：同名技能不是我们装的就不动、用户改过的副本不再自动更新、用户删掉后记墓碑不复活（想恢复删掉中央库 `.omnistudio/builtin.json` 里的对应条目即可）。配套 `bun run --cwd apps/studio scripts/omni-diag.ts`（`--json` 供脚本）**只读**采集完整现场：版本 / 数据目录 / 磁盘、应用与推理服务器和网关状态、统一日志里的 warn/error（按子系统归类）、媒体服务端口占用者身份、数据库里最近失败的生图 / 生视频 / 语音 / 文档（含 `pages.error`）/ 基准 / 自动化 / Agent 事件、关键配置是否就位（密钥只报有无）。应用没运行也能跑——起不来和闪退才是它最重要的用途。
+
+### Fixed / 修复
+
+- **媒体直链一律 403（TTS 音频点预览报「音频文件不存在或已被删除」）**：`/<相对路径>` 这条路由（聊天图片 / 生成图 / OCR 页图 / TTS 音频共用，URL 由 `chatImageUrl` 拼成）把带前导 `/` 的 pathname 直接交给 `safeJoin`，而它按设计把绝对路径判为越界——**每一个**媒体请求都拿到 403，音频文件其实好好躺在 `images/audio/` 里；网关的 `/v1/audio/speech` 也走同一 URL 取字节，同样以「音频读取失败 (403)」收尾。现在先剥掉前导斜杠再拼接，目录请求改判 404（不再让 `Bun.file` 去读目录），并补上这条路由的回归测试（音频 / 图片 MIME、Range 206、缺失与越界）。
+- **媒体服务端口被占后不再静默降级（第二个实例整会话没有媒体服务）**：端口是固定的 19782，而 dev / canary / 正式版各有一份数据目录——两个实例同时开着时，后启动的那个只把 `EADDRINUSE` 吞进 `console.warn` 就再无下文：图片、音频预览全挂（而且端口上若是另一个数据目录的实例，同名文件还会取到别人的）。现在媒体服务会应答自己的身份（`/__omni/media-id`，返回数据目录指纹与 pid），后启动的实例据此区分三态并在顶栏亮出来：`serving`（自己服务）/ `shared`（端口上服务的是**同一份数据目录**的另一个实例，效果等同正常）/ `blocked`（另一个数据目录或不相干的软件占着，预览可能失败或串数据）。`blocked` 时每 5 秒重试绑定，对方退出即自动接管（不用重启应用），并落一条错误通知、恢复时补一条「已恢复」。
+- **技能 id 越界（安全）**：`skillId` 从 webview 一路走到文件系统，而上次加固只覆盖了 `deleteSkills`——同步 / 卸载 / copy 目标重推 / 读 `SKILL.md` / 「在文件夹中打开」都还是 `join(中央库, id)`，`../..` 能把它们变成对中央库外任意目录的软链替换、拷贝覆盖或递归删除。现在统一走 `centralSkillDir()`（单层目录名 + 库内限位），非法 id 在触碰文件系统之前就被拒。
+- **Agent 生图 / 生视频的参考图绕过读取授权（安全）**：`generate_image` 的参考图与 `generate_video` 的首帧只过了凭据黑名单，没过读取授权——被注入的提示词可以把工作区外任意图片（如 `~/Pictures/…`）暂存后送进（多为云端的）生图接口，等于把本地图片读出去。现在与 `read_file` 同一套策略：工作区外的路径按 `external_directory` 授权（弹窗可「始终允许」按目录记住并写入授权目录），工具侧再用 `assertReadable` 兜底；素材库引用（`#3` / `image#3` / `media_search` 给的 ref）与工作区内文件照旧。
+- **`omi` 找不到正在运行的应用（从源码 / `build/` 跑的 dev、canary 包）**：CLI 解析数据目录时只看 `/Applications`、`~/Applications` 里的安装包，其余一律回落到 `dev` —— 于是用 `build/canary-…/OmniStudio-canary.app` 跑应用时，`omi status` 说"应用未运行"、`omi logs` 读的是另一个 channel 的空日志（文档承诺的"自动探测最近用过的 channel"其实没实现）。现在命令先**真的 ping 每个候选 channel 的控制通道**，连得上的那个就是当前实例（残留 socket 骗不过 ping）；没有实例在跑时才按"最近用过 / 安装包 / dev"回退，`omi models`、`omi launch`、`omi backup` 这些读库兜底的命令也跟着指向正确的数据目录。
+- **另几处同类路径问题**：`discardChatImage` 遇到带前导斜杠的引用会静默失败、被丢弃的聊天附件一直留在磁盘上（现在先剥前导斜杠，与另存为 / 保存音频一致）；媒体服务的非法百分号编码过去会在 handler 里抛 `URIError` 变成 500（现在 400）；`/artifact/7//a.css` 这种多一个斜杠的地址会被误判越界（现在丢掉空段，与 `/workspace` 一致）。
+- **测试：媒体路由不再因「本机开着应用」而整段跳过**：19782 被本机实例占着时，路由冒烟测试会自己跳过——而媒体 403 恰恰是从这种"本地从没跑到"的路由漏出去的。现在测试进程用专用端口（`NODE_ENV=test` 下的 `OMNI_IMAGE_SERVER_PORT`，**仅测试生效**：webview 读不到主进程 env，正式运行必须所有进程共用同一常量），并新增端口争用用例（另一个数据目录 / 认不出身份 / 对方退出后自动接管 / 同一份数据目录共用）与技能 id、参考图授权的用例。另外 `chat.test.ts` 不再把整个 `./image-server` 换成假实现：`mock.module` 会跨文件泄漏且 `mock.restore()` 撤不掉，被换掉的模块让别的文件只能无声跳过（正是上面那条路由测试被跳过的原因）；它后半段本来就用 `...真实模块` 展开，说明作者也知道手写桩会随实现变味。
+
 ## [0.0.8-canary.0] - 2026-09-13
 
 ### Added / 新增

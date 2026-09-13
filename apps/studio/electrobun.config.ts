@@ -122,6 +122,11 @@ const copy: Record<string, string> = {
   ...nativeCopy,
   "src/bun/db/migrations": "bun/db/migrations",
   "src/bun/prompt-library/seed": "bun/prompt-library/seed",
+  // 内置技能（含 omni-doctor 排障技能）：启动时由 builtin-skills.ts 播种到中央技能库
+  // （~/.agents/skills）。**必须**与 `src/bun/builtin-skills.ts` 的
+  // `join(import.meta.dir, "builtin-skills")` 对齐 —— 打包后主进程被合成单个
+  // `bun/index.js`，import.meta.dir 变成 `bun/`，所以这里是 `bun/builtin-skills`。
+  "src/bun/builtin-skills": "bun/builtin-skills",
   // MLX 生图模型下载/校验脚本：mlx-gen.ts 以 import.meta.dir 同目录相对路径
   // 调用它；不打进 bundle 时主进程 spawpython 跑不到文件，python 以「文件
   // 不存在」退出（退出码 2），模型的 check/download 会全部误报失败。

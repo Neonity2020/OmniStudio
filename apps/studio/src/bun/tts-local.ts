@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, appendFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "fs";
 import path from "path";
 import { getSetting, updateSettings } from "./db/settings";
 import { getDataDir } from "./paths";
@@ -8,17 +8,8 @@ import {
   localModelPath,
 } from "./modelscope";
 import { AUDIOCPP_REPO, AUDIOCPP_ENGINE_VERSION } from "../shared/audiocpp";
+import { logEvent } from "./app-log";
 import type { MediaSource } from "./db/schema";
-
-/** 通话 TTS 调试日志（便于排查无声问题）。 */
-const CALL_TTS_LOG = "/tmp/omni-voicecall.log";
-function callTtsLog(line: string): void {
-  try {
-    appendFileSync(CALL_TTS_LOG, `[${new Date().toISOString()}] ${line}\n`);
-  } catch {
-    // 日志失败不影响主流程
-  }
-}
 import {
   getAudioBaseDir,
   insertVoiceRecord,
@@ -27,6 +18,11 @@ import {
   voiceRecordToRow,
   type VoiceRecordRow,
 } from "./voice";
+
+/** 通话 TTS 调试日志：进统一日志（`logs/app.log`，source=tts、event=voicecall）。 */
+function callTtsLog(line: string): void {
+  logEvent({ level: "debug", source: "tts", event: "voicecall", message: line });
+}
 
 /**
  * audio.cpp TTS 本地引擎。

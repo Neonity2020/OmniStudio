@@ -4,9 +4,11 @@ import { Type } from "typebox";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 
 import { getSetting } from "./db/settings";
+import { killProcessTree } from "./runtimes/proc";
 import { webSearch } from "./web-search";
 import { listKnowledgeBases, recall } from "./knowledge";
 import { audit } from "./skills/audit";
+import { logEvent } from "./app-log";
 
 /**
  * Agent 可使用的工具集。
@@ -45,6 +47,8 @@ export type ToolContext = {
   }) => Promise<string>;
   /** 登记产出物（agent.ts 注入）。 */
   recordArtifact?: (filePath: string, tool: string) => void;
+  /** bash 命令超时（毫秒），默认 120 秒；测试 / 特殊场景可以调小。 */
+  commandTimeoutMs?: number;
 };
 
 /**
@@ -65,6 +69,8 @@ export type BuiltTool = Omit<AgentTool<any>, "execute"> & {
 const MAX_OUTPUT_CHARS = 24_000;
 const MAX_FILE_CHARS = 60_000;
 const COMMAND_TIMEOUT_MS = 120_000;
+/** 直接子进程退出后，再给管道多少时间把末尾输出读干净。 */
+const PIPE_DRAIN_GRACE_MS = 200;
 
 /** 递归遍历时要跳过的目录（体量大且对任务无意义）。 */
 const IGNORED_DIRS = new Set([
@@ -200,6 +206,14 @@ export function textResult(text: string) {
 }
 
 export function errorResult(message: string) {
+  // Agent 的工具失败 = 用户看到的「它说做不了」：统一日志里留一份，
+  // 事后能回答"当时是哪个工具、报的什么"，而不是只能靠界面上的只言片语。
+  logEvent({
+    level: "warn",
+    source: "agent",
+    event: "agent.tool.failed",
+    message: message.slice(0, 500),
+  });
   return { content: [{ type: "text" as const, text: message }], details: { error: message } };
 }
 
@@ -494,31 +508,93 @@ function createBash(ctx: ToolContext): BuiltTool {
       // 执行过的每条命令都入库留痕：模型可能被注入内容诱导执行破坏性命令，
       // 出事后要能查到"谁在什么时候跑了什么"。
       audit("agent_shell", `${ctx.workspace}: ${params.command}`);
+      const timeoutMs = ctx.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
       try {
+        /**
+         * - `detached`：独立进程组，超时 / 停止时能整组杀掉。只杀 shell 的话，
+         *   命令自己拉起的后台进程会活下来，而它继承了 stdout —— 读输出的那一端
+         *   就永远等不到管道关闭（下面 readOutputBounded 说明了这个坑）。
+         * - `stdin: "ignore"`：别让 `pip install`、`git commit` 这类等输入的命令
+         *   把整轮 Agent 挂在这里。
+         */
         const proc = Bun.spawn([shell, "-c", params.command], {
           cwd: ctx.workspace,
           stdout: "pipe",
           stderr: "pipe",
+          stdin: "ignore",
+          detached: true,
           env: { ...process.env, PATH: augmentPath() },
         });
-        if (signal) {
-          signal.addEventListener("abort", () => proc.kill(), { once: true });
+        let killed: "timeout" | "abort" | null = null;
+        const killGroup = (reason: "timeout" | "abort") => {
+          if (killed) return;
+          killed = reason;
+          killProcessTree(proc, "SIGKILL");
+        };
+        const timer = setTimeout(() => killGroup("timeout"), timeoutMs);
+        const onAbort = () => killGroup("abort");
+        signal?.addEventListener("abort", onAbort, { once: true });
+        // 已经中断过时 addEventListener 不会再触发，补一次。
+        if (signal?.aborted) onAbort();
+        try {
+          const [stdout, stderr] = await Promise.all([
+            readOutputBounded(proc.stdout, proc.exited),
+            readOutputBounded(proc.stderr, proc.exited),
+          ]);
+          const exitCode = await proc.exited;
+          const combined = [stdout, stderr].filter((s) => s.trim().length > 0).join("\n");
+          const note =
+            killed === "timeout"
+              ? `\n[命令超过 ${Math.round(timeoutMs / 1000)} 秒，已连同子进程一起终止]`
+              : killed === "abort"
+                ? "\n[命令已随本次运行停止一并终止]"
+                : "";
+          return textResult(
+            `$ ${params.command}\n${combined || "(no output)"}\n[exit ${exitCode}]${note}`,
+          );
+        } finally {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
         }
-        const timer = setTimeout(() => proc.kill(), COMMAND_TIMEOUT_MS);
-        const [stdout, stderr, exitCode] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-          proc.exited,
-        ]).finally(() => clearTimeout(timer));
-        const combined = [stdout, stderr].filter((s) => s.trim().length > 0).join("\n");
-        return textResult(
-          `$ ${params.command}\n${combined || "(no output)"}\n[exit ${exitCode}]`,
-        );
       } catch (e) {
         return errorResult(`bash failed: ${e instanceof Error ? e.message : String(e)}`);
       }
     },
   };
+}
+
+/**
+ * 读子进程的输出，但**不以管道 EOF 为结束条件**。
+ *
+ * 命令里的 `xxx &`、后台服务会把 stdout 管道一并继承过去；直接
+ * `await new Response(proc.stdout).text()` 就会一直等不到 EOF —— 工具、乃至整轮
+ * Agent 都永久卡在这一行（超时定时器早就跑完了，救不回来），表现就是"一直在执行中"。
+ * 所以这里改成：直接子进程一退出，再宽限 PIPE_DRAIN_GRACE_MS 把已有输出读完就收工。
+ */
+async function readOutputBounded(
+  stream: ReadableStream<Uint8Array> | number | undefined,
+  exited: Promise<number>,
+): Promise<string> {
+  if (!stream || typeof stream === "number") return "";
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  const pump = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) text += decoder.decode(value, { stream: true });
+      }
+    } catch {
+      // 管道被取消 / 关闭：保留已经读到的部分
+    }
+  })();
+  await Promise.race([pump, exited.then(() => Bun.sleep(PIPE_DRAIN_GRACE_MS))]);
+  await reader.cancel().catch(() => {
+    // 已经结束的流
+  });
+  return text;
 }
 
 /**

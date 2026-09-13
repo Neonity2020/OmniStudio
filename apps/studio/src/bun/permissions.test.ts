@@ -102,6 +102,36 @@ describe("permissionRequestForTool", () => {
     }
   });
 
+  test("生图 / 生视频的参考图：工作区外的路径要授权，素材库引用与区内文件照旧", () => {
+    // 参考图会进（多半是云端的）生图接口：读工作区外的文件必须先按 external_directory 授权。
+    const outsideRef = permissionRequestForTool({
+      toolName: "generate_image",
+      args: { prompt: "x", reference: "/Users/me/Pictures/photo.png" },
+      workspace,
+    });
+    expect(outsideRef?.permission).toBe("external_directory");
+    expect(outsideRef?.pattern).toBe("/Users/me/Pictures/photo.png");
+
+    const videoRef = permissionRequestForTool({
+      toolName: "generate_video",
+      args: { prompt: "x", first_frame: "~/Pictures/first.png" },
+      workspace,
+    });
+    expect(videoRef?.permission).toBe("external_directory");
+    expect(videoRef?.pattern).toContain("Pictures/first.png");
+
+    // 素材库引用（#3 / image#3 / media_search 给的 gen/x.png）与工作区内文件都不经文件系统读，
+    // 仍然只走原来的 media 授权。
+    for (const reference of ["#3", "image#3", "gen/cat.png", "assets/local.png"]) {
+      const request = permissionRequestForTool({
+        toolName: "generate_image",
+        args: { prompt: "x", reference },
+        workspace,
+      });
+      expect(request?.permission).toBe("media");
+    }
+  });
+
   test("未知工具（MCP 等）按 mcp 权限处理，模式是工具名", () => {
     const request = permissionRequestForTool({
       toolName: "mcp__github__list_issues",

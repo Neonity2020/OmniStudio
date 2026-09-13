@@ -7,6 +7,15 @@ import { getSetting, updateSettings, getAllSettings, getActiveServerPort } from 
 import { listInstalledModels, setActiveModel, getActiveModelPath, slugModelFileName } from "./model-store";
 import { downloadManager } from "./download-manager";
 import { updateState } from "./updates";
+import {
+  appLogInfo,
+  appLogPath,
+  clearAppLog,
+  log,
+  logEvent,
+  readAppLogs,
+  type AppLogLevel,
+} from "./app-log";
 import * as Memory from "./memory";
 import * as CloudProviders from "./cloud-providers";
 import {
@@ -117,6 +126,29 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
       ServerManager.clearLogs();
       return { ok: true };
     }
+
+    // 统一应用日志：`omi logs` / `omi diag` / 外部诊断工具都走这里。
+    // 应用在跑时读内存 + 文件（含上次运行留下的记录），见 app-log.ts。
+    case "logs": {
+      const query = {
+        level: typeof payload.level === "string" ? (payload.level as AppLogLevel) : undefined,
+        source: typeof payload.source === "string" ? payload.source : undefined,
+        event: typeof payload.event === "string" ? payload.event : undefined,
+        search: typeof payload.search === "string" ? payload.search : undefined,
+        since: typeof payload.since === "number" ? payload.since : undefined,
+        limit: Number.isFinite(Number(payload.limit)) ? Number(payload.limit) : undefined,
+        oldestFirst: payload.oldestFirst === true,
+      };
+      return { ok: true, data: { entries: readAppLogs(query), path: appLogPath(), info: appLogInfo() } };
+    }
+
+    case "logsClear": {
+      const { cleared } = clearAppLog();
+      return { ok: true, data: { cleared } };
+    }
+
+    case "logsPath":
+      return { ok: true, data: appLogInfo() };
 
     case "launchCommand": {
       const modelOverride = typeof payload.model === "string" ? payload.model : undefined;
@@ -350,8 +382,16 @@ export async function startControlServer(): Promise<void> {
       },
     });
     chmodSync(sockPath, 0o600);
+    log.info({ source: "app", event: "control.listening", message: `控制通道已监听：${sockPath}` });
     console.log(`Control server listening at ${sockPath}`);
   } catch (err) {
+    logEvent({
+      level: "error",
+      source: "app",
+      event: "control.start.failed",
+      message: err instanceof Error ? err.message : String(err),
+      detail: { socket: sockPath, error: err },
+    });
     console.error("Failed to start control server:", err);
   }
 }

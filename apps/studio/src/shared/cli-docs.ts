@@ -112,10 +112,12 @@ export const CLI_SECTIONS: CliSection[] = [
       {
         cmd: "OMNI_DATA_DIR=<数据目录> omi models",
         zh:
-          "默认自动探测最新使用过的 channel 数据目录（macOS：~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>）。" +
+          "默认自动探测数据目录：先找正在运行的实例（真的 ping 控制通道，从源码 / build/ 里跑的 dev、canary 包也算），" +
+          "没有则取最近用过的 channel（macOS：~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>）。" +
           "无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。",
         en:
-          "By default omi auto-detects the most recently used channel data directory (macOS: ~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>). " +
+          "The data directory is auto-detected: first the running instance (the control channel is actually pinged, so dev/canary builds run from source or build/ count too), " +
+          "otherwise the most recently used channel (macOS: ~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>). " +
           "For headless setups or multiple profiles, point OMNI_DATA_DIR at a directory; OMNI_DB_PATH overrides the database file alone.",
       },
     ],
@@ -161,6 +163,32 @@ export const CLI_SECTIONS: CliSection[] = [
           { cmd: "omi server list", zh: "可用引擎清单（● 为活动引擎）。", en: "Engine list with ● marking the active one." },
           { cmd: "omi server info", zh: "引擎 / 状态 / PID / 地址。", en: "Engine, status, PID and address." },
           { cmd: "omi server logs", zh: "最近 200 行服务器日志，排错先看这里。", en: "Last 200 log lines — the first place to look when debugging." },
+        ],
+      },
+      {
+        cmd: "omi logs [--level] [--source] [--search] [-f] [--json]",
+        zh:
+          "查看统一应用日志：生图 / 生视频 / 语音 / OCR / 推理服务器 / 下载 / 网关 / Agent 等子系统的失败" +
+          "与关键事件都记在同一份 logs/app.log 里（逐行 JSONL，2MB 轮转，密钥自动脱敏）。" +
+          "应用在运行时读内存 + 文件；应用没运行或已闪退时直接读磁盘 —— 排查「应用起不来」同样可用。",
+        en:
+          "Read the unified app log: failures and key events from image/video/TTS/ASR/OCR, the inference server, downloads, the gateway and the Agent all land in one logs/app.log (JSONL, 2 MB rotation, secrets redacted). " +
+          "Reads memory + file while the app runs, and the file alone when it is down — so it still works for crash triage.",
+        notes: [
+          {
+            zh: "按子系统过滤：--source image | video | tts | asr | ocr | server | agent | download | gateway | client | app …",
+            en: "Filter by subsystem: --source image | video | tts | asr | ocr | server | agent | download | gateway | client | app …",
+          },
+          {
+            zh: "--verbose 打印结构化上下文（后端、模型、地址、堆栈）；-f 持续跟踪，让用户复现时实时看。",
+            en: "--verbose prints structured context (backend, model, address, stack); -f follows live while the user reproduces.",
+          },
+        ],
+        examples: [
+          { cmd: "omi logs --level error --limit 50 -v", zh: "最近 50 条错误及完整上下文。", en: "The last 50 errors with full context." },
+          { cmd: "omi logs --source image --verbose", zh: "生图失败的原因（后端 / 模型 / 提示词）。", en: "Why image generation failed (backend, model, prompt)." },
+          { cmd: "omi logs -f --source agent", zh: "跟踪 Agent 运行日志。", en: "Follow the Agent log live." },
+          { cmd: "omi logs --json", zh: "输出 JSON，交给脚本或 Agent 分析。", en: "JSON output for scripts or agents." },
         ],
       },
     ],

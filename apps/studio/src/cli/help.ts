@@ -28,6 +28,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
   backup <子命令>      全局备份 / 恢复：list / create / inspect / restore
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
+  logs                 查看统一应用日志（各子系统失败与关键事件都在这儿）
   benchmark [model]    跑基准测速（本地引擎 / 云端 API），结果入库
   install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
   guide                打印完整使用手册（--md / --json / --lang en）
@@ -212,6 +213,35 @@ actions:
   logs        打印服务器日志尾部（最近 200 行）
 
 子命令帮助：omi help server <action>`,
+  logs: `查看统一应用日志 —— 生图 / 生视频 / 语音 / OCR / 推理服务器 / 下载 / 网关 /
+Agent 等子系统的失败与关键事件都记在同一份 app.log 里。
+
+用法：omi logs [options]
+
+选项：
+  --limit <n>       显示最近 n 条（默认 50）
+  --level <l>       只看该级别及以上：debug | info | warn | error
+  --source <s>      只看某个子系统：image | video | tts | asr | ocr | server |
+                    agent | download | gateway | media-server | client | app ...
+  --search <text>   消息 / 事件名 / 上下文包含该文本（报错原文、builtin…）
+  --event <name>    事件名包含该子串（如 generate.failed）
+  --verbose         额外打印结构化上下文（detail）；注意 -v 是全局的 --version
+  -f, --follow      持续跟踪（等同 tail -f；应用重启也不断）
+  --json            输出 JSON 数组（给脚本/Agent 用）
+  --path            只打印日志文件路径
+  --clear           清空当前日志（保留已轮转的历史文件）
+
+说明：
+  应用在运行时通过控制通道读取（含本次运行的全部现场）；应用没运行或已闪退时
+  直接读磁盘上的 <数据目录>/logs/app.log —— 排查"起不来"这类问题同样可用。
+  日志逐行 JSONL，2MB 轮转，保留最近 5 份（app-<时间戳>.log）。
+
+示例：
+  omi logs                         最近 50 条
+  omi logs --level error --limit 20
+  omi logs --source image --verbose       生图失败及原因
+  omi logs -f --source agent       跟踪 Agent 日志
+  omi logs --json | jq '.[].message'`,
   backup: `全局备份 / 恢复：把应用设置与云端模型、本地技能、提示词、聊天记录、
 记忆库、生成的音频 / 图片 / 视频打包成一个文件，换机或重装后恢复。
 

@@ -338,7 +338,7 @@ export function AgentAssistantMessage({
           {message.reasoning ? (
             <ReasoningRow reasoning={message.reasoning} streaming={streaming && !message.content} />
           ) : null}
-          <AgentEventTimeline events={events} />
+          <AgentEventTimeline events={events} live={streaming} />
           {waiting && <WorkingRow label={t("agent.working")} hint={t("agent.working.slow")} />}
         </div>
       )}

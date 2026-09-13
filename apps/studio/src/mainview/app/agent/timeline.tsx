@@ -3,6 +3,7 @@ import {
   AlertTriangleIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
+  CircleSlashIcon,
   FileSearchIcon,
   GlobeIcon,
   InfoIcon,
@@ -21,18 +22,8 @@ import type { LucideIcon } from "lucide-react";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { InlinePermissionCard, InlineQuestionCard } from "./inline-interactions";
+import { buildTimelineItems } from "./timeline-model";
 import type { AgentEventRow } from "../../../bun/agent";
-
-/** 从事件 args 里取交互 id（授权 / 提问的请求与结果都带）。 */
-function parseEventId(event: AgentEventRow): string | undefined {
-  if (!event.args) return undefined;
-  try {
-    const parsed = JSON.parse(event.args) as { id?: string };
-    return typeof parsed?.id === "string" ? parsed.id : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function parseArgs(args: string | null): Record<string, unknown> {
   if (!args) return {};
@@ -265,11 +256,16 @@ function ToolDetail({
 /**
  * 单条工具调用：一行「图标 + 动作名 + 关键参数」，点开看命令原文 / diff / 输出。
  * 默认收起，行内不画边框 —— 一屏能看完整条轨迹，而不是被卡片堆满。
+ *
+ * `live` = 这一轮还在跑：只有还在跑的时候才转圈。跑完（或会话早就结束）却因为
+ * 事件没配到结果的行，展示成"没有结果记录"，绝不能一直转圈 —— 那会让人以为
+ * 任务还在执行。
  */
-function ToolRow({ start, end }: { start: AgentEventRow; end?: AgentEventRow }) {
+function ToolRow({ start, end, live }: { start: AgentEventRow; end?: AgentEventRow; live: boolean }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const pending = !end;
+  const pending = !end && live;
+  const missing = !end && !live;
   const failed = end?.isError === 1;
   const output = end?.output ?? "";
   const toolName = start.toolName ?? "";
@@ -295,6 +291,8 @@ function ToolRow({ start, end }: { start: AgentEventRow; end?: AgentEventRow }) 
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : failed ? (
             <AlertTriangleIcon className="size-3.5 text-destructive" />
+          ) : missing ? (
+            <CircleSlashIcon className="size-3.5 text-muted-foreground/60" />
           ) : (
             <Icon className="size-3.5" />
           )}
@@ -306,6 +304,11 @@ function ToolRow({ start, end }: { start: AgentEventRow; end?: AgentEventRow }) 
           </span>
         )}
         {!meta.detail && <span className="min-w-0 flex-1" />}
+        {missing && (
+          <span className="shrink-0 text-[10px] text-muted-foreground/70">
+            {t("agent.tool.interrupted")}
+          </span>
+        )}
         {summary && (summary.added > 0 || summary.removed > 0) && (
           <span className="shrink-0 font-mono text-[10px] tabular-nums">
             <span className="text-emerald-600">+{summary.added}</span>
@@ -355,15 +358,17 @@ function SubagentGroup({
   start,
   end,
   children,
+  live,
 }: {
   start: AgentEventRow;
   end?: AgentEventRow;
   children: AgentEventRow[];
+  live: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const failed = end?.isError === 1;
-  const running = !end;
+  const running = !end && live;
   const toolCount = children.filter((event) => event.kind === "tool_start").length;
 
   return (
@@ -405,7 +410,12 @@ function SubagentGroup({
       {open && (
         <div className="mt-0.5 mb-1 ml-3 space-y-0.5 border-l border-border/60 pl-2">
           {children.map((event) => (
-            <ToolRow key={event.id} start={event} end={event.kind === "tool_end" ? event : undefined} />
+            <ToolRow
+              key={event.id}
+              start={event}
+              end={event.kind === "tool_end" ? event : undefined}
+              live={live}
+            />
           ))}
           {end?.output && (
             <pre className="max-h-40 overflow-auto px-2 py-1 text-[11px] break-all whitespace-pre-wrap text-muted-foreground">
@@ -420,81 +430,18 @@ function SubagentGroup({
 
 /**
  * 把一次运行的事件流渲染成时间线：
- * 普通工具调用两两配对成卡片，子智能体的调用折叠进 SubagentGroup，
- * 状态 / 错误单独成行。
+ * 配对逻辑在 timeline-model.ts（纯函数，有单测），这里只负责画。
+ * `live` = 这一轮还在跑（只有最后一条消息在流式时才是 true），
+ * 用来区分"正在执行"和"没有结果记录"。
  */
-export function AgentEventTimeline({ events }: { events: AgentEventRow[] }) {
-  const items = useMemo(() => {
-    const rendered: (
-      | { type: "tool"; start: AgentEventRow; end?: AgentEventRow }
-      | { type: "status"; event: AgentEventRow }
-      | { type: "permission"; ask: AgentEventRow; settle?: AgentEventRow }
-      | { type: "question"; ask: AgentEventRow; settle?: AgentEventRow }
-      | { type: "subagent"; start: AgentEventRow; end?: AgentEventRow; children: AgentEventRow[] }
-    )[] = [];
-
-    // 子智能体事件按 subagentId 归类，主 Agent 的事件按顺序配对。
-    const subagents = new Map<string, { start?: AgentEventRow; end?: AgentEventRow; children: AgentEventRow[] }>();
-    const subagentOrder: string[] = [];
-    for (const event of events) {
-      if (event.subagentId) {
-        const bucket = subagents.get(event.subagentId) ?? { children: [] };
-        if (event.kind === "subagent_start") bucket.start = event;
-        else if (event.kind === "subagent_end") bucket.end = event;
-        else bucket.children.push(event);
-        subagents.set(event.subagentId, bucket);
-        if (!subagentOrder.includes(event.subagentId)) subagentOrder.push(event.subagentId);
-      }
-    }
-
-    // 授权 / 提问：请求事件与结果事件按 id 配对（两条都落在库里，回看历史也在）。
-    const settleByRequestId = new Map<string, AgentEventRow>();
-    const requestIds = new Set<string>();
-    for (const event of events) {
-      if (event.toolName === "permission_request" || event.toolName === "question_request") {
-        const id = parseEventId(event);
-        if (id) requestIds.add(id);
-      } else if (event.toolName === "permission" || event.toolName === "question") {
-        const id = parseEventId(event);
-        if (id) settleByRequestId.set(id, event);
-      }
-    }
-
-    for (const event of events) {
-      if (event.subagentId) continue;
-      if (event.kind === "tool_start") {
-        rendered.push({ type: "tool", start: event });
-      } else if (event.kind === "tool_end") {
-        const last = rendered[rendered.length - 1];
-        if (last?.type === "tool" && !last.end && last.start.toolName === event.toolName) {
-          last.end = event;
-        } else {
-          rendered.push({ type: "tool", start: event, end: event });
-        }
-      } else if (event.toolName === "permission_request" || event.toolName === "question_request") {
-        const id = parseEventId(event);
-        rendered.push({
-          type: event.toolName === "permission_request" ? "permission" : "question",
-          ask: event,
-          settle: id ? settleByRequestId.get(id) : undefined,
-        });
-      } else if (event.toolName === "permission" || event.toolName === "question") {
-        // 结果事件已经被请求卡片消费掉了：没有对应请求（理论上不会）才单独显示。
-        const id = parseEventId(event);
-        if (!id || !requestIds.has(id)) rendered.push({ type: "status", event });
-      } else {
-        rendered.push({ type: "status", event });
-      }
-    }
-
-    for (const id of subagentOrder) {
-      const bucket = subagents.get(id)!;
-      if (!bucket.start) continue;
-      rendered.push({ type: "subagent", start: bucket.start, end: bucket.end, children: bucket.children });
-    }
-
-    return rendered;
-  }, [events]);
+export function AgentEventTimeline({
+  events,
+  live = false,
+}: {
+  events: AgentEventRow[];
+  live?: boolean;
+}) {
+  const items = useMemo(() => buildTimelineItems(events), [events]);
 
   if (items.length === 0) return null;
 
@@ -502,7 +449,7 @@ export function AgentEventTimeline({ events }: { events: AgentEventRow[] }) {
     <div className="flex min-w-0 flex-col gap-0.5">
       {items.map((item, index) => {
         if (item.type === "tool") {
-          return <ToolRow key={`${item.start.id}-${index}`} start={item.start} end={item.end} />;
+          return <ToolRow key={`${item.start.id}-${index}`} start={item.start} end={item.end} live={live} />;
         }
         if (item.type === "status") {
           return <StatusLine key={`${item.event.id}-${index}`} event={item.event} />;
@@ -526,7 +473,7 @@ export function AgentEventTimeline({ events }: { events: AgentEventRow[] }) {
           );
         }
         return (
-          <SubagentGroup key={`${item.start.id}-${index}`} start={item.start} end={item.end}>
+          <SubagentGroup key={`${item.start.id}-${index}`} start={item.start} end={item.end} live={live}>
             {item.children}
           </SubagentGroup>
         );

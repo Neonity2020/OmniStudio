@@ -60,6 +60,9 @@ const rpc = Electroview.defineRPC<AppRPC>({
       serverStatusChanged: ({ status }) => {
         useServerStore.getState().setStatus(status);
       },
+      mediaStatusChanged: ({ status }) => {
+        useServerStore.getState().setMediaStatus(status);
+      },
       servedModelsChanged: (snapshot) => {
         useServedStore.getState().setSnapshot(snapshot);
         // 对话模型选择器只列已启动实例：启停 / 就绪后要立刻反映到下拉框。

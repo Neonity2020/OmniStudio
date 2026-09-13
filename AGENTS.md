@@ -48,6 +48,24 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 - Image regions cropped from source using bounding boxes, stored as WebP
 - Streaming pushes are throttled (chat 40ms, download progress 400ms, logs 80ms) because
   every event re-renders the webview — flush before emitting a terminal event
+- All media (chat images, generated images, OCR page images, TTS/ASR audio, artifact and
+  workspace previews) is served by the image server on a **fixed** loopback port
+  (`imageServerPort()`, 127.0.0.1:19782). The webview cannot read the main process env, so
+  every process must keep using that constant — a per-instance port would silently produce
+  URLs pointing at nothing. When the port is taken, `startImageServer()` probes the holder's
+  identity (`/__omni/media-id`) instead of degrading silently: same data dir = shared
+  (harmless), different data dir = blocked (previews would hit someone else's files). The
+  state goes to the top bar, and binding is retried every 5s so the app takes over once the
+  other instance quits
+- **Every subsystem failure goes to one log**: `src/bun/app-log.ts` writes event-level records
+  (JSONL, `<dataDir>/logs/app.log`, 2MB rotation, secrets redacted) for image / video / TTS /
+  ASR / OCR, the inference server, downloads, the gateway, the Agent and webview-side errors.
+  Read it with `omi logs` (falls back to the file when the app is down — crash triage),
+  the control socket `logs` command, or RPC `getAppLogs`. Inference server stdout/stderr is
+  deliberately **not** in there (per-instance 200k in-memory buffer, `omi server logs`).
+  A failure path without a `logEvent` call is a bug: the next person cannot diagnose it.
+  Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
+  `bun run --cwd apps/studio scripts/omni-diag.ts`
 
 ## Hard Rules
 
@@ -75,7 +93,11 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 - `apps/studio/bin/omi.ts` + `src/cli/*` is a standalone Bun CLI that talks to the
   running app over a Unix socket (`<dataDir>/omni-control.sock`, served by
   `src/bun/control-server.ts`). Commands: `start/stop/restart/serve/launch/memory/backup/model/
-  cloud/models/model-info/status/server/install/guide/version/update`.
+  cloud/models/model-info/status/server/logs/install/guide/version/update`.
+  Data-dir resolution (`src/cli/data-dir.ts`) pings every channel's control socket and talks to
+  whichever instance actually answers (dev/canary builds run from source or `build/` count too);
+  only when nothing is running does it fall back to the most recently used channel. Checking a
+  socket *file* is not enough — crashed instances leave them behind.
 - When the app is not running, read-only data access falls back to direct
   SQLite imports (`src/cli/db.ts`) — it sets `OMNI_DATA_DIR`/`OMNI_DB_PATH` first.
 - Install once with `cd apps/studio && bun link` to expose the `omi` command.

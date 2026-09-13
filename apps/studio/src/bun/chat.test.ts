@@ -41,23 +41,12 @@ mock.module("./db/settings", () => {
     ENGINE_EXTRA_ARGS_KEYS: { "llama.cpp": "", vllm: "", sglang: "", mlx: "" },
   };
 });
-mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
-// 展开真实模块再覆盖：只改本文件需要的几个函数，其余导出保持真实实现。
-// 同一批测试共享 mock 注册表，image-server.route.test 也会 import ./image-server ——
-// 手写全量桩会随真实实现演进变味（例如 getPromptLibraryMediaBase 曾经少一层路径，
-// 桩里也照抄了旧逻辑，于是一个文件里的 bug 被另一个文件的桩隐藏）。
-const realImageServer = await import("./image-server");
-mock.module("./image-server", () => ({
-  ...realImageServer,
-  chatImageDir: () => "/tmp",
-  getImagesBaseDir: () => "/tmp",
-  getPromptLibraryCacheBase: () => join("/tmp", `pl-cache-${process.pid}`),
-  promptLibraryLocalUrl: (rel: string) => `http://localhost:1/prompt-library/${rel}`,
-  startImageServer: () => {
-    // 本文件不需要起图片服务（chat 只用到目录工具函数）。
-    throw new Error("image-server mocked: no server in chat tests");
-  },
-}));
+const realChatModel = await import("./chat-model");
+mock.module("./chat-model", () => ({ ...realChatModel, getChatModelName: () => "test-model" }));
+// 不 mock ./image-server：bun 的 mock.module 会跨文件泄漏、且 mock.restore() 撤不掉，
+// 别的文件（image-server.route.test）拿到被换掉的模块就只能无声跳过——media 403 正是
+// 从"本地从没跑到"的路由漏出去的。本文件只用到目录工具函数，真实实现（数据目录已由
+// test-preload 隔离）本来就是安全的，起服务也是显式调用才会发生。
 mock.module("./stats", () => ({ recordUsage: () => {}, markServerStarted: () => {} }));
 mock.module("./server-manager", () => ({
   getStatus: () => "running",

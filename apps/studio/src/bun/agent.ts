@@ -40,7 +40,9 @@ import {
   onQuestionSettled,
 } from "./agent-interactions";
 import { compactMessages } from "./agent-compaction";
+import { classifyTurnOutcome } from "./agent-outcome";
 import { notify } from "./notifications";
+import { logEvent } from "./app-log";
 import * as Chat from "./chat";
 
 /** Agent 的三种工作模式（对齐 PI-Desktop 的 Agent / Plan / Goal）。 */
@@ -1198,6 +1200,16 @@ function resultText(result: unknown): string {
   return JSON.stringify(result);
 }
 
+/** 最后一条助手消息的结束原因：pi-agent-core 用它表达"这一轮出错了 / 被中断了"。 */
+function lastAssistantStopReason(agent: Agent): string | undefined {
+  const messages = agent.state.messages as { role?: string; stopReason?: string }[];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role === "assistant") return message.stopReason;
+  }
+  return undefined;
+}
+
 /**
  * 跑一次 Agent：把用户消息交给 Pi Agent 的工具循环，直到它给出最终回答
  * （或达到步数上限 / 被用户中断）。流式内容复用 chat 的 chunk/done 通道，
@@ -1423,6 +1435,69 @@ export async function runAgentTurn(opts: {
     const recall = await memoryRecallSection(content, { scope: workspace }).catch(() => null);
 
     await agent.prompt(withAttachments(content, files, imagePaths, recall));
+
+    /**
+     * 认领"被吞掉的"收尾状态。
+     *
+     * pi-agent-core 的契约是失败不抛异常：模型请求出错 / 被中断都会变成一条
+     * stopReason=error|aborted 的助手消息，prompt() 照常返回（handleRunFailure）。
+     * 也就是说一次失败的请求，从外面看和"答完了、只是什么都没说"完全一样 ——
+     * 所以必须在回合结束时主动判一次，否则用户看到的就是「跑了一半、没有产出、
+     * 也没有任何提示」，只会以为它卡住了。
+     */
+    const outcome = classifyTurnOutcome({
+      errorMessage: session.agent.state.errorMessage,
+      lastStopReason: lastAssistantStopReason(agent),
+      hasText: fullText.trim().length > 0,
+      reachedStepLimit: step >= maxSteps,
+    });
+    if (outcome.kind === "aborted") {
+      aborted = true;
+      fullText = fullText ? `${fullText}\n\n_（已停止）_` : "_（已停止）_";
+      recordEvent({
+        conversationId,
+        messageId: assistantId,
+        kind: "status",
+        output: "本轮已被停止。",
+      });
+    } else if (outcome.kind === "error") {
+      recordEvent({
+        conversationId,
+        messageId: assistantId,
+        kind: "error",
+        output: outcome.detail,
+      });
+      // 这一轮是"失败被编码成一条空助手消息"的形态（见 agent-outcome.ts），
+      // 界面只有 ⚠️ 一行；把完整原因与模型信息落到统一日志，便于定位到具体后端。
+      logEvent({
+        level: "error",
+        source: "agent",
+        event: "agent.turn.error",
+        message: outcome.detail,
+        detail: { conversationId, model: modelName, mode, workspace },
+      });
+      fullText = fullText ? `${fullText}\n\n⚠️ ${outcome.detail}` : `⚠️ ${outcome.detail}`;
+    } else if (outcome.kind === "empty") {
+      // 模型这一轮什么都没答（没有正文，也没继续调工具）：补一句说明，
+      // 否则界面上就是一个空白气泡 —— 用户看到的是"跑完了但没有结果"。
+      const note =
+        `模型（${modelName}）本轮没有给出正文，也没有再调用工具就结束了。` +
+        "可以直接重试，或在控制台确认推理服务 / 模型是否正常。";
+      recordEvent({
+        conversationId,
+        messageId: assistantId,
+        kind: "status",
+        output: note,
+      });
+      logEvent({
+        level: "warn",
+        source: "agent",
+        event: "agent.turn.empty",
+        message: note,
+        detail: { conversationId, model: modelName, mode, workspace },
+      });
+      fullText = `⚠️ ${note}`;
+    }
 
     if (step >= maxSteps) {
       recordEvent({

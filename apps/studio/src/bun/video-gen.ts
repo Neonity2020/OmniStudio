@@ -8,6 +8,7 @@ import { videoRecords, type MediaSource } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
+import { logEvent } from "./app-log";
 
 /**
  * AI 视频生成模块（参照 ./image-gen.ts 与 OmniLabs 的视频服务实现）。
@@ -727,6 +728,26 @@ export async function submitVideoGeneration(
     return { record: toRow(record) };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    logEvent({
+      level: "error",
+      source: "video",
+      event: "video.submit.failed",
+      message,
+      detail: {
+        backend: cfg.backend,
+        model:
+          (cfg.backend === "seedance"
+            ? cfg.seedanceModel
+            : cfg.backend === "minimax"
+              ? cfg.minimaxModel
+              : cfg.comfyCkpt) || null,
+        base: cfg.comfyBase || (cfg.backend === "seedance" ? cfg.seedanceBase : cfg.minimaxBase) || null,
+        hasApiKey: Boolean(cfg.backend === "seedance" ? cfg.seedanceKey : cfg.minimaxKey),
+        prompt: (params.prompt ?? "").slice(0, 300),
+        firstFrame: params.firstFrameRef ?? null,
+        error: e,
+      },
+    });
     insertVideoRecord({ ...common, status: "failed", error: message });
     return { error: message };
   }
@@ -910,6 +931,13 @@ export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]>
         status: "failed",
         error: "生成超时（超过 30 分钟），可重试或检查服务状态",
       });
+      logEvent({
+        level: "error",
+        source: "video",
+        event: "video.poll.timeout",
+        message: "视频生成超时（超过 30 分钟）",
+        detail: { id: row.id, backend: row.backend, taskId: row.taskId, prompt: row.prompt?.slice(0, 200) },
+      });
       out.push(toRow(updated));
       continue;
     }
@@ -929,6 +957,13 @@ export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]>
       }
       if (result.failed) {
         const updated = updateVideoRecord(row.id, { status: "failed", error: result.failed });
+        logEvent({
+          level: "error",
+          source: "video",
+          event: "video.poll.failed",
+          message: result.failed,
+          detail: { id: row.id, backend: row.backend, taskId: row.taskId },
+        });
         out.push(toRow(updated));
         continue;
       }
@@ -939,6 +974,14 @@ export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]>
       out.push(toRow(updated));
     } catch (e) {
       // 下载失败等瞬时错误：保留 processing，下一轮重试（超时兜底在上面）。
+      // 记 debug 而不是 error —— 这条每 5 秒可能重复一次，重试成功就没事了。
+      logEvent({
+        level: "debug",
+        source: "video",
+        event: "video.poll.retry",
+        message: e instanceof Error ? e.message : String(e),
+        detail: { id: row.id, backend: row.backend, taskId: row.taskId },
+      });
       out.push(toRow(row, null, e instanceof Error ? e.message : String(e)));
     }
   }

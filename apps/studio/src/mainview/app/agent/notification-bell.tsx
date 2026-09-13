@@ -5,6 +5,7 @@ import {
   BellRingIcon,
   CircleAlertIcon,
   CircleCheckIcon,
+  InfoIcon,
   ShieldCheckIcon,
   SparklesIcon,
 } from "lucide-react";
@@ -35,6 +36,8 @@ function kindIcon(kind: AppNotification["kind"]) {
       return <CircleAlertIcon className="size-3.5 text-destructive" />;
     case "automation":
       return <SparklesIcon className="size-3.5 text-primary" />;
+    case "info":
+      return <InfoIcon className="size-3.5 text-muted-foreground" />;
     default:
       return <CircleCheckIcon className="size-3.5 text-emerald-600" />;
   }

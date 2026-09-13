@@ -1,7 +1,7 @@
 import { BrowserView, BrowserWindow, RPCSchema, Updater, Utils } from "electrobun/bun";
 import { asc, eq, desc, like, sql, inArray } from "drizzle-orm";
 import path from "path";
-import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs";
+import { existsSync, rmSync, copyFileSync, mkdirSync } from "fs";
 
 import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
@@ -12,7 +12,12 @@ import {
   registerWorkspaceRoot,
   setArtifactResolver,
 } from "../image-server";
-import { chatImageDir, chatImageUrl } from "../image-server";
+import {
+  chatImageDir,
+  chatImageUrl,
+  getMediaServerStatus,
+  type MediaServerStatus,
+} from "../image-server";
 import { artifactPreviewUrl } from "../../shared/server-info";
 import { safeBaseName, safeJoin } from "../path-safety";
 import { processDocumentPages } from "../queue";
@@ -20,6 +25,17 @@ import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
 import * as ReleaseCheck from "../release-check";
 import type { ReleaseCheckResult } from "../../shared/release";
 import { getUserDataDir } from "../paths";
+import {
+  appLogInfo,
+  appLogPath,
+  clearAppLog,
+  logEvent,
+  readAppLogs,
+  type AppLogEntry,
+  type AppLogLevel,
+  type AppLogQuery,
+  type AppLogSource,
+} from "../app-log";
 import * as ServerManager from "../server-manager";
 import type { ServerStatus } from "../server-manager";
 import * as Served from "../model-servers";
@@ -343,6 +359,28 @@ export type AppRPC = {
       };
       clearServedModelLogs: {
         params: { id: string };
+        response: { ok: boolean };
+      };
+      /**
+       * 统一应用日志（`<数据目录>/logs/app.log`）—— 各子系统（生图 / 生视频 /
+       * 语音 / OCR / 服务器 / 下载 / 网关 …）的失败与关键事件都记在这里。
+       * 排查任何「某个功能不好使」的问题，先看它。
+       */
+      getAppLogs: {
+        params: AppLogQuery | undefined;
+        response: { entries: AppLogEntry[]; path: string };
+      };
+      getAppLogInfo: {
+        params: undefined;
+        response: ReturnType<typeof appLogInfo>;
+      };
+      clearAppLogs: {
+        params: undefined;
+        response: { ok: boolean; cleared: number };
+      };
+      /** webview 侧上报（渲染异常、未捕获错误）：写进同一份 app.log，source=client。 */
+      writeAppLog: {
+        params: { level?: AppLogLevel; source?: string; event: string; message: string; detail?: unknown };
         response: { ok: boolean };
       };
       getGatewayStatus: {
@@ -2100,6 +2138,11 @@ export type AppRPC = {
       documentChanged: { id: number };
       serverLog: { text: string };
       serverStatusChanged: { status: ServerStatus };
+      /**
+       * 媒体服务状态（聊天图片 / 生成图 / OCR 页图 / TTS 音频都靠它取文件）：
+       * 端口被另一个数据目录的实例占着时，预览会取不到或取错，顶栏要如实显示。
+       */
+      mediaStatusChanged: { status: MediaServerStatus };
       /** 已启动模型列表变化（启动 / 就绪 / 出错 / 卸载）：整份快照推送。 */
       servedModelsChanged: ServedModelsSnapshot;
       /** 某个已启动模型的日志增量（按 id 区分，控制台里各自一个日志窗口）。 */
@@ -2344,6 +2387,31 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       clearServedModelLogs: async ({ id }) => {
         Served.clearServedModelLogs(id);
+        return { ok: true };
+      },
+
+      getAppLogs: async (query) => {
+        return { entries: readAppLogs(query ?? {}), path: appLogPath() };
+      },
+
+      getAppLogInfo: async () => {
+        return appLogInfo();
+      },
+
+      clearAppLogs: async () => {
+        const { cleared } = clearAppLog();
+        return { ok: true, cleared };
+      },
+
+      writeAppLog: async ({ level, source, event, message, detail }) => {
+        // source 由 webview 决定（默认 client）；主进程侧的类型联合只用于内部调用。
+        logEvent({
+          level: level ?? "error",
+          source: (source ?? "client") as AppLogSource,
+          event,
+          message,
+          detail,
+        });
         return { ok: true };
       },
 
@@ -3171,11 +3239,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
       voicecallDebug: async ({ line }) => {
-        try {
-          appendFileSync("/tmp/omni-voicecall.log", `[${new Date().toISOString()}] [frontend] ${line}\n`);
-        } catch {
-          // 日志失败忽略
-        }
+        logEvent({ level: "debug", source: "client", event: "voicecall", message: line });
         return { ok: true };
       },
       voicecallTestRealtime: async (params) => {
@@ -3215,8 +3279,11 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       discardChatImage: async ({ ref }) => {
         const base = getImagesBaseDir();
-        const resolved = path.resolve(base, ref);
-        if (!resolved.startsWith(base + path.sep) || !resolved.includes(`${path.sep}chat${path.sep}`)) {
+        // ref 也可能带前导 "/" 过来（与另存为 / 保存音频同一套写法）：先剥掉再解析，
+        // 否则合法引用会被当成越界，被丢弃的附件就一直留在磁盘上。
+        const rel = ref.trim().replace(/^\/+/, "");
+        const resolved = path.resolve(base, rel);
+        if (!rel || !resolved.startsWith(base + path.sep) || !resolved.includes(`${path.sep}chat${path.sep}`)) {
           return { ok: false };
         }
         rmSync(resolved, { force: true });
@@ -3381,11 +3448,33 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       runTTS: async (params) => {
-        return { record: await Voice.runTTS(params) };
+        try {
+          return { record: await Voice.runTTS(params) };
+        } catch (e) {
+          logEvent({
+            level: "error",
+            source: "tts",
+            event: "tts.run.failed",
+            message: e instanceof Error ? e.message : String(e),
+            detail: { entry: "runTTS", params: { text: params?.text?.slice(0, 200) }, error: e },
+          });
+          throw e;
+        }
       },
 
       runASR: async (params) => {
-        return { record: await Voice.runASR(params) };
+        try {
+          return { record: await Voice.runASR(params) };
+        } catch (e) {
+          logEvent({
+            level: "error",
+            source: "asr",
+            event: "asr.run.failed",
+            message: e instanceof Error ? e.message : String(e),
+            detail: { entry: "runASR", error: e },
+          });
+          throw e;
+        }
       },
 
       listVoiceClones: async () => {
@@ -3493,12 +3582,20 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         try {
           return await Asr.transcribeAudio(params);
         } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "error",
+            source: "asr",
+            event: "asr.transcribe.failed",
+            message,
+            detail: { audioRef: params?.audioRef, model: params?.model, error: e },
+          });
           return {
             text: "",
             engine: "error",
             segments: [],
             hasSpeakers: false,
-            error: e instanceof Error ? e.message : String(e),
+            error: message,
           };
         }
       },
@@ -3590,7 +3687,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       runTTSLocal: async (params) => {
-        return { record: await TTSLocal.runTTSLocal(params) };
+        try {
+          return { record: await TTSLocal.runTTSLocal(params) };
+        } catch (e) {
+          logEvent({
+            level: "error",
+            source: "tts",
+            event: "tts.local.failed",
+            message: e instanceof Error ? e.message : String(e),
+            detail: { entry: "runTTSLocal", params: { text: params?.text?.slice(0, 200), model: params?.model }, error: e },
+          });
+          throw e;
+        }
       },
 
       // OCR
@@ -3665,7 +3773,15 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         try {
           return { result: await Ocr.runOcr(params) };
         } catch (e) {
-          return { error: e instanceof Error ? e.message : String(e) };
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "error",
+            source: "ocr",
+            event: "ocr.run.failed",
+            message,
+            detail: { engine: "tesseract", imageRef: params?.imageRef, psm: params?.psm, error: e },
+          });
+          return { error: message };
         }
       },
 
@@ -3673,7 +3789,15 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         try {
           return { result: await Ocr.runOcrVlm(params) };
         } catch (e) {
-          return { error: e instanceof Error ? e.message : String(e) };
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "error",
+            source: "ocr",
+            event: "ocr.vlm.failed",
+            message,
+            detail: { engine: "vlm", imageRef: params?.imageRef, error: e },
+          });
+          return { error: message };
         }
       },
 
@@ -3800,7 +3924,15 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         try {
           return { result: await PpOcr.runPpOcr(params) };
         } catch (e) {
-          return { error: e instanceof Error ? e.message : String(e) };
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "error",
+            source: "ocr",
+            event: "ocr.ppocr.failed",
+            message,
+            detail: { engine: "paddleocr", imageRef: params?.imageRef, modelSize: params?.modelSize, error: e },
+          });
+          return { error: message };
         }
       },
 
@@ -4203,7 +4335,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       skillsOpenFolder: async (params) => {
         let target = params.path;
         if (params.path === "central") {
-          target = path.join(Skills.getCentralRepoDir(), params.skillId ?? "");
+          // skillId 来自 webview：不许拿 `../..` 去打开中央库外面的目录。
+          const dir = params.skillId ? Skills.centralSkillDir(params.skillId) : Skills.getCentralRepoDir();
+          if (!dir) return { ok: false };
+          target = dir;
         }
         try {
           const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
@@ -4455,6 +4590,9 @@ export function broadcastCurrentStatus(win: BrowserWindowWithRPC) {
   } catch {}
   try {
     win.webview.rpc?.send.gatewayStatusChanged({ status: Gateway.getGatewayStatus().status });
+  } catch {}
+  try {
+    win.webview.rpc?.send.mediaStatusChanged({ status: getMediaServerStatus() });
   } catch {}
 }
 
