@@ -37,6 +37,7 @@ const {
 const { artifactPreviewUrl, imageServerPort, workspaceFilePreviewUrl } = await import(
   "../shared/server-info"
 );
+const { readAppLogsInMemory } = await import("./app-log");
 
 // 产出物预览：解析钩子由主进程注册（这里用一张假表），工作区根目录走登记接口。
 const previewDir = mkdtempSync(join(tmpdir(), "omni-artifact-preview-"));
@@ -155,6 +156,21 @@ if (serverReady) {
     expect((await get("/audio/%2e%2e/%2e%2e/omni-studio.db")).status).not.toBe(200);
     // 非法百分号编码：400，而不是把 handler 抛崩变 500。
     expect((await get("/%E0%A4%A.mp3")).status).toBe(400);
+  });
+
+  test("媒体请求失败要留下日志（否则整屏预览坏掉时无从查起）", async () => {
+    // 首段路径取测试专用名字：日志按「状态码 + 首段」节流，别和上面的用例互相压掉。
+    // 越界用 %2f 编码的斜杠：%2e%2e 会被 URL 解析器当成 "." 段提前吃掉（结果是 404 而不是 403）。
+    expect((await get("/%2f..%2flogtest-403.png")).status).toBe(403);
+    expect((await get("/logtest-404/missing.png")).status).toBe(404);
+
+    const entries = readAppLogsInMemory({ source: "media-server" });
+    const forbidden = entries.find((e) => e.event === "media.request.forbidden");
+    const missing = entries.find((e) => e.event === "media.request.not_found");
+    expect(forbidden?.level).toBe("error");
+    expect((forbidden?.detail as { ref?: string } | undefined)?.ref).toContain("logtest-403.png");
+    expect(missing?.level).toBe("warn");
+    expect((missing?.detail as { ref?: string } | undefined)?.ref).toBe("logtest-404/missing.png");
   });
 
   test("产出物预览：HTML 按网页返回，同目录相对资源也能取到", async () => {

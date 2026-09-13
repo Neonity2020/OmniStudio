@@ -106,6 +106,8 @@ export type SettingsKey =
   | "IMG_MLX_IDLE_MINUTES"
   // AI 视频生成（video-gen.ts）
   | "VIDEO_BACKEND"
+  | "VIDEO_PROVIDER_ID"
+  | "VIDEO_MODEL"
   | "VIDEO_MINIMAX_BASE"
   | "VIDEO_MINIMAX_API_KEY"
   | "VIDEO_MINIMAX_MODEL"
@@ -147,6 +149,8 @@ export type SettingsKey =
   /** 已授权的工作区之外目录（JSON 字符串数组）。 */
   | "AGENT_AUTHORIZED_FOLDERS"
   | "VOICE_CALL_PROVIDER"
+  /** 实时通话（DashScope Realtime）选中的云厂商：API Key 从厂商行取，页面不再手填。 */
+  | "VOICE_CALL_REALTIME_PROVIDER_ID"
   | "VOICE_CALL_REALTIME_API_KEY"
   | "VOICE_CALL_REALTIME_BASE_URL"
   | "VOICE_CALL_REALTIME_MODEL"
@@ -176,6 +180,13 @@ export type SettingsKey =
   | "CLOUD_PROVIDER"
   | "CLOUD_MODELS"
   | "CUSTOM_PROVIDERS"
+  // 各功能页选中的云服务商（只存 id：地址 / 密钥从 cloud_providers 表取，
+  // 功能页不再让用户重填连接信息）+ 旧配置搬家的一次性标记
+  | "IMG_PROVIDER_ID"
+  | "TTS_PROVIDER_ID"
+  | "ASR_PROVIDER_ID"
+  | "OCR_PROVIDER_ID"
+  | "CLOUD_APP_PROVIDERS_MIGRATED"
   // 已启动模型注册表：当前活动实例 id（本地模式请求的目标），见 bun/model-servers.ts
   | "SERVED_ACTIVE_ID";
 
@@ -288,8 +299,10 @@ const DEFAULTS: Record<SettingsKey, string> = {
   IMG_COMFY_BASE: "",
   // MLX 生图常驻 worker 空闲多少分钟后自动卸载（0 = 一直常驻）：模型会占数 GB 内存。
   IMG_MLX_IDLE_MINUTES: "10",
-  // MiniMax（H3）默认走官方 API；自部署的 MiniMax 兼容服务改 Base 即可（参照 OmniLabs）。
-  VIDEO_BACKEND: "minimax",
+  // 云端生视频：厂商与模型在「设置 → 模型云服务」里配（VIDEO_PROVIDER_ID / VIDEO_MODEL）。
+  VIDEO_BACKEND: "cloud",
+  VIDEO_PROVIDER_ID: "",
+  VIDEO_MODEL: "",
   VIDEO_MINIMAX_BASE: "https://api.minimaxi.com",
   VIDEO_MINIMAX_API_KEY: "",
   VIDEO_MINIMAX_MODEL: "MiniMax-H3",
@@ -334,6 +347,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   // 语音通话：local = 本地 ASR+LLM+TTS 三段管线；cloud = Qwen Realtime（DashScope）。
   // 默认空 = 首次进入时由前端引导二选一（getVoiceCallProvider 会把空值当 local）。
   VOICE_CALL_PROVIDER: "",
+  VOICE_CALL_REALTIME_PROVIDER_ID: "",
+  // 旧版手填的 Key：仍作为兜底（选了厂商后以厂商行的 Key 为准）。
   VOICE_CALL_REALTIME_API_KEY: "",
   VOICE_CALL_REALTIME_BASE_URL: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   VOICE_CALL_REALTIME_MODEL: "qwen-audio-3.0-realtime-plus",
@@ -364,6 +379,12 @@ const DEFAULTS: Record<SettingsKey, string> = {
   CLOUD_PROVIDER: "",
   CLOUD_MODELS: "[]",
   CUSTOM_PROVIDERS: "[]",
+  // 各功能页选中的云服务商 id（地址 / 密钥由 cloud_providers 表提供）
+  IMG_PROVIDER_ID: "",
+  TTS_PROVIDER_ID: "",
+  ASR_PROVIDER_ID: "",
+  OCR_PROVIDER_ID: "",
+  CLOUD_APP_PROVIDERS_MIGRATED: "",
   SERVED_ACTIVE_ID: "",
 };
 

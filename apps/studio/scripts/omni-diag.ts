@@ -232,20 +232,22 @@ function readDb(): { sections: Section[]; warnings: string[] } {
   if (!(settings.length === 1 && settings[0]?._error)) {
     for (const row of settings) map.set(row.key, row.value);
   }
+  // 各功能页只记「厂商 id」：地址 / 密钥统一在 cloud_providers 表（下面单独列）。
   const need: [string, string, boolean?][] = [
     ["SERVER_MODE", "运行模式（local / remote）"],
     ["INFERENCE_ENGINE", "推理引擎"],
     ["IMG_BACKEND", "生图后端（api / comfyui / mlx）"],
-    ["IMG_API_BASE", "生图 API 地址", true],
-    ["IMG_API_KEY", "生图 API 密钥", true],
+    ["IMG_PROVIDER_ID", "生图云厂商"],
     ["IMG_MODEL", "生图模型"],
-    ["VIDEO_BACKEND", "生视频后端"],
-    ["VIDEO_MINIMAX_BASE", "MiniMax 地址", true],
-    ["VIDEO_SEEDANCE_BASE", "Seedance 地址", true],
+    ["VIDEO_BACKEND", "生视频后端（cloud / comfyui）"],
+    ["VIDEO_PROVIDER_ID", "生视频云厂商"],
+    ["VIDEO_MODEL", "生视频模型"],
     ["TTS_LOCAL_ENGINE", "本地 TTS 引擎"],
-    ["TTS_PROVIDER_BASE", "三方 TTS 地址", true],
+    ["TTS_PROVIDER_ID", "三方 TTS 云厂商"],
     ["ASR_ENGINE", "ASR 引擎"],
+    ["ASR_PROVIDER_ID", "三方 ASR 云厂商"],
     ["OCR_ENGINE", "OCR 引擎"],
+    ["OCR_PROVIDER_ID", "VLM OCR 云厂商"],
     ["AGENT_ALLOW_SHELL", "Agent 允许 shell"],
   ];
   sections.push({
@@ -254,6 +256,31 @@ function readDb(): { sections: Section[]; warnings: string[] } {
       const value = map.get(key) ?? "";
       if (secret) return `${key}（${label}）：${value ? "已配置" : "未配置"}`;
       return `${key}（${label}）：${value || "未设置（用默认值）"}`;
+    }),
+  });
+
+  // 云厂商：功能页选的就是这里的行。「启动」过（enabled=1）才会出现在各功能页。
+  const providers = query(
+    "select id, name, base_url, api_key, video_api, enabled, models from cloud_providers order by created_at",
+  );
+  sections.push({
+    title: "云服务商（设置 → 模型云服务）",
+    lines: show(providers, (p) => {
+      let modelCount = 0;
+      try {
+        const parsed = JSON.parse(String(p.models ?? "[]"));
+        modelCount = Array.isArray(parsed) ? parsed.length : 0;
+      } catch {
+        modelCount = -1;
+      }
+      const flags = [
+        p.enabled === 1 ? "已启动" : "未启动",
+        p.api_key ? "有密钥" : "无密钥",
+        p.video_api ? `视频接口=${p.video_api}` : "",
+      ]
+        .filter(Boolean)
+        .join(" / ");
+      return `${p.id}（${p.name}）：${flags}，模型 ${modelCount >= 0 ? modelCount : "解析失败"} 个\n    ${p.base_url || "（无地址）"}`;
     }),
   });
 

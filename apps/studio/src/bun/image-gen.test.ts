@@ -39,6 +39,27 @@ mock.module("./mlx-gen", () => ({
   MLX_MODELS: [],
   findMlxModel: () => null,
 }));
+// 云端地址 / 密钥来自服务商行（页面只带 providerId）：mock 掉服务商查询，
+// 让"页面实时配置"这条回归测试仍然能验证实时值优先。
+mock.module("./cloud-providers", () => ({
+  resolveCloudProvider: (id: string | undefined | null) =>
+    (id ?? "").trim() === "live-provider"
+      ? {
+          id: "live-provider",
+          name: "Live",
+          vendor: "测试",
+          baseUrl: "https://api.siliconflow.cn/v1",
+          apiKey: "sk-live-key",
+          models: [],
+          enabled: true,
+          videoApi: "",
+          createdAt: 0,
+          updatedAt: 0,
+        }
+      : null,
+  saveAppModelChoice: () => ({ ok: true }),
+  ensureAppProvidersMigrated: () => {},
+}));
 
 // ---------------------------------------------------------------------------
 // mock 远程 OpenAI 兼容 API 的 fetch：成功返回一张 b64 图片
@@ -79,8 +100,7 @@ test("generateImage 使用页面实时配置，杜绝连到旧配置", async () 
     height: 1024,
     config: {
       backend: "api",
-      apiBase: "https://api.siliconflow.cn/v1",
-      apiKey: "sk-live-key",
+      providerId: "live-provider",
       model: "Kwai-Kolors/Kolors",
       comfyBase: "",
     },

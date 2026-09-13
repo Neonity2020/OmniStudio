@@ -105,7 +105,11 @@ import type { RealtimeProviderConfig } from "../realtime-voice";
 import * as Translate from "../translate";
 import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
 import * as CloudProviders from "../cloud-providers";
-import type { CloudModelEntry, CloudProviderInfo } from "../../shared/cloud-providers";
+import type {
+  CloudModelEntry,
+  CloudProviderInfo,
+  CloudVideoApi,
+} from "../../shared/cloud-providers";
 import * as ModelScope from "../modelscope";
 import * as HuggingFace from "../huggingface";
 import * as ModelScan from "../model-scan";
@@ -168,6 +172,7 @@ import type {
 } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
 import { filterModelIds, MODEL_CATEGORY_SETS, type ModelCategory } from "../../shared/modelscope";
+import { modelTypeOf } from "../../shared/cloud-providers";
 import * as Skills from "../skills";
 import type {
   ToolInfo,
@@ -278,8 +283,19 @@ export type AppRPC = {
           baseUrl?: string;
           apiKey?: string;
           models?: CloudModelEntry[];
+          videoApi?: CloudVideoApi;
         };
         response: { ok: boolean; error?: string };
+      };
+      /** 启用 / 停用服务商（可同时启用多个）。启用前会校验密钥。 */
+      cloudProviderSetEnabled: {
+        params: { id: string; enabled: boolean };
+        response: { ok: boolean; error?: string; modelCount?: number };
+      };
+      /** 按已保存的地址 + 密钥探测服务商（设置页「校验密钥」）。 */
+      cloudProviderProbe: {
+        params: { id: string };
+        response: { ok: boolean; error?: string; models?: string[] };
       };
       cloudProviderDelete: {
         params: { id: string };
@@ -1064,6 +1080,8 @@ export type AppRPC = {
       voicecallSaveProviderConfig: {
         params: {
           provider?: "local" | "cloud";
+          /** 选中的云厂商：API Key 从厂商行取（页面不再手填）。 */
+          providerId?: string;
           apiKey?: string;
           baseUrl?: string;
           model?: string;
@@ -1295,10 +1313,13 @@ export type AppRPC = {
       };
       getTTSProviderConfig: {
         params: undefined;
-        response: { config: { base: string; apiKey: string; model: string } };
+        response: {
+          config: { providerId: string; base: string; apiKey: string; model: string };
+        };
       };
+      /** 语音页只写「厂商 + 模型」：地址 / 密钥由服务商行提供。 */
       saveTTSProviderConfig: {
-        params: { base?: string; apiKey?: string; model?: string };
+        params: { providerId?: string; model?: string };
         response: { ok: boolean };
       };
       listProviderModels: {
@@ -1347,10 +1368,12 @@ export type AppRPC = {
       };
       getASRProviderConfig: {
         params: undefined;
-        response: { config: { base: string; apiKey: string; model: string } };
+        response: {
+          config: { providerId: string; base: string; apiKey: string; model: string };
+        };
       };
       saveASRProviderConfig: {
-        params: { base?: string; apiKey?: string; model?: string };
+        params: { providerId?: string; model?: string };
         response: { ok: boolean };
       };
       // Local ASR engine (audio.cpp)
@@ -1450,7 +1473,7 @@ export type AppRPC = {
         response: { config: OcrProviderConfig };
       };
       saveOcrProviderConfig: {
-        params: { base?: string; apiKey?: string; model?: string };
+        params: { providerId?: string; model?: string };
         response: { ok: boolean };
       };
       listOcrProviderModels: {
@@ -1552,15 +1575,17 @@ export type AppRPC = {
           action: "confirm" | "cancel";
           backend?: string;
           model?: string;
-          apiBase?: string;
-          apiKey?: string;
+          /** 云端生图选中的服务商（地址 / 密钥由服务商行提供）。 */
+          providerId?: string;
           comfyBase?: string;
         };
         response: { ok: boolean };
       };
       /** Agent 生图弹窗里的「扫描模型」：用表单当前值探测，不落盘配置。 */
       scanMediaSetupCandidates: {
-        params: { kind?: string; backend?: string; base?: string; apiKey?: string } | undefined;
+        params:
+          | { kind?: string; backend?: string; base?: string; apiKey?: string; providerId?: string }
+          | undefined;
         response: { candidates: MediaSetupCandidate[]; error?: string };
       };
       // AI 视频生成（comfyui 本地 / minimax / seedance 云端，提交任务 + 轮询）
@@ -1603,7 +1628,7 @@ export type AppRPC = {
         response: { ok: boolean };
       };
       listVideoGenModels: {
-        params: { backend?: VideoGenBackend; base?: string } | undefined;
+        params: { backend?: VideoGenBackend; base?: string; providerId?: string } | undefined;
         response: {
           models: string[];
           checkpoints: string[];
@@ -2308,6 +2333,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         CloudProviders.updateCloudProvider(params.id, params ?? {}),
 
       cloudProviderDelete: async ({ id }) => CloudProviders.deleteCloudProvider(id),
+
+      cloudProviderSetEnabled: async ({ id, enabled }) =>
+        CloudProviders.setCloudProviderEnabled(id, enabled),
+
+      cloudProviderProbe: async ({ id }) => {
+        const provider = CloudProviders.getCloudProviderInfo(id);
+        if (!provider) return { ok: false, error: "服务商不存在" };
+        return CloudProviders.probeProviderKey({
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+        });
+      },
 
       cloudProviderActivate: async ({ id }) => CloudProviders.activateCloudProvider(id),
 
@@ -3521,8 +3558,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { config: Voice.getTTSProviderConfig() };
       },
 
-      saveTTSProviderConfig: async ({ base, apiKey, model }) => {
-        Voice.saveTTSProviderConfig({ base, apiKey, model });
+      saveTTSProviderConfig: async ({ providerId, model }) => {
+        Voice.saveTTSProviderConfig({ providerId, model });
         return { ok: true };
       },
 
@@ -3604,8 +3641,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { config: Asr.getASRProviderConfig() };
       },
 
-      saveASRProviderConfig: async ({ base, apiKey, model }) => {
-        Asr.saveASRProviderConfig({ base, apiKey, model });
+      saveASRProviderConfig: async ({ providerId, model }) => {
+        Asr.saveASRProviderConfig({ providerId, model });
         return { ok: true };
       },
 
@@ -3805,8 +3842,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { config: Ocr.getOcrProviderConfig() };
       },
 
-      saveOcrProviderConfig: async ({ base, apiKey, model }) => {
-        Ocr.saveOcrProviderConfig({ base, apiKey, model });
+      saveOcrProviderConfig: async ({ providerId, model }) => {
+        Ocr.saveOcrProviderConfig({ providerId, model });
         return { ok: true };
       },
 
@@ -4045,10 +4082,12 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
               vaes: lists.vaes,
             };
           }
+          // 云端：模型清单来自选中的服务商（生图 / 视频分类在设置页里维护）。
+          const provider = CloudProviders.getCloudProviderInfo(
+            params?.providerId ?? cfg.providerId,
+          );
           const models =
-            backend === "seedance"
-              ? VideoGen.SEEDANCE_VIDEO_MODELS
-              : VideoGen.MINIMAX_VIDEO_MODELS;
+            provider?.models.filter((m) => modelTypeOf(m) === "video").map((m) => m.id) ?? [];
           return { models, checkpoints: [], clips: [], vaes: [] };
         } catch (e) {
           return {

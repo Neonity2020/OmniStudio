@@ -15,6 +15,7 @@ mock.module("electrobun/bun", () => ({
 
 const { startImageServer, getMediaServerStatus, mediaServerId } = await import("./image-server");
 const { imageServerPort } = await import("../shared/server-info");
+const { readAppLogsInMemory } = await import("./app-log");
 
 const PORT = imageServerPort();
 
@@ -88,4 +89,21 @@ test("端口被同一份数据目录的实例占着（同频道开了两个）�
   // 本进程已经占着端口，再启动一次就是在模拟"同数据的第二个实例"。
   startImageServer({ retryMs: RETRY_MS });
   expect(await waitFor(() => getMediaServerStatus().state === "shared")).toBe(true);
+});
+
+test("三种状态都写进统一日志：blocked / shared 是「预览全挂」的唯一线索", async () => {
+  const entries = readAppLogsInMemory({ source: "media-server" });
+  const events = entries.map((e) => e.event);
+  expect(events).toContain("media.server.blocked");
+  expect(events).toContain("media.server.shared");
+  expect(events).toContain("media.server.serving");
+
+  const blocked = entries.filter((e) => e.event === "media.server.blocked");
+  expect(blocked.every((e) => e.level === "error")).toBe(true);
+  // 认得出身份的（另一个实例）与认不出的（旧版本 / 不相干的软件）都要留下占用者信息。
+  const holderPids = blocked.map(
+    (e) => (e.detail as { holderPid?: number | null } | undefined)?.holderPid,
+  );
+  expect(holderPids).toContain(1234);
+  expect(holderPids).toContain(null);
 });

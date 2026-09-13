@@ -11,6 +11,24 @@
 
 ---
 
+## 云端模型（所有功能页共用的配置模型）
+
+生图 / 语音 / OCR / 视频**都不在页面里填地址与密钥**，页面只存「厂商 id + 模型」；
+连接信息统一在 `cloud_providers` 表（设置 →「模型云服务」）。排查三件事：
+
+1. 厂商**启动**了吗（`enabled=1`）？只有启动过的厂商才会出现在功能页的选择器里，
+   启动时会拿 `/v1/models` 校验密钥（401/403 = 密钥无效，事件 `cloud-provider-enable-failed`）。
+2. 厂商有**这个用途的模型**吗？每个模型条目带用途（生图 / TTS / ASR / 视频 / 对话），
+   没写就按模型名自动识别；识别不出来（`other`）的模型不会出现在功能页里。
+3. 功能页选的是哪个厂商？`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / `ASR_PROVIDER_ID` /
+   `OCR_PROVIDER_ID` / `VIDEO_PROVIDER_ID`（`omi logs` 只能看到结果，配置看
+   `bun scripts/omni-diag.ts` 的「云服务商」段）。
+
+一把梭：`bun run --cwd apps/studio scripts/omni-diag.ts` 会列出每个厂商的
+「已启动 / 有密钥 / 视频接口 / 模型数」与各功能页选中的厂商 id。
+
+---
+
 ## 生图（source `image`，记录表 `image_records`）
 
 证据：`omi logs --source image --verbose`；`image_records` 里 `status='failed'` 的 `error` 列。
@@ -18,8 +36,8 @@
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
 | `请先输入提示词` | 调用侧没给 prompt | 让用户描述想生成的画面；若来自 Agent 工具，是 Agent 没传参 → 让它补 |
-| `请先在左侧配置 OpenAI 兼容服务的 Base URL` / `Missing API base URL` | 后端选了 `api` 但没填地址 | 设置 →「图像」→ 生图后端「OpenAI 兼容 API」→ 填 Base URL（如 `https://api.openai.com/v1` 或自建服务） |
-| `请先填写生图模型 ID` | 地址有、模型 ID 空 | 同页面选或填模型 ID（如 `dall-e-3` / `flux-schnell`） |
+| `还没选定云厂商…` / `请先在「设置 → 模型云服务」里启用一个厂商` | 生图后端是云端但没选（或没有可用）厂商 | 设置 →「模型云服务」填 Key 后点「启动」（会校验密钥），回「图像」页选厂商与生图模型 |
+| `请先填写生图模型 ID` | 厂商选了、模型 ID 空 | 在「图像」页选该厂商的生图模型 |
 | `请先在左侧配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` / `Missing ComfyUI base URL` | 后端 `comfyui` 但没地址 | 「图像」→ 填 ComfyUI 地址，并确认 ComfyUI 已启动 |
 | `请先填写 ComfyUI checkpoint 名称` | ComfyUI 里没选 checkpoint | 在 ComfyUI 下载模型后，在应用里选 checkpoint |
 | `参考图修图仅支持 OpenAI 兼容的云端后端（api）` | 用 MLX/ComfyUI 做图生图 | 切后端到 `api` |
@@ -31,7 +49,7 @@
 | `模型「X」尚未下载，请先点击「下载模型」（约 N GB）` | 权重缺失 | 同页下载对应模型；网络受限时先解决镜像/代理（见下条） |
 | `mflux 生成超时（超过 30 分钟），已终止进程，请重试` | 模型太大 / 显存不足 / 被系统换出 | 换更小的模型（如 Schnell / turbo 档），或减少步数；确认没有其它大模型在跑 |
 | `上一次生图仍在进行中，请稍候或等它完成` | 并发保护 | 等上一次结束；若确认已卡死，重启应用 |
-| `生图后端是「OpenAI 兼容 API」，但还没填写服务地址（Base URL）。` 等 `media-setup` 文案 | Agent 调 `generate_image` 前的准备检查没过 | 这是**入口拦截**不是故障：按提示在弹窗/「图像」页配好，再让 Agent 继续 |
+| `生图后端是云端模型，但还没选定云厂商…` 等 `media-setup` 文案 | Agent 调 `generate_image` 前的准备检查没过 | 这是**入口拦截**不是故障：按提示在弹窗（列的是已启动厂商的生图模型）或「图像」页选好，再让 Agent 继续 |
 | `huggingface_hub.errors.IncompleteSnapshotError ... The Hub could not be reached (ConnectError: [SSL: UNEXPECTED_EOF_WHILE_READING])` | **实测过**：MLX 模型下载被网络中断，权重不完整 | 在能访问 HF 的网络/镜像下重下（应用内 MLX 模型下载走同样的源）；删掉 `DATA_DIR/engines/mflux` 下对应缓存后重试 |
 
 补充：生图失败**一定会**在 `image_records` 留一行 `status='failed'` + `error`，
@@ -45,7 +63,10 @@
 
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
-| `请先配置 MiniMax 服务地址` / `请先配置 Seedance（火山方舟）服务地址` / `请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` | 后端地址空 | 设置 →「视频」页填对应地址 |
+| `还没选择云厂商。请到「设置 → 模型云服务」启用一个支持生视频的厂商` | 云端后端没选厂商 | 设置 →「模型云服务」启动一个厂商（生视频接口见下条），回「视频」页选厂商与视频模型 |
+| `云厂商「X」没有配置生视频接口（在设置里选 MiniMax / Seedance）` | 厂商没选生视频协议 | 视频 API 各家不通用：在厂商详情里把「生视频接口」设为 MiniMax 或 Seedance |
+| `这条任务的厂商已删除，无法继续查询上游状态` | 轮询时记录里的厂商行被删了 | 该任务无法续查，重新提交；轮询按记录里的 providerId 查上游，删厂商前先确认没有在途任务 |
+| `请先配置 MiniMax 服务地址` / `请先配置 Seedance（火山方舟）服务地址` / `请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` | 后端地址空（云端看厂商行的地址） | 云端：设置 →「模型云服务」补地址；ComfyUI：「视频」页填地址 |
 | `未找到 ComfyUI checkpoint，请先在 ComfyUI 下载 Wan 模型` / `未找到 ComfyUI CLIP（umt5）…` / `未找到 ComfyUI VAE（wan vae）…` | ComfyUI 缺 Wan 系列依赖模型 | 在 ComfyUI 侧下载 Wan 模型，并在应用里选好 ckpt / clip / vae |
 | `MiniMax 未返回 task_id，请检查服务配置` / `Seedance 未返回任务 id，请检查 API Key 与模型` | 鉴权或模型名不对 | 核对 key、模型 id、base（Seedance 需方舟的 endpoint 与模型） |
 | `首帧图文件不存在，请重新选择` | 首帧图失效 | 重选 |
@@ -62,7 +83,7 @@
 
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
-| `没有可用的 TTS 引擎` / `未配置三方 TTS Provider` / `本地引擎未启动` | 一个可用引擎都没有 | 二选一：本地（「本地引擎 → TTS」下载引擎与模型并启动）或用三方 Provider（「语音」页填地址/key/模型） |
+| `没有可用的 TTS 引擎` / `未配置三方 TTS Provider` / `本地引擎未启动` | 一个可用引擎都没有 | 二选一：本地（「本地引擎 → TTS」下载引擎与模型并启动）或用三方厂商（「设置 → 模型云服务」启动厂商并在「语音」页选它的 TTS 模型） |
 | `未找到 audiocpp_cli，请先下载 audio.cpp 推理引擎` | 本地引擎二进制缺失 | 「本地引擎 → TTS」点下载引擎；平台不支持自动下载时按提示手动装 `audiocpp_cli` 并加入 PATH |
 | `模型尚未下载，请先点击下载` / `模型未下载：X` | 权重缺失 | 下载对应 TTS 模型 |
 | `请先在本地引擎中选择一个已启动的 TTS 模型` | 引擎起了但没选模型 | 选模型并启动 |
@@ -81,7 +102,7 @@
 | --- | --- | --- |
 | `未检测到 whisper.cpp，请先安装（brew install whisper-cpp）或使用 OpenAI 兼容 API` | 缺本地引擎 | `brew install whisper-cpp`，或在「语音 / ASR」切到远端 API |
 | `请先下载并选择一个本地 ASR 模型` / `模型未下载：X` | 权重缺失 | 下载 ASR 模型 |
-| `没有可用的推理服务（本地引擎或远程服务）` | 两条路都没配好 | 起本地引擎或填远端 base/key/model |
+| `没有可用的推理服务（本地引擎或远程服务）` | 两条路都没配好 | 起本地引擎，或在「设置 → 模型云服务」启动厂商后在「语音 / ASR」选它的 ASR 模型 |
 | `音频文件不存在` | 输入失效 | 重新选择音频 |
 | `转写结果为空` | 音频无声 / 太短 / 采样率异常 | 换一个音频验证是文件问题还是引擎问题 |
 | `whisper-cli 转写失败（退出码 N）` | 引擎报错（模型损坏 / 参数） | 看日志上下文；重下模型 |
@@ -99,7 +120,7 @@
 | `未检测到 Tesseract，请先安装（macOS: brew install tesseract）` | 缺二进制 | `brew install tesseract` |
 | `语言包尚未下载，请先点击下载` / `语言包未下载：X` | tessdata 缺失 | 「OCR」页下载语言包 |
 | `Tesseract 引擎未启用，请先在 OCR 页切换到 Tesseract 引擎` / `请先在本地引擎中选择一个 Tesseract 语言模型` | 引擎/模型没选 | 按提示切换 |
-| `请先在 OCR 页配置远程 OpenAI 兼容服务的 Base URL` / `Missing API base URL` | VLM 走远端但没配 | 填 base（+ key + 模型） |
+| `请先在 OCR 页配置远程 OpenAI 兼容服务的 Base URL` / `Missing API base URL` | VLM 走远端但没配 | 「设置 → 模型云服务」启动厂商，再在「OCR → VLM」选厂商与模型（VLM 属于对话类模型） |
 | `无法解析图片` / `图片文件不存在` | 输入文件问题 | 重选图片；PDF 先确认页图能生成（Sharp 转换是否失败） |
 | `识别结果为空` | 图片无文字或引擎不匹配 | 换引擎试（VLM 对复杂版式更强） |
 | `PaddleOCR 引擎未安装，请先点击「下载引擎」` / `引擎未安装完整，请重新点击「下载引擎」` | 引擎缺失/半装 | 重装引擎 |

@@ -9,6 +9,7 @@ import {
 } from "../shared/server-info";
 import { getDataDir } from "./paths";
 import { safeJoin } from "./path-safety";
+import { logEvent } from "./app-log";
 
 // Dev builds run with the process CWD inside the app bundle, which electrobun
 // regenerates on every rebuild — a CWD-relative data dir (and the audio/images
@@ -230,6 +231,44 @@ function decodePath(value: string): string | null {
   }
 }
 
+/**
+ * 媒体请求失败（403 越界 / 404 文件不在）写统一日志，按「状态码 + 首段路径」节流。
+ *
+ * 这类失败过去完全静默：媒体直链 403 那次，所有预览（生成图、聊天图、OCR 页图、TTS 音频）
+ * 都拿不到内容，界面上一片破图，`logs/app.log` 里一个字都没有——只能靠翻文件系统反推。
+ * 节流是必须的：一整屏预览坏掉时几秒内就是几百条请求，2MB 的日志会被冲掉，
+ * 反而把真正的现场埋了（被压掉的条数记在 `suppressedSinceLastLog` 里）。
+ */
+const MEDIA_FAILURE_LOG_INTERVAL_MS = 60_000;
+const mediaFailureLogged = new Map<string, { at: number; suppressed: number }>();
+
+function logMediaFailure(status: 403 | 404, ref: string, reason: string, baseDir: string): void {
+  const key = `${status}:${ref.split("/")[0] ?? ""}`;
+  const now = Date.now();
+  const prev = mediaFailureLogged.get(key);
+  if (prev && now - prev.at < MEDIA_FAILURE_LOG_INTERVAL_MS) {
+    prev.suppressed += 1;
+    return;
+  }
+  logEvent({
+    level: status === 403 ? "error" : "warn",
+    source: "media-server",
+    event: status === 403 ? "media.request.forbidden" : "media.request.not_found",
+    message:
+      status === 403
+        ? `媒体请求被拒绝（路径越界）：${ref}`
+        : `媒体文件不存在，预览会是破图：${ref}（${reason}）`,
+    detail: {
+      status,
+      ref,
+      reason,
+      baseDir,
+      suppressedSinceLastLog: prev?.suppressed ?? 0,
+    },
+  });
+  mediaFailureLogged.set(key, { at: now, suppressed: 0 });
+}
+
 /** 立即占用端口开始服务；端口被占时 Bun.serve 直接抛（由 startImageServer 兜住）。 */
 function bindMediaServer(): void {
   const baseDir = getImagesBaseDir();
@@ -317,11 +356,13 @@ function bindMediaServer(): void {
       }
       const filePath = safeJoin(baseDir, rel);
       if (!filePath) {
+        logMediaFailure(403, rel, "safeJoin 判定越出数据目录", baseDir);
         return new Response("Forbidden", { status: 403 });
       }
 
       // 目录本身不是可预览对象（Bun.file 读目录会抛 EISDIR）。
       if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+        logMediaFailure(404, rel, "文件不存在或不是普通文件", baseDir);
         return new Response("Not found", { status: 404 });
       }
 
@@ -410,13 +451,30 @@ async function probeMediaServer(): Promise<{ pid?: number; sameData: boolean } |
 /** 端口被占：探明占用者身份，并持续重试，等对方退出后接管。 */
 async function acquireMediaServer(retryMs: number): Promise<void> {
   const holder = await probeMediaServer();
+  const shared = !!holder?.sameData;
   // 初始值只是"还没探明"的占位，探测结论无论是否与它相同都要发出去（通知依赖这次事件）。
   setMediaStatus(
-    holder?.sameData
-      ? { state: "shared" }
-      : { state: "blocked", holderPid: holder?.pid, otherInstance: !!holder },
+    shared ? { state: "shared" } : { state: "blocked", holderPid: holder?.pid, otherInstance: !!holder },
     true,
   );
+  // blocked 是"这一整轮会话里所有预览都会取不到内容"的状态，必须落进统一日志：
+  // 过去只有一行 console.warn，打包应用从 Finder 启动时没人接 stdout，等于没有线索。
+  logEvent({
+    level: shared ? "info" : "error",
+    source: "media-server",
+    event: shared ? "media.server.shared" : "media.server.blocked",
+    message: shared
+      ? `媒体服务端口 ${imageServerPort()} 由同一数据目录的另一个实例在服务（预览正常）`
+      : `媒体服务端口 ${imageServerPort()} 被${
+          holder ? `另一个实例占用（pid ${holder.pid}，数据目录不同）` : "其它进程占用"
+        }：图片 / 音频预览会取不到内容，等它退出后本实例会自动接管`,
+    detail: {
+      port: imageServerPort(),
+      holderPid: holder?.pid ?? null,
+      otherInstance: !!holder,
+      baseDir: getImagesBaseDir(),
+    },
+  });
 
   if (retryTimer) return;
   retryTimer = setInterval(() => {
@@ -428,6 +486,13 @@ async function acquireMediaServer(retryMs: number): Promise<void> {
     if (retryTimer) clearInterval(retryTimer);
     retryTimer = null;
     setMediaStatus({ state: "serving" }, true);
+    logEvent({
+      level: "info",
+      source: "media-server",
+      event: "media.server.serving",
+      message: `媒体服务已接管端口 ${imageServerPort()}（原占用者已退出），预览恢复`,
+      detail: { port: imageServerPort(), baseDir: getImagesBaseDir() },
+    });
   }, retryMs);
   // 不能让重试定时器把进程（或测试进程）挂住。
   (retryTimer as unknown as { unref?: () => void }).unref?.();
@@ -447,6 +512,15 @@ export function startImageServer(opts: { retryMs?: number } = {}): void {
     return;
   }
   setMediaStatus({ state: "serving" }, true);
+  // 每次启动记一条：媒体服务服务的是哪份数据目录 —— 预览取不到内容时，
+  // 第一个要排除的就是"URL 打到了别人的数据目录上"。
+  logEvent({
+    level: "info",
+    source: "media-server",
+    event: "media.server.serving",
+    message: `媒体服务已就绪：http://${IMAGE_SERVER_HOST}:${imageServerPort()}`,
+    detail: { port: imageServerPort(), baseDir: getImagesBaseDir() },
+  });
 }
 
 export function imageUrl(docId: number, filename: string): string {

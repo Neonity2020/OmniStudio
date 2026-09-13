@@ -279,13 +279,7 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 模型库已并入设置页，旧的 "models" 路由映射到设置-模型库标签。
         if (path === "models") {
           useRouter.getState().setRoute({ path: "settings", tab: "store" });
-        } else if (
-          path === "settings" ||
-          path === "server" ||
-          path === "stats" ||
-          path === "chat" ||
-          path === "index"
-        ) {
+        } else if (path === "settings" || path === "chat" || path === "index") {
           useRouter.getState().setRoute({ path });
         } else if (path === "automations") {
           // 自动化不再是左侧一级菜单：跳进 Agent 并打开它的自动化子视图。

@@ -146,7 +146,10 @@ export const videoRecords = sqliteTable("video_records", {
     .$defaultFn(() => "processing")
     .notNull(),
   source: text("source").$type<MediaSource>().default("manual").notNull(),
-  backend: text("backend").$type<"comfyui" | "minimax" | "seedance">(),
+  // 旧记录里是 minimax / seedance（当时的后端即协议）；新记录统一为 cloud / comfyui。
+  backend: text("backend").$type<"comfyui" | "cloud" | "minimax" | "seedance">(),
+  /** 云端提交时使用的服务商 id：轮询按它去找上游，用户中途换厂商也不影响在途任务。 */
+  providerId: text("provider_id"),
   model: text("model"),
   prompt: text("prompt"),
   negativePrompt: text("negative_prompt"),
@@ -396,8 +399,12 @@ export const cloudProviders = sqliteTable("cloud_providers", {
   vendor: text("vendor").notNull().default(""),
   baseUrl: text("base_url").notNull().default(""),
   apiKey: text("api_key").notNull().default(""),
-  /** JSON 序列化的 CloudModelEntry[]。 */
+  /** JSON 序列化的 CloudModelEntry[]（每条带用途分类：生图 / TTS / ASR / 视频…）。 */
   models: text("models").notNull().default("[]"),
+  /** 1 = 已在设置页"启动"（密钥校验通过）。可同时启用多个厂商，各功能页只列已启用的。 */
+  enabled: int("enabled").notNull().default(0),
+  /** 生视频接口协议："" | "minimax" | "seedance"（视频 API 没有统一标准，按厂商分派）。 */
+  videoApi: text("video_api").notNull().default(""),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
   updatedAt: int("updated_at")
     .$defaultFn(() => Date.now())

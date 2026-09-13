@@ -9,8 +9,6 @@ import { SidebarInset, SidebarProvider } from "@ui/sidebar";
 import { rpcClient } from "@lib/rpc";
 import { useRouter } from "@stores/router";
 import { SettingsScreen } from "./settings";
-import { ConsoleScreen } from "./console-screen";
-import { DashboardScreen } from "../dashboard-screen";
 import { ChatWindow } from "../chat-screen";
 import { AgentWindow } from "../agent-screen";
 import { VoiceCallWindow } from "../voice-call-screen";
@@ -74,10 +72,6 @@ const Outlet = () => {
     content = <ModelDetailScreen />;
   } else if (route.path === "settings") {
     content = <SettingsScreen />;
-  } else if (route.path === "server") {
-    content = <ConsoleScreen />;
-  } else if (route.path === "stats") {
-    content = <DashboardScreen />;
   } else if (route.path === "document") {
     content = <DocumentView id={route.id} />;
   } else if (route.path === "chat" || route.path === "index") {

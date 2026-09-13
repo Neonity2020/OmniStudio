@@ -3,10 +3,13 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
+import type { CloudModelType } from "../shared/cloud-providers";
+
 /**
  * 对话模型列表的三条硬要求（用户直接提的）：
  *   1. 本地条目带**运行状态** —— 对话框只显示已启动的（running / 正在加载）；
- *   2. 云端只列**已配置（有 Key）厂商**的模型；
+ *   2. 云端只列**已启用厂商**的模型，且必须是用户在该厂商「模型列表」里添加过的
+ *      **对话**模型（生图 / 视频 / TTS / ASR 一律不进对话选择器）；
  *   3. 在选择器里选模型**不启动任何进程**（启动在控制台）。
  *
  * 注意：这里**不能** mock `./model-servers`（它在被测路径上）：`bun test` 的
@@ -122,7 +125,10 @@ type FakeProvider = {
   name: string;
   baseUrl: string;
   apiKey: string;
-  models: { id: string }[];
+  /** 厂商「模型列表」：id + 可选的用途标注（不标就按 id 自动识别）。 */
+  models: { id: string; type?: CloudModelType }[];
+  /** 已「启动」的厂商才有模型进对话列表。 */
+  enabled?: boolean;
 };
 let PROVIDERS: FakeProvider[] = [];
 let ACTIVE_PROVIDER: string | null = null;
@@ -139,9 +145,8 @@ mock.module("./cloud-providers", () => ({
 }));
 
 const Served = await import("./model-servers");
-const { listChatModels, selectChatModel, getChatModelName, getChatRequestModelId } = await import(
-  "./chat-model"
-);
+const { listChatModels, selectChatModel, getChatModelName, getChatModelLabel, getChatRequestModelId } =
+  await import("./chat-model");
 
 const tmpDir = mkdtempSync(join(tmpdir(), "chat-model-test-"));
 const modelA = join(tmpDir, "a.gguf");
@@ -278,7 +283,7 @@ describe("listChatModels 的本地条目", () => {
 });
 
 describe("listChatModels 的云端条目", () => {
-  test("激活厂商额外拉一次实时模型列表，且 isActive 跟随当前厂商与模型名", async () => {
+  test("云端只列厂商清单里的模型（不去拉 /v1/models），isActive 跟随当前厂商与模型名", async () => {
     SETTINGS.SERVER_MODE = "remote";
     SETTINGS.VLLM_MODEL_NAME = "qwen-max";
     SETTINGS.CHAT_MODEL = "qwen-max";
@@ -291,20 +296,22 @@ describe("listChatModels 的云端条目", () => {
         baseUrl: "https://d.example/v1",
         apiKey: "sk-1",
         models: [{ id: "qwen-max" }],
+        enabled: true,
       },
     ];
     ACTIVE_PROVIDER = "dashscope";
 
     const { models } = await listChatModels();
     const api = models.filter((m) => m.type === "api");
-    expect(api.map((m) => m.value)).toContain("qwen-max");
-    expect(api.find((m) => m.value === "qwen-max")?.isActive).toBe(true);
-    expect(api.find((m) => m.value === "qwen-max")?.providerName).toBe("DashScope");
-    expect(fetchedUrls.some((u) => u.includes("d.example"))).toBe(true);
-    expect(api.map((m) => m.value)).toContain("live-model");
+    // 清单里没添加过的模型（服务商 /v1/models 里的 live-model）不进对话列表：
+    // 服务商那份全量清单混着生图 / 视频 / 语音，只能从「模型云服务」配好的里面挑。
+    expect(api.map((m) => m.value)).toEqual(["qwen-max"]);
+    expect(api[0]!.isActive).toBe(true);
+    expect(api[0]!.providerName).toBe("DashScope");
+    expect(fetchedUrls).toEqual([]);
   });
 
-  test("没填 Key 的厂商整份不进列表；正在用的厂商即使没 Key 也保留", async () => {
+  test("没启动的厂商整份不进列表；正在用的厂商即使没启动也保留", async () => {
     PROVIDERS = [
       {
         id: "no-key",
@@ -312,6 +319,7 @@ describe("listChatModels 的云端条目", () => {
         baseUrl: "https://n.example/v1",
         apiKey: "",
         models: [{ id: "ghost-model" }],
+        enabled: false,
       },
       {
         id: "empty-key",
@@ -319,13 +327,17 @@ describe("listChatModels 的云端条目", () => {
         baseUrl: "https://e.example/v1",
         apiKey: "EMPTY",
         models: [{ id: "ghost2" }],
+        enabled: false,
       },
       {
+        // 本地兼容端点（LM Studio 这类）正在用但没走「启动」流程：保留，
+        // 否则历史配置的用户一升级就会发现对话里没模型可选。
         id: "local-compat",
         name: "LocalCompat",
         baseUrl: "http://127.0.0.1:1234/v1",
         apiKey: "",
         models: [{ id: "local-model" }],
+        enabled: false,
       },
       {
         id: "ok",
@@ -333,6 +345,7 @@ describe("listChatModels 的云端条目", () => {
         baseUrl: "https://ok.example/v1",
         apiKey: "sk-x",
         models: [{ id: "real-model" }],
+        enabled: true,
       },
     ];
     ACTIVE_PROVIDER = "local-compat";
@@ -340,13 +353,12 @@ describe("listChatModels 的云端条目", () => {
     const { models } = await listChatModels();
     const ids = models.filter((m) => m.type === "api").map((m) => m.value);
     expect(ids).toContain("real-model");
-    // 本地兼容端点（LM Studio 这类）往往不带 Key，只要在用就保留
     expect(ids).toContain("local-model");
     expect(ids).not.toContain("ghost-model");
     expect(ids).not.toContain("ghost2");
   });
 
-  test("云端的非对话模型（嵌入 / 重排 / 语音）被过滤掉", async () => {
+  test("云端清单里非对话用途的模型被过滤掉（自动识别 + 显式标注）", async () => {
     PROVIDERS = [
       {
         id: "p",
@@ -357,12 +369,23 @@ describe("listChatModels 的云端条目", () => {
           { id: "text-embedding-3-large" },
           { id: "bge-reranker-v2-m3" },
           { id: "whisper-large-v3" },
+          { id: "gpt-4o-mini-tts" },
+          { id: "gpt-image-1" },
+          { id: "MiniMax-H3" },
+          { id: "doubao-seedance-1-0-lite-t2v-250428" },
+          // 显式标了用途的以标注为准：名字像对话的生视频模型也不能进对话列表。
+          { id: "omni-chat-video-edition", type: "video" },
+          // 反过来，明确标成对话的照常保留（自建 / 微调的模型名往往认不出来）。
+          { id: "my-private-llm", type: "chat" },
+          { id: "my-model-7b" },
           { id: "qwen3-8b" },
         ],
+        enabled: true,
       },
     ];
     const { models } = await listChatModels();
-    expect(models.map((m) => m.value)).toEqual(["qwen3-8b"]);
+    expect(models.map((m) => m.value)).toEqual(["my-private-llm", "my-model-7b", "qwen3-8b"]);
+    expect(models[0]!.category).toBe("chat");
   });
 });
 
@@ -404,14 +427,29 @@ describe("selectChatModel", () => {
 });
 
 describe("请求侧模型 id", () => {
-  test("有活动实例时用实例的服务名（MLX 是绝对路径）", async () => {
+  test("本地模式：有活动实例时用实例的服务名（MLX 是绝对路径）", async () => {
+    SETTINGS.SERVER_MODE = "local";
     const m = await serve(repoDir, { engine: "mlx" });
     expect(m.servedName).toBe(`/abs/${repoDir}`);
     expect(getChatModelName()).toBe(`/abs/${repoDir}`);
     expect(getChatRequestModelId()).toBe(`/abs/${repoDir}`);
   });
 
+  test("云端模式：本地实例还在跑也发云端选的那个模型名（否则被云 API 回 Model does not exist）", async () => {
+    // 切云端不会停掉本地实例：这就是用户「选了云端模型却报 Model does not exist」的场景。
+    await serve(repoDir, { engine: "mlx" });
+    SETTINGS.SERVER_MODE = "remote";
+    SETTINGS.VLLM_MODEL_NAME = "deepseek-v4-flash";
+    SETTINGS.CHAT_MODEL = `/abs/${repoDir}`; // 旧数据：CHAT_MODEL 里还留着本地模型
+
+    expect(getChatRequestModelId()).toBe("deepseek-v4-flash");
+    expect(getChatModelName()).toBe("deepseek-v4-flash");
+    // 会话标题 / 用量统计跟着显示云端模型，不能还写着本地那个。
+    expect(getChatModelLabel()).toBe("deepseek-v4-flash");
+  });
+
   test("没有活动实例时回落到设置（CLI / 外部服务器场景）", () => {
+    SETTINGS.SERVER_MODE = "local";
     SETTINGS.CHAT_MODEL = "qwen3-8b";
     expect(getChatModelName()).toBe("qwen3-8b");
   });

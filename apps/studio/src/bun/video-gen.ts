@@ -8,7 +8,16 @@ import { videoRecords, type MediaSource } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
+import * as CloudProviders from "./cloud-providers";
+import {
+  MINIMAX_VIDEO_MODELS,
+  SEEDANCE_VIDEO_MODELS,
+} from "../shared/cloud-providers";
 import { logEvent } from "./app-log";
+
+// 模型清单的唯一真源在 shared/cloud-providers（预设与服务商用同一份），
+// 这里继续对外导出，保持既有导入方（rpc / 脚本）不变。
+export { MINIMAX_VIDEO_MODELS, SEEDANCE_VIDEO_MODELS };
 
 /**
  * AI 视频生成模块（参照 ./image-gen.ts 与 OmniLabs 的视频服务实现）。
@@ -36,13 +45,17 @@ import { logEvent } from "./app-log";
 // 类型
 // ---------------------------------------------------------------------------
 
-export type VideoGenBackend = "comfyui" | "minimax" | "seedance";
+/** 生视频后端：本地 ComfyUI 或云端（云端厂商在设置里配置，见 cloud_providers 表）。 */
+export type VideoGenBackend = "comfyui" | "cloud";
 
 export type VideoRecordRow = {
   id: number;
   status: "processing" | "done" | "failed";
   source: MediaSource;
-  backend: VideoGenBackend | null;
+  /** 旧记录可能是 minimax / seedance（当时的后端名即协议名）。 */
+  backend: VideoGenBackend | "minimax" | "seedance" | null;
+  /** 云端提交用的服务商 id（轮询按它查上游）。 */
+  providerId: string | null;
   model: string | null;
   prompt: string | null;
   negativePrompt: string | null;
@@ -68,12 +81,12 @@ export type VideoRecordRow = {
 
 export type VideoGenConfig = {
   backend: VideoGenBackend;
-  minimaxBase: string;
-  minimaxKey: string;
-  minimaxModel: string;
-  seedanceBase: string;
-  seedanceKey: string;
-  seedanceModel: string;
+  /**
+   * 云端生视频选中的服务商（地址 / 密钥 / 接口协议都来自这一行）。
+   * 视频页只挑厂商 + 模型，不再单独保存地址与密钥。
+   */
+  providerId: string;
+  model: string;
   comfyBase: string;
   comfyCkpt: string;
   comfyClip: string;
@@ -109,8 +122,11 @@ type RecordRow = typeof videoRecords.$inferSelect;
 // 常量
 // ---------------------------------------------------------------------------
 
-/** 各后端时长范围（秒）。 */
-export const VIDEO_DURATION_RANGE: Record<VideoGenBackend, { min: number; max: number }> = {
+/** 各接口协议的时长范围（秒）：云端按厂商协议分（MiniMax / Seedance），本地是 ComfyUI。 */
+export const VIDEO_DURATION_RANGE: Record<"minimax" | "seedance" | "comfyui", {
+  min: number;
+  max: number;
+}> = {
   minimax: { min: 4, max: 15 },
   seedance: { min: 3, max: 12 },
   comfyui: { min: 3, max: 15 },
@@ -125,15 +141,6 @@ export const VIDEO_COMFY_SIZES: Record<string, { width: number; height: number }
   "3:4": { width: 528, height: 704 },
 };
 
-export const MINIMAX_VIDEO_MODELS = ["MiniMax-H3", "MiniMax-H3-Max"];
-
-export const SEEDANCE_VIDEO_MODELS = [
-  "doubao-seedance-1-0-lite-t2v-250428",
-  "doubao-seedance-1-0-lite-i2v-250428",
-  "doubao-seedance-1-0-pro-t2v-250528",
-  "doubao-seedance-1-0-pro-i2v-250528",
-];
-
 /** 轮询兜底：超过 30 分钟仍未完成的任务标记为超时失败。 */
 const STALE_MS = 30 * 60_000;
 
@@ -146,13 +153,10 @@ const VIDEO_EXT_RE = /\.(mp4|webm|mov|mkv|gif)$/i;
 export function getVideoGenConfig(): VideoGenConfig {
   const backend = getSetting("VIDEO_BACKEND");
   return {
-    backend: backend === "comfyui" || backend === "seedance" ? backend : "minimax",
-    minimaxBase: (getSetting("VIDEO_MINIMAX_BASE") || "").trim(),
-    minimaxKey: (getSetting("VIDEO_MINIMAX_API_KEY") || "").trim(),
-    minimaxModel: (getSetting("VIDEO_MINIMAX_MODEL") || "").trim(),
-    seedanceBase: (getSetting("VIDEO_SEEDANCE_BASE") || "").trim(),
-    seedanceKey: (getSetting("VIDEO_SEEDANCE_API_KEY") || "").trim(),
-    seedanceModel: (getSetting("VIDEO_SEEDANCE_MODEL") || "").trim(),
+    // 旧值（minimax / seedance）归一成 cloud：那一套配置在启动时已迁成服务商行。
+    backend: backend === "comfyui" ? "comfyui" : "cloud",
+    providerId: (getSetting("VIDEO_PROVIDER_ID") || "").trim(),
+    model: (getSetting("VIDEO_MODEL") || "").trim(),
     comfyBase: (getSetting("VIDEO_COMFY_BASE") || "").trim(),
     comfyCkpt: (getSetting("VIDEO_COMFY_CKPT") || "").trim(),
     comfyClip: (getSetting("VIDEO_COMFY_CLIP") || "").trim(),
@@ -160,20 +164,64 @@ export function getVideoGenConfig(): VideoGenConfig {
   };
 }
 
+/** 保存生视频配置：视频页只写 backend / providerId / model。 */
 export function saveVideoGenConfig(cfg: Partial<VideoGenConfig>): void {
   const settings: Record<string, string> = {};
   if (cfg.backend !== undefined) settings.VIDEO_BACKEND = cfg.backend;
-  if (cfg.minimaxBase !== undefined) settings.VIDEO_MINIMAX_BASE = cfg.minimaxBase.trim();
-  if (cfg.minimaxKey !== undefined) settings.VIDEO_MINIMAX_API_KEY = cfg.minimaxKey.trim();
-  if (cfg.minimaxModel !== undefined) settings.VIDEO_MINIMAX_MODEL = cfg.minimaxModel.trim();
-  if (cfg.seedanceBase !== undefined) settings.VIDEO_SEEDANCE_BASE = cfg.seedanceBase.trim();
-  if (cfg.seedanceKey !== undefined) settings.VIDEO_SEEDANCE_API_KEY = cfg.seedanceKey.trim();
-  if (cfg.seedanceModel !== undefined) settings.VIDEO_SEEDANCE_MODEL = cfg.seedanceModel.trim();
+  if (cfg.providerId !== undefined) settings.VIDEO_PROVIDER_ID = cfg.providerId.trim();
+  if (cfg.model !== undefined) settings.VIDEO_MODEL = cfg.model.trim();
   if (cfg.comfyBase !== undefined) settings.VIDEO_COMFY_BASE = cfg.comfyBase.trim();
   if (cfg.comfyCkpt !== undefined) settings.VIDEO_COMFY_CKPT = cfg.comfyCkpt.trim();
   if (cfg.comfyClip !== undefined) settings.VIDEO_COMFY_CLIP = cfg.comfyClip.trim();
   if (cfg.comfyVae !== undefined) settings.VIDEO_COMFY_VAE = cfg.comfyVae.trim();
   updateSettings(settings);
+  if (cfg.providerId && cfg.model) {
+    CloudProviders.saveAppModelChoice({
+      settingKey: "VIDEO_PROVIDER_ID",
+      providerId: cfg.providerId.trim(),
+      model: cfg.model,
+      type: "video",
+    });
+  }
+}
+
+/** 云端生视频的一次调用目标：厂商地址 / 密钥 + 接口协议。 */
+type CloudVideoTarget = {
+  providerId: string;
+  providerName: string;
+  base: string;
+  key: string;
+  videoApi: "minimax" | "seedance";
+};
+
+/**
+ * 按服务商解析生视频调用目标。视频 API 没有统一标准，协议记在服务商行上
+ * （`videoApi`），没配协议的厂商不能用来生视频 —— 这里直接给出可读的原因。
+ */
+function resolveCloudTarget(providerId: string): CloudVideoTarget {
+  const provider = CloudProviders.resolveCloudProvider(providerId);
+  if (!provider) {
+    throw new Error("还没选择云厂商。请到「设置 → 模型云服务」启用一个支持生视频的厂商");
+  }
+  if (!provider.baseUrl.trim()) throw new Error(`云厂商「${provider.name}」还没有填 API 地址`);
+  const videoApi = provider.videoApi;
+  if (videoApi !== "minimax" && videoApi !== "seedance") {
+    throw new Error(`云厂商「${provider.name}」没有配置生视频接口（在设置里选 MiniMax / Seedance）`);
+  }
+  return {
+    providerId: provider.id,
+    providerName: provider.name,
+    base: provider.baseUrl.trim(),
+    key: provider.apiKey.trim(),
+    videoApi,
+  };
+}
+
+/** 失败日志用：解析不到也只能记个空，别让日志本身抛错。 */
+function providerTargetForLog(providerId: string): { base: string; hasApiKey: boolean } | null {
+  const provider = CloudProviders.resolveCloudProvider(providerId);
+  if (!provider) return null;
+  return { base: provider.baseUrl.trim(), hasApiKey: Boolean(provider.apiKey.trim()) };
 }
 
 function normalizeBase(base: string, suffix: string): string {
@@ -250,6 +298,7 @@ function toRow(
     status: r.status,
     source: r.source,
     backend: r.backend ?? null,
+    providerId: r.providerId ?? null,
     model: r.model,
     prompt: r.prompt,
     negativePrompt: r.negativePrompt,
@@ -302,6 +351,7 @@ function insertVideoRecord(data: {
   status?: "processing" | "done" | "failed";
   source?: MediaSource;
   backend?: VideoGenBackend | null;
+  providerId?: string | null;
   model?: string | null;
   prompt?: string | null;
   negativePrompt?: string | null;
@@ -323,6 +373,7 @@ function insertVideoRecord(data: {
       status: data.status ?? "processing",
       source: data.source ?? "manual",
       backend: data.backend ?? null,
+      providerId: data.providerId ?? null,
       model: data.model ?? null,
       prompt: data.prompt ?? null,
       negativePrompt: data.negativePrompt ?? null,
@@ -394,12 +445,13 @@ async function downloadToRef(url: string, fallbackName: string): Promise<string>
 // ---------------------------------------------------------------------------
 
 async function submitMinimax(
-  cfg: VideoGenConfig,
+  target: CloudVideoTarget,
   params: SubmitVideoParams,
+  fallbackModel: string,
 ): Promise<string> {
-  const base = normalizeBase(cfg.minimaxBase, "/v2").replace(/\/v2$/, "");
+  const base = normalizeBase(target.base, "/v2").replace(/\/v2$/, "");
   if (!base) throw new Error("请先配置 MiniMax 服务地址");
-  const model = params.model?.trim() || cfg.minimaxModel || MINIMAX_VIDEO_MODELS[0]!;
+  const model = params.model?.trim() || fallbackModel || MINIMAX_VIDEO_MODELS[0]!;
 
   const content: Record<string, unknown>[] = [{ type: "text", text: params.prompt }];
   if (params.firstFrameRef) {
@@ -423,7 +475,7 @@ async function submitMinimax(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(cfg.minimaxKey ? { Authorization: `Bearer ${cfg.minimaxKey}` } : {}),
+      ...(target.key ? { Authorization: `Bearer ${target.key}` } : {}),
     },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
@@ -442,13 +494,13 @@ async function submitMinimax(
 // ---------------------------------------------------------------------------
 
 async function submitSeedance(
-  cfg: VideoGenConfig,
+  target: CloudVideoTarget,
   params: SubmitVideoParams,
+  fallbackModel: string,
 ): Promise<string> {
-  const base = normalizeBase(cfg.seedanceBase, "/api/v3");
+  const base = normalizeBase(target.base, "/api/v3");
   if (!base) throw new Error("请先配置 Seedance（火山方舟）服务地址");
-  const model =
-    params.model?.trim() || cfg.seedanceModel || SEEDANCE_VIDEO_MODELS[0]!;
+  const model = params.model?.trim() || fallbackModel || SEEDANCE_VIDEO_MODELS[0]!;
 
   const range = VIDEO_DURATION_RANGE.seedance;
   const duration = Math.max(range.min, Math.min(range.max, Math.round(params.duration ?? 5)));
@@ -478,7 +530,7 @@ async function submitSeedance(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      ...(cfg.seedanceKey ? { Authorization: `Bearer ${cfg.seedanceKey}` } : {}),
+      ...(target.key ? { Authorization: `Bearer ${target.key}` } : {}),
     },
     body: JSON.stringify({ model, content }),
     signal: AbortSignal.timeout(60_000),
@@ -639,32 +691,12 @@ export async function submitVideoGeneration(
   // 优先使用前端实时配置（同生图：生成时直接用页面上的值并落盘）。
   const dbCfg = getVideoGenConfig();
   const cfg: VideoGenConfig = {
-    ...dbCfg,
     backend: params.config?.backend ?? dbCfg.backend,
-    minimaxBase:
-      params.config?.minimaxBase !== undefined
-        ? params.config.minimaxBase.trim()
-        : dbCfg.minimaxBase,
-    minimaxKey:
-      params.config?.minimaxKey !== undefined
-        ? params.config.minimaxKey.trim()
-        : dbCfg.minimaxKey,
-    minimaxModel:
-      params.config?.minimaxModel !== undefined
-        ? params.config.minimaxModel.trim()
-        : dbCfg.minimaxModel,
-    seedanceBase:
-      params.config?.seedanceBase !== undefined
-        ? params.config.seedanceBase.trim()
-        : dbCfg.seedanceBase,
-    seedanceKey:
-      params.config?.seedanceKey !== undefined
-        ? params.config.seedanceKey.trim()
-        : dbCfg.seedanceKey,
-    seedanceModel:
-      params.config?.seedanceModel !== undefined
-        ? params.config.seedanceModel.trim()
-        : dbCfg.seedanceModel,
+    providerId:
+      params.config?.providerId !== undefined
+        ? params.config.providerId.trim()
+        : dbCfg.providerId,
+    model: params.config?.model !== undefined ? params.config.model.trim() : dbCfg.model,
     comfyBase:
       params.config?.comfyBase !== undefined
         ? params.config.comfyBase.trim()
@@ -686,10 +718,8 @@ export async function submitVideoGeneration(
   const common = {
     source: params.source ?? "manual",
     backend: cfg.backend,
-    model:
-      params.model?.trim() ||
-      (cfg.backend === "seedance" ? cfg.seedanceModel : cfg.minimaxModel) ||
-      null,
+    providerId: cfg.backend === "cloud" ? cfg.providerId || null : null,
+    model: params.model?.trim() || cfg.model || null,
     prompt,
     negativePrompt: params.negativePrompt?.trim() || null,
     ratio: params.ratio ?? null,
@@ -720,14 +750,17 @@ export async function submitVideoGeneration(
       return { record: toRow(record) };
     }
 
+    // 云端：厂商决定接口协议（MiniMax / Seedance），地址与密钥同样来自厂商行。
+    const target = resolveCloudTarget(cfg.providerId);
     const taskId =
-      cfg.backend === "seedance"
-        ? await submitSeedance(cfg, params)
-        : await submitMinimax(cfg, params);
+      target.videoApi === "seedance"
+        ? await submitSeedance(target, params, cfg.model)
+        : await submitMinimax(target, params, cfg.model);
     const record = insertVideoRecord({ ...common, taskId });
     return { record: toRow(record) };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    const target = cfg.backend === "cloud" ? providerTargetForLog(cfg.providerId) : null;
     logEvent({
       level: "error",
       source: "video",
@@ -735,14 +768,10 @@ export async function submitVideoGeneration(
       message,
       detail: {
         backend: cfg.backend,
-        model:
-          (cfg.backend === "seedance"
-            ? cfg.seedanceModel
-            : cfg.backend === "minimax"
-              ? cfg.minimaxModel
-              : cfg.comfyCkpt) || null,
-        base: cfg.comfyBase || (cfg.backend === "seedance" ? cfg.seedanceBase : cfg.minimaxBase) || null,
-        hasApiKey: Boolean(cfg.backend === "seedance" ? cfg.seedanceKey : cfg.minimaxKey),
+        providerId: cfg.providerId || null,
+        model: (cfg.backend === "comfyui" ? cfg.comfyCkpt : cfg.model) || null,
+        base: cfg.comfyBase || target?.base || null,
+        hasApiKey: target?.hasApiKey ?? false,
         prompt: (params.prompt ?? "").slice(0, 300),
         firstFrame: params.firstFrameRef ?? null,
         error: e,
@@ -769,15 +798,15 @@ function normalizeProgress(raw: unknown): number | null {
   return n > 1 ? Math.min(1, n / 100) : n;
 }
 
-async function pollMinimax(cfg: VideoGenConfig, taskId: string): Promise<{
+async function pollMinimax(target: CloudVideoTarget, taskId: string): Promise<{
   done: boolean;
   failed?: string;
   videoUrl?: string;
   progress?: number | null;
 }> {
-  const base = normalizeBase(cfg.minimaxBase, "/v2").replace(/\/v2$/, "");
+  const base = normalizeBase(target.base, "/v2").replace(/\/v2$/, "");
   const res = await fetch(`${base}/v2/query/video_generation/${taskId}`, {
-    headers: cfg.minimaxKey ? { Authorization: `Bearer ${cfg.minimaxKey}` } : {},
+    headers: target.key ? { Authorization: `Bearer ${target.key}` } : {},
     signal: AbortSignal.timeout(30_000),
   });
   if (res.status === 404) return { done: true, failed: "上游任务不存在或已过期" };
@@ -824,15 +853,15 @@ async function pollMinimax(cfg: VideoGenConfig, taskId: string): Promise<{
   return { done: true, videoUrl: absolute };
 }
 
-async function pollSeedance(cfg: VideoGenConfig, taskId: string): Promise<{
+async function pollSeedance(target: CloudVideoTarget, taskId: string): Promise<{
   done: boolean;
   failed?: string;
   videoUrl?: string;
   progress?: number | null;
 }> {
-  const base = normalizeBase(cfg.seedanceBase, "/api/v3");
+  const base = normalizeBase(target.base, "/api/v3");
   const res = await fetch(`${base}/contents/generations/tasks/${taskId}`, {
-    headers: cfg.seedanceKey ? { Authorization: `Bearer ${cfg.seedanceKey}` } : {},
+    headers: target.key ? { Authorization: `Bearer ${target.key}` } : {},
     signal: AbortSignal.timeout(30_000),
   });
   if (res.status === 404) return { done: true, failed: "上游任务不存在或已过期" };
@@ -943,13 +972,23 @@ export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]>
     }
 
     try {
+      // 轮询按**记录里的厂商**去查：用户中途换了厂商也要把之前提交的任务查完。
+      // 升级前提交的记录没有 providerId（那一列是新加的），它的 backend 就是当时的
+      // 协议名；迁移把同一套地址 + 密钥搬成了当前选中的厂商行，所以这些在途任务
+      // 还能查回上游 —— 不兜底就会被误判成「厂商已删除」。
+      const legacyCloud = row.backend === "minimax" || row.backend === "seedance";
+      const providerId = row.providerId ?? (legacyCloud ? cfg.providerId : "");
+      const cloudTarget =
+        row.backend === "comfyui" || !providerId ? null : resolveCloudTarget(providerId);
       const result = !row.taskId
         ? { done: true, failed: "缺少上游任务 id" }
-        : row.backend === "seedance"
-          ? await pollSeedance(cfg, row.taskId)
-          : row.backend === "comfyui"
-            ? await pollComfy(cfg, row.taskId)
-            : await pollMinimax(cfg, row.taskId);
+        : cloudTarget?.videoApi === "seedance"
+          ? await pollSeedance(cloudTarget, row.taskId)
+          : cloudTarget?.videoApi === "minimax"
+            ? await pollMinimax(cloudTarget, row.taskId)
+            : row.backend === "comfyui"
+              ? await pollComfy(cfg, row.taskId)
+              : { done: true, failed: "这条任务的厂商已删除，无法继续查询上游状态" };
 
       if (!result.done) {
         out.push(toRow(row, result.progress ?? null));

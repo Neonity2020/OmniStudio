@@ -440,6 +440,8 @@ export function classifyModelName(rawName: string): ModelCategory {
       "image-to-video",
       "seedance",
       "hailuo",
+      // MiniMax 的生视频型号（MINIMAX_VIDEO_MODELS）：它的对话模型是 M1 / Text-01。
+      "minimax-h3",
       "kling",
       "veo",
       "sora",

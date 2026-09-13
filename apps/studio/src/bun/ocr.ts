@@ -4,6 +4,7 @@ import path from "path";
 import { db } from "./db";
 import { documents, pages } from "./db/schema";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
+import * as CloudProviders from "./cloud-providers";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
@@ -94,29 +95,44 @@ export type OcrVlmResult = {
 // ---------------------------------------------------------------------------
 
 export type OcrProviderConfig = {
+  /** 选中的云服务商 id（地址 / 密钥从 cloud_providers 表解析）。 */
+  providerId: string;
   base: string;
   apiKey: string;
   model: string;
 };
 
 export function getOcrProviderConfig(): OcrProviderConfig {
+  const providerId = (getSetting("OCR_PROVIDER_ID") || "").trim();
+  const provider = CloudProviders.resolveCloudProvider(providerId);
   return {
-    base: (getSetting("OCR_PROVIDER_BASE") || "").trim(),
-    apiKey: (getSetting("OCR_PROVIDER_API_KEY") || "").trim(),
+    providerId,
+    base: provider?.baseUrl.trim() ?? "",
+    apiKey: provider?.apiKey.trim() ?? "",
     model: (getSetting("OCR_PROVIDER_MODEL") || "").trim(),
   };
 }
 
+/**
+ * 保存 VLM OCR 配置：OCR 页只选「厂商 + 模型」，地址 / 密钥属于服务商
+ * （在「设置 → 模型云服务」里维护并启用），这里不再接收 base / apiKey。
+ */
 export function saveOcrProviderConfig(cfg: {
-  base?: string;
-  apiKey?: string;
+  providerId?: string;
   model?: string;
 }): void {
   const settings: Record<string, string> = {};
-  if (cfg.base !== undefined) settings.OCR_PROVIDER_BASE = cfg.base.trim();
-  if (cfg.apiKey !== undefined) settings.OCR_PROVIDER_API_KEY = cfg.apiKey.trim();
+  if (cfg.providerId !== undefined) settings.OCR_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.model !== undefined) settings.OCR_PROVIDER_MODEL = cfg.model.trim();
   updateSettings(settings);
+  if (cfg.providerId && cfg.model) {
+    CloudProviders.saveAppModelChoice({
+      settingKey: "OCR_PROVIDER_ID",
+      providerId: cfg.providerId.trim(),
+      model: cfg.model,
+      type: "chat",
+    });
+  }
 }
 
 /** 把用户填的地址规整成带 /v1 后缀的形式（兼容填不填 /v1 两种写法）。 */

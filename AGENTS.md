@@ -66,6 +66,18 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   A failure path without a `logEvent` call is a bug: the next person cannot diagnose it.
   Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
   `bun run --cwd apps/studio scripts/omni-diag.ts`
+- **Cloud models are picked as `provider → model`, never as a per-page URL + key**: image,
+  image-edit, video, TTS, ASR, live-translate and VLM OCR each store only a provider id
+  (`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / …) plus a model name; base URL and key come from
+  the `cloud_providers` row (`resolveCloudProvider`). Providers are *enabled* individually
+  (several at once — `enabled` column) and enabling runs a `/v1/models` key check, so a
+  page never has to ask for credentials again. Each model entry carries a **purpose**
+  (`CloudModelEntry.type`: image / video / tts / asr / chat / …; inferred from the id when
+  absent) and every picker filters by it — a new cloud model selector must go through
+  `CloudModelSelect` + `providersForType` instead of listing all providers.
+  Video is the exception that proves the rule: video APIs are not standardized, so the
+  provider row also carries `videoApi` ("minimax" | "seedance") and polling looks the
+  submitter up by the record's `providerId`.
 
 ## Hard Rules
 

@@ -288,7 +288,7 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 
 主进程推送的事件在 `lib/rpc.ts` 的 message handler 里**直接写 store**（不走 React 路径，避免每 token 重渲染），只在进入终态时 `queryClient.invalidateQueries()` 刷新对应 key。
 
-组件调主进程**没有封装层**：直接 `import { rpcClient }` 然后 `rpcClient.xxx()`。全项目约 220 处调用，语音页最多（53 处）。只有两处轻封装：`lib/use-engine.ts`（读写引擎设置）和 `local-engines/shared.tsx` 的 `useSettingsBlob` / `useSettingsPatch`。
+组件调主进程**没有封装层**：直接 `import { rpcClient }` 然后 `rpcClient.xxx()`。全项目约 220 处调用，语音页最多（53 处）。只有一处轻封装：`lib/use-engine.ts`（读写引擎设置）。
 
 **i18n** 是单文件双语词典 `shared/i18n.ts`（3000+ 键）+ 简单的 `{name}` 插值，运行时语言存 `stores/ui-lang.ts`，默认中文、回落链 zh → en → key。设置页的 tab 结构、屏幕与路由的映射关系见 `main-layout/settings.tsx` 的 `TAB_DEFS` / `TAB_GROUPS`。
 

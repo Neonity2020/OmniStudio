@@ -8,14 +8,13 @@ import {
   classifyModelName,
   engineSupports,
   fileKind,
-  filterModelIds,
   isChatModelCategory,
-  MODEL_CATEGORY_SETS,
   modelNameFromRef,
   resolveEngineForKind,
   type InferenceEngine,
   type ModelCategory,
 } from "../shared/modelscope";
+import { modelTypeOf } from "../shared/cloud-providers";
 import * as ModelStore from "./model-store";
 import * as Served from "./model-servers";
 import { activateCloudProvider, activeProviderId, listCloudProviders } from "./cloud-providers";
@@ -28,16 +27,18 @@ import { isMlxActive, resolveMlxModel } from "./runtimes/mlx";
  *    启动 / 卸载是控制台（设置 → 控制台）的事 —— 在下拉框里挑一下就触发一次冷启动、
  *    进度还塞不进那个小框里，体验很差。所以这里标出每个条目的状态，
  *    对话 / Agent / 翻译的选择器只显示已启动的，「默认模型」/ 集成选择器仍可先配后用。
- * 2. **云端只列已配置厂商的模型**。没填 API Key 的厂商连不上，列出来只会误导。
+ * 2. **云端只列「模型云服务」里配好的对话模型**：厂商已启用，且模型是用户在该厂商
+ *    的模型列表里添加过的、用途分类为对话的那一类。不拉 /v1/models 全量 —— 服务商
+ *    那份清单里生图 / 视频 / TTS / ASR / 嵌入全都有，列进对话选择器只会让人挑到
+ *    一个发不出聊天的模型（各功能页的 CloudModelSelect 是同一套规则）。
  */
 
 /**
- * Resolve the active chat model name.
- * Local models always use the canonical served name (slug) so it matches the
- * server's --alias / --served-model-name; HF references and the remote model
- * id act as fallbacks when no local file is configured.
+ * 本地侧的模型名（**不看 SERVER_MODE**）：已启动实例的服务名 → CHAT_MODEL →
+ * 本地模型名 / MLX 部署 / HF / 内置 profile。本地请求（网关、基准测试）与本地
+ * 展示都用它；`getChatModelName()` 按模式决定要不要用它。
  */
-export function getChatModelName(): string {
+function localChatModelName(): string {
   // 已启动实例的服务名就是服务器认的 id（含 MLX 的绝对路径），优先用它。
   const active = Served.getRequestTargetServedModel();
   if (active) return active.servedName;
@@ -45,26 +46,39 @@ export function getChatModelName(): string {
   const chatModel = getSetting("CHAT_MODEL");
   if (chatModel) return chatModel;
 
-  const isLocal = getSetting("SERVER_MODE") === "local";
-  if (isLocal) {
-    const localName = getSetting("LOCAL_MODEL_NAME");
-    if (localName) return localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
+  const localName = getSetting("LOCAL_MODEL_NAME");
+  if (localName) return localName.toLowerCase().replace(/[^a-z0-9_.-]/g, "-");
 
-    // MLX 引擎：部署的 HF repo id 即服务名（mlx_lm.server 的 --model 原样作为模型 id）。
-    const engine = getSetting("INFERENCE_ENGINE");
-    if (engine === "mlx") {
-      const mlxModel = getSetting("MLX_MODEL");
-      if (mlxModel) return mlxModel;
-    }
-
-    const customHf = getSetting("CUSTOM_HF_MODEL");
-    if (customHf) return customHf.split(":")[0] ?? customHf;
-
-    const profileId = getSetting("VLLM_MODEL_PROFILE");
-    const profile = getModelProfile(profileId);
-    return profile?.hfModel || "";
+  // MLX 引擎：部署的 HF repo id 即服务名（mlx_lm.server 的 --model 原样作为模型 id）。
+  const engine = getSetting("INFERENCE_ENGINE");
+  if (engine === "mlx") {
+    const mlxModel = getSetting("MLX_MODEL");
+    if (mlxModel) return mlxModel;
   }
 
+  const customHf = getSetting("CUSTOM_HF_MODEL");
+  if (customHf) return customHf.split(":")[0] ?? customHf;
+
+  const profileId = getSetting("VLLM_MODEL_PROFILE");
+  const profile = getModelProfile(profileId);
+  return profile?.hfModel || "";
+}
+
+/**
+ * Resolve the active chat model name.
+ * Local models always use the canonical served name (slug) so it matches the
+ * server's --alias / --served-model-name; HF references and the remote model
+ * id act as fallbacks when no local file is configured.
+ *
+ * **已启动的本地实例只在本地模式下代表「当前模型」**：切到云端不会停掉本地实例
+ * （切换是瞬时的，见 `selectChatModel`），不加模式判断就会把本地服务名 —— MLX 下
+ * 甚至是一个绝对路径 —— 当成云端模型名发出去，对端只会回一句
+ * "Model does not exist"。请求该填什么见 `getChatRequestModelId()`。
+ */
+export function getChatModelName(): string {
+  if (getSetting("SERVER_MODE") === "local") return localChatModelName();
+  // 云端：只认云端槽位。CHAT_MODEL 里往往还留着上一个本地模型的名字 / 路径
+  // （本地激活就写它），拿它当云端模型名同样是 "Model does not exist"。
   return getSetting("VLLM_MODEL_NAME") || "";
 }
 
@@ -78,10 +92,7 @@ export function getChatModelName(): string {
  */
 export function getLocalRequestModelId(): string {
   // 活动实例的 servedName 由注册表按同一套约定算好（MLX 下就是绝对路径）。
-  const active = Served.getRequestTargetServedModel();
-  if (active) return active.servedName;
-
-  const name = getChatModelName();
+  const name = localChatModelName();
   if (!isMlxActive()) return name;
   // MLX 下即便服务名是空的（云端模式残留 / 只配了本地目录），也要给出它认的 id
   return resolveMlxModel().requestModelId || name;
@@ -93,10 +104,15 @@ export function getLocalRequestModelId(): string {
  * 与 `getChatModelName()` 的区别只在 MLX：那条路径上的请求 id 是绝对路径，
  * 直接拿去显示就会出现「模型名是一串 /Users/…」。请求该填什么仍由
  * `getLocalRequestModelId()` / `getChatRequestModelId()` 决定，这里只管显示。
+ *
+ * 同样按模式取：云端模式下显示云端模型，而不是还在跑的本地实例 —— 否则会话标题
+ * 会写着本地模型，请求却发给了云端厂商。
  */
 export function getChatModelLabel(): string {
-  const active = Served.getRequestTargetServedModel();
-  if (active) return active.label || modelNameFromRef(active.servedName, active.modelRef);
+  if (getSetting("SERVER_MODE") === "local") {
+    const active = Served.getRequestTargetServedModel();
+    if (active) return active.label || modelNameFromRef(active.servedName, active.modelRef);
+  }
   return modelNameFromRef(getChatModelName());
 }
 
@@ -170,34 +186,16 @@ function isChatCategory(category: ModelCategory): boolean {
   return isChatModelCategory(category);
 }
 
-/** 从配置的 OpenAI 兼容服务拉取 /v1/models 列表（失败时返回空数组）。 */
-async function fetchApiModels(): Promise<string[]> {
-  const base = (getSetting("VLLM_API_BASE") || "").trim().replace(/\/+$/, "");
-  if (!base) return [];
-  const apiKey = getSetting("VLLM_API_KEY");
-  const url = /\/v1$/i.test(base) ? `${base}/models` : `${base}/v1/models`;
-  try {
-    const res = await fetch(url, {
-      headers: apiKey && apiKey !== "EMPTY" ? { Authorization: `Bearer ${apiKey}` } : {},
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return [];
-    const json = (await res.json().catch(() => null)) as { data?: { id?: string }[] } | null;
-    return (json?.data ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => typeof id === "string" && id.length > 0);
-  } catch {
-    return [];
-  }
-}
-
-/** 已配置的云服务商：有地址且填了 Key（或者就是当前激活的那个，本地兼容端点常不带 Key）。 */
+/**
+ * 对话可选的云服务商：**已在设置页「启动」过**（启用时校验过密钥）且有地址的那些。
+ * 可以同时启用多个厂商 —— 列表里每个厂商的模型各成一组，按厂商名选。
+ * 当前激活的厂商即使没启用也保留（历史数据 / 本地兼容端点常不带 Key）。
+ */
 function enabledCloudProviders(activeProvider: string | null) {
   return listCloudProviders().providers.filter((p) => {
     if ((p.baseUrl || "").trim() === "") return false;
-    if (p.id === activeProvider) return true;
-    const key = (p.apiKey || "").trim();
-    return key !== "" && key !== "EMPTY";
+    if (p.enabled) return true;
+    return p.id === activeProvider;
   });
 }
 
@@ -209,7 +207,9 @@ function enabledCloudProviders(activeProvider: string | null) {
  * 状态为 stopped —— 对话 / Agent 的选择器只显示已启动的（启动在控制台做），
  * 而「默认模型」/ 集成选择器仍能先把模型配上、稍后再启动。
  *
- * 云端：已配置厂商的模型（含激活厂商实时 /v1/models 拉到的，保证新模型可见）。
+ * 云端：**只列用户在厂商「模型列表」里添加过的对话模型**。厂商那份清单是唯一的
+ * 事实来源 —— 没添加过的（哪怕 /v1/models 里能拉到）不进对话选择器，显式标成
+ * 生图 / 视频 / TTS / ASR 等用途的也一律不进。
  */
 export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
   const models: ChatModelOption[] = [];
@@ -295,26 +295,21 @@ export async function listChatModels(): Promise<{ models: ChatModelOption[] }> {
   const cloudModel = mode === "remote" ? getSetting("CHAT_MODEL") || apiModel : "";
 
   for (const provider of enabledCloudProviders(activeProvider)) {
-    const ids = new Set(provider.models.map((m) => m.id).filter(Boolean));
-    // 激活厂商额外拉一次实时列表：新上线的模型不用等用户去面板里同步。
-    if (provider.id === activeProvider) {
-      for (const id of await fetchApiModels()) ids.add(id);
-      // 手动配置的模型名即使不在 /v1/models 里也保留可选（老行为的兜底）。
-      if (apiModel) ids.add(apiModel);
-    }
-    // 服务商的 /v1/models 是"这个账号能用的所有模型"：嵌入 / 重排 / 语音 / 生图
-    // 都在里面，这里只留对话能用的（认不出的保留）。
-    const { ids: chatIds } = filterModelIds([...ids], MODEL_CATEGORY_SETS.chat, {
-      keepOther: true,
-    });
-    for (const id of chatIds) {
+    for (const entry of provider.models) {
+      const id = (entry.id || "").trim();
+      if (!id) continue;
+      // 用途分类：用户在面板里显式标过就以标注为准，否则按 id 自动识别。
+      // 认不出的（other）留着 —— 自定义 / 自建端点常是五花八门的名字，
+      // 漏掉它们比多列一条更糟；生图 / 视频 / 语音这些认得出的一律不进对话列表。
+      const category = modelTypeOf(entry);
+      if (!isChatCategory(category)) continue;
       models.push({
         type: "api",
         value: id,
         label: id,
         detail: provider.name,
         isActive: mode === "remote" && provider.id === activeProvider && id === cloudModel,
-        category: classifyModelName(id),
+        category,
         state: "stopped",
         providerId: provider.id,
         providerName: provider.name,

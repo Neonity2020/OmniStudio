@@ -1,4 +1,5 @@
 import { getSetting, updateSettings } from "./db/settings";
+import * as CloudProviders from "./cloud-providers";
 
 /**
  * Qwen Audio Realtime（DashScope「实时语音通话」云端模式）。
@@ -33,6 +34,8 @@ export const DEFAULT_REALTIME_VOICE = "longanqian";
 
 export type RealtimeProviderConfig = {
   provider: VoiceCallProvider;
+  /** 选中的云厂商（密钥从它取）；空 = 用旧版手填的 Key。 */
+  providerId: string;
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -45,10 +48,17 @@ export function getVoiceCallProvider(): VoiceCallProvider {
   return getSetting("VOICE_CALL_PROVIDER") === "cloud" ? "cloud" : "local";
 }
 
+/**
+ * 实时通话的云端配置。API Key 优先取选中厂商的（与其它功能页同一套配置），
+ * 没选厂商时回退到旧版手填的 `VOICE_CALL_REALTIME_API_KEY`。
+ */
 export function getRealtimeProviderConfig(): RealtimeProviderConfig {
-  const apiKey = (getSetting("VOICE_CALL_REALTIME_API_KEY") || "").trim();
+  const providerId = (getSetting("VOICE_CALL_REALTIME_PROVIDER_ID") || "").trim();
+  const provider = CloudProviders.resolveCloudProvider(providerId);
+  const apiKey = provider?.apiKey.trim() || (getSetting("VOICE_CALL_REALTIME_API_KEY") || "").trim();
   return {
     provider: getVoiceCallProvider(),
+    providerId,
     apiKey,
     baseUrl: (getSetting("VOICE_CALL_REALTIME_BASE_URL") || DEFAULT_REALTIME_BASE_URL).trim(),
     model: (getSetting("VOICE_CALL_REALTIME_MODEL") || DEFAULT_REALTIME_MODEL).trim(),
@@ -59,6 +69,7 @@ export function getRealtimeProviderConfig(): RealtimeProviderConfig {
 
 export function saveRealtimeProviderConfig(cfg: {
   provider?: VoiceCallProvider;
+  providerId?: string;
   apiKey?: string;
   baseUrl?: string;
   model?: string;
@@ -66,6 +77,7 @@ export function saveRealtimeProviderConfig(cfg: {
 }): void {
   const settings: Record<string, string> = {};
   if (cfg.provider !== undefined) settings.VOICE_CALL_PROVIDER = cfg.provider;
+  if (cfg.providerId !== undefined) settings.VOICE_CALL_REALTIME_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.apiKey !== undefined) settings.VOICE_CALL_REALTIME_API_KEY = cfg.apiKey.trim();
   if (cfg.baseUrl !== undefined) settings.VOICE_CALL_REALTIME_BASE_URL = cfg.baseUrl.trim();
   if (cfg.model !== undefined) settings.VOICE_CALL_REALTIME_MODEL = cfg.model.trim();

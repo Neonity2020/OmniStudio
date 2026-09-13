@@ -33,19 +33,28 @@ import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import {
   CLOUD_PRESETS,
+  modelTypeOf,
   providerColor,
   type CloudModelEntry,
+  type CloudModelType,
   type CloudProviderInfo,
+  type CloudVideoApi,
 } from "@/shared/cloud-providers";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { classifyModelName, MODEL_CATEGORIES, type ModelCategory } from "@/shared/modelscope";
 import { ModelCategoryBadge, ModelCategoryIcon } from "@components/model-category-badge";
 import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
 
 /**
  * 「模型云服务」面板：严格三栏布局（左设置导航由 SettingsScreen 提供）——
- * 中栏服务商源列表（搜索 + 启用开关 + 模型数 + 添加），右栏选中服务商的
+ * 中栏服务商源列表（搜索 + 启动开关 + 模型数 + 添加），右栏选中服务商的
  * 连接配置（API 密钥 / API 地址）与模型管理表格。
  * 所有操作即时落库（cloud_providers 表），激活行同步写回 VLLM_* 槽位。
+ *
+ * 关于「启动」：可以同时启动多个服务商。启动时会拿 /v1/models 校验密钥 ——
+ * 校验不过就不启动并把原因显示出来。功能页（生图 / 语音 / OCR / 视频）只列
+ * 已启动服务商的模型，页面里不再有地址与密钥输入框。
+ * 每个模型带「用途」（生图 / TTS / ASR / 视频 / 对话…），决定它出现在哪个功能页。
  */
 
 /**
@@ -189,12 +198,23 @@ export function CloudProviderPanel() {
     ? providers.filter((p) => `${p.name} ${p.vendor}`.toLowerCase().includes(vendorNeedle))
     : providers;
 
-  const activateMutation = useMutation({
-    mutationFn: (on: boolean) =>
-      on && selectedId
-        ? rpcClient.cloudProviderActivate({ id: selectedId })
-        : rpcClient.cloudProviderDeactivate(undefined),
-    onSuccess: invalidate,
+  /**
+   * 启动 / 停用服务商。启动时主进程会用 /v1/models 校验密钥，失败原因回填到
+   * `enableError` 显示在开关下面 —— 「启动」这个动作要保证之后各功能页能直接用。
+   */
+  const [enableError, setEnableError] = useState<{ id: string; message: string } | null>(null);
+  const enableMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      rpcClient.cloudProviderSetEnabled({ id, enabled }),
+    onSuccess: (result, vars) => {
+      if (!result.ok) {
+        setEnableError({ id: vars.id, message: result.error ?? t("cloud.enableFailed") });
+      } else {
+        setEnableError(null);
+      }
+      invalidate();
+    },
+    onError: (e, vars) => setEnableError({ id: vars.id, message: String(e) }),
   });
 
   // ------------------------------------------------------------------
@@ -214,6 +234,14 @@ export function CloudProviderPanel() {
     mutationFn: (patch: { baseUrl?: string; apiKey?: string }) => {
       if (!selected) return Promise.resolve({ ok: false });
       return rpcClient.cloudProviderUpdate({ id: selected.id, ...patch });
+    },
+    onSuccess: invalidate,
+  });
+
+  const videoApiMutation = useMutation({
+    mutationFn: (videoApi: CloudVideoApi) => {
+      if (!selected) return Promise.resolve({ ok: false });
+      return rpcClient.cloudProviderUpdate({ id: selected.id, videoApi });
     },
     onSuccess: invalidate,
   });
@@ -249,12 +277,27 @@ export function CloudProviderPanel() {
   const [modelSearch, setModelSearch] = useState("");
   const [modelTab, setModelTab] = useState<ModelCategory | "all">("all");
   const models = selected?.models ?? [];
-  // 每个模型按 id 判分类（云端返回的清单里对话 / 嵌入 / 重排 / 语音 / 生图混在一起，
-  // 按分类打标 + 筛选，用户才能一眼看出哪个模型该用在哪个场景）。
+  // 每个模型的用途：用户显式指定的优先，否则按 id 自动识别（云端返回的清单里
+  // 对话 / 嵌入 / 重排 / 语音 / 生图混在一起，按用途打标 + 筛选，用户才能一眼
+  // 看出哪个模型该用在哪个场景）。这个用途同时决定功能页里能不能选到它。
   const modelsWithCategory = useMemo(
-    () => models.map((m) => ({ entry: m, category: classifyModelName(m.id) })),
+    () => models.map((m) => ({ entry: m, category: modelTypeOf(m) })),
     [models],
   );
+
+  /** 改单个模型的用途：写回 models 数组（undefined = 恢复自动识别）。 */
+  const setModelTypeMutation = useMutation({
+    mutationFn: async ({ id, type }: { id: string; type?: CloudModelType }) => {
+      if (!selected) return;
+      const next = models.map((m) => {
+        if (m.id !== id) return m;
+        const { type: _drop, ...rest } = m;
+        return type ? { ...rest, type } : rest;
+      });
+      await rpcClient.cloudProviderUpdate({ id: selected.id, models: next });
+    },
+    onSuccess: invalidate,
+  });
   const modelNeedle = modelSearch.trim().toLowerCase();
   const filteredModels = useMemo(() => {
     const byTab =
@@ -295,6 +338,7 @@ export function CloudProviderPanel() {
   const [dlgName, setDlgName] = useState("");
   const [dlgGroup, setDlgGroup] = useState("");
   const [dlgRemark, setDlgRemark] = useState("");
+  const [dlgType, setDlgType] = useState<CloudModelType | "auto">("auto");
   const [dlgMore, setDlgMore] = useState(false);
 
   const addModelMutation = useMutation({
@@ -311,6 +355,7 @@ export function CloudProviderPanel() {
             name: dlgName.trim() || undefined,
             group: dlgGroup.trim() || undefined,
             remark: dlgRemark.trim() || undefined,
+            type: dlgType === "auto" ? undefined : dlgType,
           },
         ],
       });
@@ -320,6 +365,7 @@ export function CloudProviderPanel() {
       setDlgName("");
       setDlgGroup("");
       setDlgRemark("");
+      setDlgType("auto");
       setDlgMore(false);
       setShowAddModel(false);
       invalidate();
@@ -409,7 +455,6 @@ export function CloudProviderPanel() {
           </div>
           <div className="flex max-h-[560px] flex-col gap-0.5 overflow-y-auto rounded-xl bg-muted/40 p-1.5">
             {filteredProviders.map((p) => {
-              const isActive = p.id === activeId && remoteMode;
               const isSelected = p.id === selectedId;
               return (
                 <div
@@ -434,12 +479,12 @@ export function CloudProviderPanel() {
                     {p.models.length}
                   </span>
                   <Toggle
-                    checked={isActive}
-                    disabled={activateMutation.isPending}
-                    title={t("cloud.toggleTitle")}
+                    checked={p.enabled}
+                    disabled={enableMutation.isPending}
+                    title={t("cloud.enableTitle")}
                     onChange={() => {
                       setSelectedId(p.id);
-                      activateMutation.mutate(!isActive);
+                      enableMutation.mutate({ id: p.id, enabled: !p.enabled });
                     }}
                   />
                 </div>
@@ -460,6 +505,9 @@ export function CloudProviderPanel() {
             <PlusIcon data-icon="inline-start" className="size-3.5" />
             {t("cloud.add")}
           </Button>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {t("cloud.enableAllHint")}
+          </p>
         </div>
 
         {/* 右栏：选中服务商详情 */}
@@ -478,13 +526,31 @@ export function CloudProviderPanel() {
               <div className="flex items-center gap-3.5">
                 <ProviderLogo provider={selected} size="lg" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-base font-semibold">{selected.name}</p>
+                  <p className="flex items-center gap-2 truncate text-base font-semibold">
+                    {selected.name}
+                    {selected.enabled ? (
+                      <span className="flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                        <CheckIcon className="size-3" /> {t("cloud.enableOk")}
+                      </span>
+                    ) : null}
+                    {isSelectedActive && remoteMode ? (
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                        {t("cloud.using")}
+                      </span>
+                    ) : null}
+                  </p>
                   {selected.vendor && (
                     <p className="truncate text-xs text-muted-foreground" title={selected.vendor}>
                       {selected.vendor}
                     </p>
                   )}
                 </div>
+                <Toggle
+                  checked={selected.enabled}
+                  disabled={enableMutation.isPending}
+                  title={t("cloud.enableTitle")}
+                  onChange={() => enableMutation.mutate({ id: selected.id, enabled: !selected.enabled })}
+                />
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -495,6 +561,21 @@ export function CloudProviderPanel() {
                   <Trash2Icon className="size-4" />
                 </Button>
               </div>
+
+              {/* 启动失败的密钥校验原因：直接显示在详情里，不让用户去猜 */}
+              {enableMutation.isPending && enableMutation.variables?.id === selected.id && (
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Spinner className="size-3" /> {t("cloud.enabling")}
+                </p>
+              )}
+              {enableError?.id === selected.id && !enableMutation.isPending && (
+                <p className="flex items-center gap-1.5 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <XCircleIcon className="size-3.5 shrink-0" />
+                  <span className="min-w-0">
+                    {t("cloud.enableFailed")}：{enableError.message}
+                  </span>
+                </p>
+              )}
 
               {/* 连接配置卡片：API 密钥 / API 地址 */}
               <div className="divide-y rounded-xl border bg-card shadow-sm">
@@ -592,6 +673,29 @@ export function CloudProviderPanel() {
                     </p>
                   )}
                 </div>
+
+                {/* 生视频接口：视频 API 各家不通用，选协议后该厂商才能用来生视频 */}
+                <div className="flex items-center gap-3 px-4 py-3.5">
+                  <div className="min-w-0 flex-1">
+                    <Label className="mb-1 block text-xs">{t("cloud.videoApi")}</Label>
+                    <Select
+                      value={selected.videoApi || "none"}
+                      onValueChange={(v) => videoApiMutation.mutate(v === "none" ? "" : (v as CloudVideoApi))}
+                    >
+                      <SelectTrigger size="sm" className="h-8 w-52 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">{t("cloud.videoApiNone")}</SelectItem>
+                        <SelectItem value="minimax">MiniMax（/v2/video_generation）</SelectItem>
+                        <SelectItem value="seedance">Seedance（火山方舟 Ark）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="max-w-72 text-[11px] text-muted-foreground">
+                    {t("cloud.videoApiHint")}
+                  </p>
+                </div>
               </div>
 
               {/* 模型管理卡片：工具栏 + 表格 */}
@@ -674,7 +778,9 @@ export function CloudProviderPanel() {
                       <thead>
                         <tr className="border-b text-left text-muted-foreground">
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colModel")}</th>
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colCategory")}</th>
+                          <th className="px-2 py-1.5 font-medium" title={t("cloud.modelTypeHint")}>
+                            {t("cloud.colType")}
+                          </th>
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colGroup")}</th>
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colStatus")}</th>
                           <th className="px-2 py-1.5 text-right font-medium">
@@ -697,11 +803,40 @@ export function CloudProviderPanel() {
                                   )}
                                 </span>
                               </td>
+                              {/* 用途可改：自动识别认不出（other）或认错时，用户在这里
+                                  定死它属于哪个功能页。改完功能页的选择器立即跟着变。 */}
                               <td className="px-2 py-1.5">
-                                <ModelCategoryBadge
-                                  category={category}
-                                  label={t(`models.cat.${category}`)}
-                                />
+                                <Select
+                                  value={entry.type ?? "auto"}
+                                  onValueChange={(v) =>
+                                    setModelTypeMutation.mutate({
+                                      id: entry.id,
+                                      type: v === "auto" ? undefined : (v as CloudModelType),
+                                    })
+                                  }
+                                  disabled={setModelTypeMutation.isPending}
+                                >
+                                  <SelectTrigger
+                                    size="sm"
+                                    className="h-6 w-[7.5rem] gap-1 border-transparent bg-transparent px-1 text-[11px] hover:border-input"
+                                    title={t("cloud.modelTypeHint")}
+                                  >
+                                    <ModelCategoryBadge
+                                      category={category}
+                                      label={t(`models.cat.${category}`)}
+                                    />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="auto">
+                                      <span className="text-[11px]">{t("cloud.modelTypeAuto")}</span>
+                                    </SelectItem>
+                                    {MODEL_CATEGORIES.filter((c) => c.value !== "all").map((c) => (
+                                      <SelectItem key={c.value} value={c.value}>
+                                        <span className="text-[11px]">{t(c.labelKey)}</span>
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
                               </td>
                               <td className="px-2 py-1.5">
                                 {entry.group ? (
@@ -809,6 +944,28 @@ export function CloudProviderPanel() {
                 />
               </div>
             ))}
+            {/* 用途：决定这个模型出现在哪个功能页（留"自动识别"则按模型名判断） */}
+            <div className="flex items-center gap-3">
+              <Label htmlFor="dlg-model-type" className="w-20 shrink-0 text-xs">
+                {t("cloud.modelType")}
+              </Label>
+              <Select
+                value={dlgType}
+                onValueChange={(v) => setDlgType(v as CloudModelType | "auto")}
+              >
+                <SelectTrigger id="dlg-model-type" size="sm" className="h-8 min-w-0 flex-1 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">{t("cloud.modelTypeAuto")}</SelectItem>
+                  {MODEL_CATEGORIES.filter((c) => c.value !== "all").map((c) => (
+                    <SelectItem key={c.value} value={c.value}>
+                      {t(c.labelKey)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <button
               type="button"
               onClick={() => setDlgMore((v) => !v)}
@@ -1006,7 +1163,7 @@ function RemoteModelsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* DialogContent 自带 sm:max-w-sm，宽屏下得用同样的断点前缀才盖得住 */}
+      {/* 只在 ≥640px 放宽：小于断点时仍用 DialogContent 的默认宽度 */}
       <DialogContent className="sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">

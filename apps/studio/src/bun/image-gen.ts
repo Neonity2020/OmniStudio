@@ -10,6 +10,7 @@ import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import * as MlxGen from "./mlx-gen";
 import { findMlxModel } from "./mlx-gen";
+import * as CloudProviders from "./cloud-providers";
 import { logEvent } from "./app-log";
 
 /**
@@ -56,6 +57,12 @@ export type ImageRecordRow = {
 
 export type ImageGenConfig = {
   backend: ImageGenBackend;
+  /**
+   * 云端后端选中的服务商 id（「设置 → 模型云服务」里配置的厂商）。
+   * 地址与密钥由服务商行提供 —— 图像页只挑厂商 + 模型，不再单独保存连接信息。
+   */
+  providerId: string;
+  /** 服务商地址 / 密钥（只读派生：从 providerId 解析，见 `getImageGenConfig`）。 */
   apiBase: string;
   apiKey: string;
   model: string;
@@ -92,23 +99,39 @@ type RecordRow = typeof imageRecords.$inferSelect;
 
 export function getImageGenConfig(): ImageGenConfig {
   const backend = getSetting("IMG_BACKEND");
+  const providerId = (getSetting("IMG_PROVIDER_ID") || "").trim();
+  const provider = CloudProviders.resolveCloudProvider(providerId);
   return {
     backend: backend === "comfyui" || backend === "mlx" ? backend : "api",
-    apiBase: (getSetting("IMG_API_BASE") || "").trim(),
-    apiKey: (getSetting("IMG_API_KEY") || "").trim(),
+    providerId,
+    // 地址与密钥只有一个来源：选中的云厂商。
+    apiBase: provider?.baseUrl.trim() ?? "",
+    apiKey: provider?.apiKey.trim() ?? "",
     model: (getSetting("IMG_MODEL") || "").trim(),
     comfyBase: (getSetting("IMG_COMFY_BASE") || "").trim(),
   };
 }
 
+/**
+ * 保存生图配置。后端页面只写 backend / providerId / model —— 地址与密钥属于
+ * 服务商（设置页维护），旧调用方传 apiBase/apiKey 时忽略，避免又出现第二份连接信息。
+ */
 export function saveImageGenConfig(cfg: Partial<ImageGenConfig>): void {
   const settings: Record<string, string> = {};
   if (cfg.backend !== undefined) settings.IMG_BACKEND = cfg.backend;
-  if (cfg.apiBase !== undefined) settings.IMG_API_BASE = cfg.apiBase.trim();
-  if (cfg.apiKey !== undefined) settings.IMG_API_KEY = cfg.apiKey.trim();
+  if (cfg.providerId !== undefined) settings.IMG_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.model !== undefined) settings.IMG_MODEL = cfg.model.trim();
   if (cfg.comfyBase !== undefined) settings.IMG_COMFY_BASE = cfg.comfyBase.trim();
   updateSettings(settings);
+  // 选中的模型并进厂商清单（带"生图"分类），下次打开选择器就能看到它。
+  if (cfg.providerId && cfg.model) {
+    CloudProviders.saveAppModelChoice({
+      settingKey: "IMG_PROVIDER_ID",
+      providerId: cfg.providerId.trim(),
+      model: cfg.model,
+      type: "image",
+    });
+  }
 }
 
 /** 把用户填的地址规整成带 /v1 后缀的形式（兼容填不填 /v1 两种写法）。 */
@@ -578,17 +601,18 @@ async function generateViaComfy(
 export async function generateImage(
   params: GenerateImageParams,
 ): Promise<{ records: ImageRecordRow[]; error?: string }> {
-  // 优先使用前端实时配置（用户可能改了地址/key 但还没点“保存”，生成时应直接用页面上的值），
-  // 缺失字段回退到数据库里已保存的配置；同时把实时配置落盘，避免下次读到旧值。
+  // 优先使用前端实时配置（用户可能换了厂商 / 模型但还没点“保存”），缺失字段回退到
+  // 数据库里已保存的配置；同时把实时配置落盘，避免下次读到旧值。
+  // 地址与密钥不来自页面：一律按选中的服务商现取（页面只存 providerId）。
   const dbCfg = getImageGenConfig();
+  const providerId =
+    params.config?.providerId !== undefined ? params.config.providerId.trim() : dbCfg.providerId;
+  const provider = CloudProviders.resolveCloudProvider(providerId);
   const cfg: ImageGenConfig = {
     backend: params.config?.backend ?? dbCfg.backend,
-    apiBase:
-      params.config?.apiBase !== undefined
-        ? params.config.apiBase.trim()
-        : dbCfg.apiBase,
-    apiKey:
-      params.config?.apiKey !== undefined ? params.config.apiKey.trim() : dbCfg.apiKey,
+    providerId,
+    apiBase: provider?.baseUrl.trim() ?? "",
+    apiKey: provider?.apiKey.trim() ?? "",
     model:
       params.config?.model !== undefined ? params.config.model.trim() : dbCfg.model,
     comfyBase:
