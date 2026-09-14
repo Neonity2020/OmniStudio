@@ -72,6 +72,12 @@ export const messages = sqliteTable("messages", {
   reasoning: text("reasoning"),
   images: text("images"),
   tokens: int("tokens"),
+  /**
+   * assistant 消息：这次生成的用量统计 JSON（输入 / 输出 / 思考 tokens、
+   * 首 token 耗时、两种吞吐…，形状见 `bun/chat-stats.ts`）。
+   * 有了它，刷新会话后消息详情里的速度仍是当时那次的真实值。
+   */
+  stats: text("stats"),
   /** user 消息：发送时挂载的知识库 id JSON 数组（重新生成时复用检索）。 */
   kbIds: text("kb_ids"),
   /** assistant 消息：知识库引用溯源（KbCitation[] 的 JSON）。 */
@@ -864,3 +870,77 @@ export const automationRuns = sqliteTable(
 );
 
 export type AutomationRunRow = typeof automationRuns.$inferSelect;
+
+/**
+ * Agent 的目标（Goal 模式）。
+ *
+ * Goal 模式和 Agent 模式的区别不在工具集，而在**谁来推进**：Agent 模式跑完这一轮就停，
+ * Goal 模式在回合结束后自己接着跑，直到验收标准满足、或撞上预算 / 被用户打断。
+ * 所以这张表存的是"当前目标 + 跑到哪了 + 花了多少"——没有它，Goal 模式只是一段提示词。
+ *
+ * 一个会话同时只有一个目标（conversation_id 做主键），重新 create 会覆盖。
+ */
+export const agentGoals = sqliteTable("agent_goals", {
+  conversationId: int("conversation_id").primaryKey(),
+  /** 要达成什么（用户的原话或模型复述过的一句）。 */
+  objective: text("objective").notNull(),
+  /** 验收标准：怎么算达成 —— 由模型在开工前与用户对齐后写进来。 */
+  acceptance: text("acceptance"),
+  /**
+   * active = 正在推进（回合结束后会自动续跑）
+   * paused = 用户按了停止，不会再自动续跑（下次交互时恢复）
+   * budget-limited = 撞上 token / 时间预算，已停手等用户发话
+   * complete / dropped = 终态
+   */
+  status: text("status")
+    .$type<"active" | "paused" | "budget-limited" | "complete" | "dropped">()
+    .notNull()
+    .default("active"),
+  /** token 预算上限（null = 不限制；由用户设置或 goal 工具写入）。 */
+  tokenBudget: int("token_budget"),
+  /**
+   * 已用 token。**刻意不把 cacheRead 算进来**（对齐 OMP）：
+   * 前缀缓存命中的部分并没有真的重新送一遍上下文，把它算成"烧掉的预算"会让
+   * 开了缓存之后预算瞬间爆掉 —— 那是记账口径错，不是目标跑太多。
+   */
+  tokensUsed: int("tokens_used").notNull().default(0),
+  /** 已用墙钟秒数（只累计真正在跑的回合，不含等待用户的时间）。 */
+  secondsUsed: int("seconds_used").notNull().default(0),
+  /** 已经自动续跑了多少个回合 —— 防"永远跑下去"的兜底刹车之一。 */
+  continuations: int("continuations").notNull().default(0),
+  /** 终态时模型给的结论 / 放弃原因。 */
+  outcome: text("outcome"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+  updatedAt: int("updated_at")
+    .$defaultFn(() => Date.now())
+    .$onUpdateFn(() => Date.now()),
+});
+
+export type AgentGoalRow = typeof agentGoals.$inferSelect;
+
+/**
+ * Plan 模式产出的方案。
+ *
+ * Plan 模式**只能写这一个东西**（工具集里没有写文件的能力，只有 `write_plan`），
+ * 所以"方案落盘"这件事必须在这里留痕，否则切回 Agent 模式后模型手里就没有那份方案了
+ * ——只能去历史正文里捞。
+ *
+ * 批准（approvedAt 有值）之后，方案正文会被注入执行轮与子智能体的开场上下文。
+ */
+export const agentPlans = sqliteTable("agent_plans", {
+  conversationId: int("conversation_id").primaryKey(),
+  /** 方案正文（Markdown）。 */
+  content: text("content").notNull(),
+  /** 写这条方案的助手消息 id：界面据此把「批准并执行」画在那条消息下面。 */
+  messageId: int("message_id"),
+  /** 落盘路径（数据目录下 plans/ 里的 md 文件），供产出物面板预览。 */
+  filePath: text("file_path"),
+  /** 用户点了「批准并执行」的时间。 */
+  approvedAt: int("approved_at"),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+  updatedAt: int("updated_at")
+    .$defaultFn(() => Date.now())
+    .$onUpdateFn(() => Date.now()),
+});
+
+export type AgentPlanRow = typeof agentPlans.$inferSelect;

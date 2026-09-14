@@ -1547,12 +1547,6 @@ function parseImageSize(size: string): { width: number; height: number } | null 
   return { width, height };
 }
 
-/** 从 imageUrl 逆向出 images 根目录下的相对路径（chatImageUrl 的 ref）。 */
-function refFromImageUrl(imageUrl: string): string | null {
-  const m = /^https?:\/\/[^/]+\/(.+)$/.exec(imageUrl);
-  return m ? decodeURIComponent(m[1]!) : null;
-}
-
 async function handleImageGeneration(req: Request): Promise<Response> {
   let body: Record<string, unknown>;
   try {
