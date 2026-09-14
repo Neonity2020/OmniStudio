@@ -78,6 +78,22 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   Video is the exception that proves the rule: video APIs are not standardized, so the
   provider row also carries `videoApi` ("minimax" | "seedance") and polling looks the
   submitter up by the record's `providerId`.
+- **One proxy governs every outbound request** (Settings → Preferences → General):
+  `bun/proxy.ts` wraps `globalThis.fetch` at startup, so cloud model calls (chat / image /
+  video / TTS / ASR / OCR / translate), the model hubs, engine and weight downloads, web
+  search and remote backup all honor `PROXY_MODE` (`system` / `custom` / `none`) +
+  `PROXY_URL` without touching a single call site. Loopback always bypasses (local inference
+  server, gateway, media server); LAN follows the `PROXY_ALLOW_LOCAL_NETWORK` toggle. The
+  rules live in `shared/proxy.ts` and the settings page renders "who goes through the proxy"
+  from that same code, so the UI cannot drift from the real behavior.
+  Subprocesses (`pip`, python workers, `git lfs`, brew, and the four inference engines
+  fetching weights) only read env vars: `syncProxyEnv()` keeps `HTTP(S)_PROXY` + `NO_PROXY`
+  in the process env, and download spawns merge `proxyChildEnv()`.
+  Three Bun quirks shape this: per-request `proxy` beats env, **socks is unsupported**
+  (`UnsupportedProxyProtocol`), and env proxies are latched at startup while `NO_PROXY`
+  ignores CIDR — hence "no proxy" is expressed as `NO_PROXY=*` instead of deleting variables.
+  `bun run --cwd apps/studio scripts/proxy-smoke.ts` exercises the whole chain, including a
+  real trip through a local HTTP proxy.
 
 ## Hard Rules
 
@@ -88,12 +104,18 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 - Python helper scripts (`mlx-worker.py`, `mlx-model.py`, `ppocr-worker.py`) are spawned via
   `import.meta.dir` relative paths, so they must stay listed in `electrobun.config.ts`'s
   `build.copy`. Missing them exits Python with code 2 and surfaces as bogus model download failures.
+  Same rule for `omni-landlock.c` (the Linux Landlock helper `landlock-helper.ts` compiles with
+  `cc` on first use): if it is not copied into `bun/`, Linux silently degrades to "no compiler".
 - Child processes are spawned `detached` and killed by process group (`kill(-pid)`) — killing
   only the direct child leaves VRAM-hogging orphans behind.
 - Anything that resolves a user-supplied path (downloads, media, Skills deletes) must validate
   it against the data directory — inputs arrive from the webview and the control socket.
 - Adding an inference engine means editing `src/shared/engines.ts` plus one `Runtime`
   implementation; do not hardcode engine checks elsewhere.
+- Outbound HTTP goes through the global `fetch` (patched by `bun/proxy.ts`) or, when you must
+  bypass it, per-request `proxy` — do not open raw sockets or side-channel HTTP clients for
+  remote hosts, or that request silently ignores the user's proxy settings. Loopback IPC
+  fetches (`unix:` control socket) are exempt and deliberately left untouched.
 - `src/bun/backup/*` must not import `db/index.ts` or `electrobun` — that isolation is what
   lets `omi backup` work when the app won't start (migrations failed). Entry points that
   need the data layer belong in `src/cli/commands/backup.ts`, not in the kernel.
