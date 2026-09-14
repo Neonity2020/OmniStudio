@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+## [0.0.8-canary.2] - 2026-09-14
+
+### Fixed / 修复
+
 - **Landlock 辅助程序：规格里 `access` 类型写错会被静默跳过（fail-closed 没兜住）**：`mask_from()`
   遇到不是数组的 `access` 返回 0，而规则循环里 `if (!allowed) continue` 把"规格写错了"和
   "这条规则在当前内核上没有有效权限（老内核，合法）"合成了同一个出口。于是一份坏规格
@@ -19,6 +23,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
   运行还暴露了好几条"只在 macOS 成立"的断言（`/dev/pts`、`/dev/shm` 在 macOS 上不存在，
   于是整段断言被静默跳过；`landlockReady` 留给本机探测又让"Linux 一定不支持"在装了 gcc 的
   runner 上必然失败）—— 都改成注入式、与宿主无关。
+- **Linux 沙箱端到端把 FUSE 的控制接口当成了 FUSE 数据挂载**：检测用的 `/^fuse/` 会匹配到
+  `fusectl`（挂在 `/sys/fs/fuse/connections`），而那不是能在上面放工作区的数据文件系统 ——
+  于是 CI runner 上"不兼容样本"选中了它，接着断言"canary 在这里必须失败"，可读取 `/sys`
+  本来就被规则允许（根目录给了 read_dir / read_file），canary 必然通过：一个假样本制造出
+  两条永远红的用例。现在精确匹配真数据文件系统（`fuse` / `fuse.<name>` / `fuseblk` /
+  `fakeowner`）并显式排除 `fusectl`；另外补了一条**确定性**用例（canary 指向打不开的路径时
+  必须如实拒绝）—— 原来那条依赖宿主机恰好有 FUSE 挂载，CI 上没有，等于"不兼容文件系统 →
+  别硬上"这条分支在 CI 里从来没被走过；单测里也用注入 runner 钉住了这段 plumbing。
 
 ## [0.0.8-canary.1] - 2026-09-14
 
