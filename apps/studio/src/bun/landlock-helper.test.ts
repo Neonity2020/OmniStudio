@@ -11,7 +11,9 @@ import {
   helperSourcePath,
   landlockCommand,
   landlockHelper,
+  probeLandlockWorkspace,
   resetLandlockHelperCache,
+  resetLandlockCanaryCache,
   type HelperRunner,
 } from "./landlock-helper";
 import { landlockRulesetSpec } from "./agent-sandbox";
@@ -166,6 +168,49 @@ describe("编译与探测", () => {
     expect(probes).toBe(2);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.abi).toBe(3);
+  });
+
+  test("canary：辅助程序说「规则在这个文件系统上不生效」时如实拒绝（不硬上）", () => {
+    // 这条分支在 CI 里没有天然样本（runner 上没有 FUSE 数据挂载），但它是
+    // "不兼容文件系统 → 换回 bwrap / 如实降级"的唯一入口，不能没人测。
+    // 用注入的 runner 直接喂辅助程序那条 stderr：plumbing 对不对与内核无关。
+    const reason =
+      "omni-landlock: canary check failed for /work after restricting (No such file or directory): " +
+      "Landlock rules do not take effect on this filesystem";
+    const runner: HelperRunner = {
+      run: (cmd) =>
+        cmd[1] === "--probe"
+          ? { code: 0, stdout: "3\n", stderr: "" }
+          : { code: 125, stdout: "", stderr: reason },
+    };
+    const probe = probeLandlockWorkspace("/work", {
+      binary: "/bin/true",
+      runner,
+      refresh: true,
+    });
+    expect(probe.ok).toBe(false);
+    expect(probe.reason).toContain("canary");
+    // 与 omni-landlock.c 里的原文一致（少一个 s 就会以为这段 plumbing 没生效）。
+    expect(probe.reason).toContain("do not take effect on this filesystem");
+  });
+
+  test("canary：通过时 ok，且带上工作区与档位做缓存键（换档位要重探）", () => {
+    let probes = 0;
+    const runner: HelperRunner = {
+      run: (cmd) => {
+        if (cmd[1] !== "--probe") probes += 1;
+        return { code: 0, stdout: "3\n", stderr: "" };
+      },
+    };
+    const first = probeLandlockWorkspace("/work", { binary: "/bin/true", runner, refresh: true });
+    expect(first.ok).toBe(true);
+    expect(first.reason).toBeNull();
+    // 同一工作区 + 同一档位命中缓存，不再真跑。
+    probeLandlockWorkspace("/work", { binary: "/bin/true", runner });
+    expect(probes).toBe(1);
+    // 换档位是另一条缓存键：必须重探（read-only 的规则集不同）。
+    probeLandlockWorkspace("/work", { binary: "/bin/true", runner, mode: "read-only" });
+    expect(probes).toBe(2);
   });
 
   test("缓存产物探测失败且重编也编不出来：如实报不支持，不抛异常", () => {

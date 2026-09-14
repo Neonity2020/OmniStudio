@@ -69,9 +69,21 @@ const inside = path.join(workspace, "inside.txt");
 const tempTarget = path.join(tmpdir(), `omni-landlock-temp-${process.pid}.txt`);
 
 /**
+ * FUSE **数据**文件系统的 fstype。
+ *
+ * 必须显式排除 `fusectl`：它是 FUSE 的**控制接口**（挂在 `/sys/fs/fuse/connections`），
+ * 不是能在上面放工作区的数据文件系统，而它的 fstype 恰好以 `fuse` 开头 ——
+ * 照字面用 `/^fuse/` 匹配（原来的写法）会在 CI runner 上把它当成"不兼容样本"，
+ * 接着断言"canary 在这里必须失败"，而实际上读取 `/sys` 本来就被规则允许（根目录给了
+ * read_dir / read_file），canary 必然通过 —— 于是一个假样本制造出两条永远红的用例。
+ * `fuseblk`（NTFS-3G 之类）是真数据文件系统，要留住。
+ */
+const FUSE_DATA_FSTYPE = /^(fuse(?!ctl)|fuse\.[a-z0-9_.-]+|fakeowner)$/i;
+
+/**
  * 本机有没有 FUSE 类挂载（canary 的已知不兼容样本）。
  * 从 /proc/self/mountinfo 里找：Docker Desktop 的共享目录是 `fakeowner`，
- * 其它 FUSE 实现是 `fuse` / `fuse.<name>`。
+ * 其它 FUSE 实现是 `fuse` / `fuse.<name>` / `fuseblk`。
  */
 function findIncompatibleMount(): string | null {
   try {
@@ -82,7 +94,7 @@ function findIncompatibleMount(): string | null {
       const right = parts[1];
       if (!left || !right) continue;
       const fstype = right.split(" ")[0] ?? "";
-      if (!/^fuse|^fakeowner$/.test(fstype)) continue;
+      if (!FUSE_DATA_FSTYPE.test(fstype)) continue;
       // mountinfo 的第 5 个字段是挂载点（已按 \040 转义空格）。
       const mountPoint = left.split(" ")[4]?.replace(/\\040/g, " ");
       if (mountPoint && existsSync(mountPoint)) return mountPoint;
@@ -200,6 +212,20 @@ try {
     );
   } else {
     console.log(`· 本机没有 FUSE 类挂载样本，跳过 canary 不兼容性检查`);
+  }
+
+  // 9b) canary 的**确定性**版本：上面那条依赖宿主机恰好有 FUSE 挂载（CI runner 上没有），
+  //     于是"canary 说不兼容时会拒绝硬上"这条路在 CI 里从来没被走过。
+  //     指向一个不存在的目录必然让 exec 前的 canary 打开失败 —— 与 FUSE 那条走的是
+  //     同一个分支，差别只是原因（ENOENT 而不是规则落空），不依赖任何环境。
+  {
+    const gone = path.join(workspace, "does-not-exist");
+    const probe = helper.probeLandlockWorkspace(gone, { refresh: true });
+    check(
+      "canary 打不开目标时如实拒绝（不兼容文件系统那条分支的确定性版本）",
+      probe.ok === false && (probe.reason ?? "").includes("canary"),
+      probe.ok ? "竟然通过了 —— 打不开的路径不该被当成可用工作区" : (probe.reason ?? "").slice(0, 140),
+    );
   }
 
   // 10) 禁网：Landlock 的 net 规则没实现 → 必须让位/如实降级，不能装作拦住了。
