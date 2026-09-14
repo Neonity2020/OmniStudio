@@ -17,77 +17,45 @@ export type TranslationRecordRow = {
   createdAt: number;
 };
 
-/** 谷歌「浏览器同款」免费翻译接口（gtx），国内网络自动走系统代理。 */
-let cachedProxy: string | null | undefined;
-
-async function detectSystemProxy(): Promise<string | null> {
-  if (cachedProxy !== undefined) return cachedProxy;
-  try {
-    if (process.platform === "darwin") {
-      const proc = Bun.spawn(["scutil", "--proxy"], { stdout: "pipe", stderr: "pipe" });
-      const out = await new Response(proc.stdout).text();
-      const get = (k: string) =>
-        out.match(new RegExp(`^\\s*${k}\\s*:\\s*(.+)$`, "m"))?.[1]?.trim() ?? "";
-      const enabled = get("HTTPSEnable") || get("HTTPEnable");
-      const host = get("HTTPSProxy") || get("HTTPProxy");
-      const port = get("HTTPSPort") || get("HTTPPort");
-      cachedProxy = enabled === "1" && host && port ? `http://${host}:${port}` : null;
-      return cachedProxy;
-    }
-  } catch {
-    // 探测失败按无代理处理
-  }
-  cachedProxy = null;
-  return null;
-}
-
+/** 谷歌「浏览器同款」免费翻译接口（gtx）。走代理与否由全局设置决定（见 bun/proxy.ts）。 */
 async function googleTranslate(
   text: string,
   sourceLang: string,
   targetLang: string,
 ): Promise<string> {
-  const proxy =
-    process.env.HTTPS_PROXY || process.env.https_proxy || (await detectSystemProxy());
-  const prev = process.env.HTTPS_PROXY;
-  if (proxy) process.env.HTTPS_PROXY = proxy;
+  const body = new URLSearchParams({
+    client: "gtx",
+    sl: sourceLang === "auto" ? "auto" : sourceLang,
+    tl: targetLang,
+    dt: "t",
+    q: text,
+  });
+  const res = await fetch("https://translate.googleapis.com/translate_a/single", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`谷歌翻译请求失败 (HTTP ${res.status})`);
+  const raw = await res.text();
+  let data: unknown;
   try {
-    const body = new URLSearchParams({
-      client: "gtx",
-      sl: sourceLang === "auto" ? "auto" : sourceLang,
-      tl: targetLang,
-      dt: "t",
-      q: text,
-    });
-    const res = await fetch("https://translate.googleapis.com/translate_a/single", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: body.toString(),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!res.ok) throw new Error(`谷歌翻译请求失败 (HTTP ${res.status})`);
-    const raw = await res.text();
-    let data: unknown;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      // 个别响应里会出现字面量 undefined（非合法 JSON），替换后再解析
-      data = JSON.parse(raw.replace(/\bundefined\b/g, "null"));
-    }
-    const segments = (Array.isArray(data) ? (data as unknown[])[0] : undefined) as
-      | unknown[]
-      | undefined;
-    if (!Array.isArray(segments) || segments.length === 0) {
-      throw new Error("谷歌翻译响应格式异常");
-    }
-    const out = segments
-      .map((s) => (Array.isArray(s) ? String(s[0] ?? "") : ""))
-      .join("");
-    if (!out.trim()) throw new Error("谷歌翻译未返回译文");
-    return out;
-  } finally {
-    if (prev === undefined) delete process.env.HTTPS_PROXY;
-    else process.env.HTTPS_PROXY = prev;
+    data = JSON.parse(raw);
+  } catch {
+    // 个别响应里会出现字面量 undefined（非合法 JSON），替换后再解析
+    data = JSON.parse(raw.replace(/\bundefined\b/g, "null"));
   }
+  const segments = (Array.isArray(data) ? (data as unknown[])[0] : undefined) as
+    | unknown[]
+    | undefined;
+  if (!Array.isArray(segments) || segments.length === 0) {
+    throw new Error("谷歌翻译响应格式异常");
+  }
+  const out = segments
+    .map((s) => (Array.isArray(s) ? String(s[0] ?? "") : ""))
+    .join("");
+  if (!out.trim()) throw new Error("谷歌翻译未返回译文");
+  return out;
 }
 
 /**
