@@ -61,22 +61,30 @@ const sseChunks = [
   `data: ${JSON.stringify({ choices: [{ delta: {} }], usage: { prompt_tokens: 10, completion_tokens: 4 } })}\n\n`,
   `data: [DONE]\n\n`,
 ];
+// 有些网关（代理 / 老版本 llama.cpp）不回 usage：统计必须退回本地估算。
+const sseChunksNoUsage = [
+  `data: ${JSON.stringify({ choices: [{ delta: { content: "估" } }] })}\n\n`,
+  `data: ${JSON.stringify({ choices: [{ delta: { content: "算" } }] })}\n\n`,
+  `data: [DONE]\n\n`,
+];
 let fetchCalls = 0;
 const originalFetch = globalThis.fetch;
 globalThis.fetch = mock(async (_url: unknown, init: unknown) => {
   fetchCalls++;
+  const body = typeof init === "object" && init && "body" in init ? String((init as { body?: unknown }).body ?? "") : "";
+  const chunks = body.includes("没有 usage") ? sseChunksNoUsage : sseChunks;
   const enc = new TextEncoder();
   let i = 0;
   const stream = new ReadableStream({
     pull(controller) {
-      if (i < sseChunks.length) controller.enqueue(enc.encode(sseChunks[i++]));
+      if (i < chunks.length) controller.enqueue(enc.encode(chunks[i++]));
       else controller.close();
     },
   });
   return new Response(stream, { status: 200 });
 }) as never;
 
-const { createConversation, sendMessage, deleteMessage, regenerateMessage, translateMessage, getConversation, onChatChunk, onChatDone, onChatStats } = await import("./chat");
+const { createConversation, sendMessage, deleteMessage, regenerateMessage, translateMessage, getConversation, onChatChunk, onChatDone, onChatStats, titleFromMessage } = await import("./chat");
 
 afterAll(() => {
   // 恢复全局 fetch，避免把 mock 泄漏给同一批次运行的其他测试文件。
@@ -97,6 +105,11 @@ test("sendMessage streams, persists content+tokens and emits stats", async () =>
   const offDone = onChatDone(() => events.push("done"));
   const stats: number[] = [];
   const offStats = onChatStats((s) => stats.push(s.tokens));
+  // 最后一份完整统计（用量卡片读的就是它）。
+  let last: Parameters<Parameters<typeof onChatStats>[0]>[0] | null = null;
+  const offStatsFull = onChatStats((s) => {
+    last = s;
+  });
 
   const res = await sendMessage(conv.id, "hello");
   expect(res.ok).toBe(true);
@@ -105,18 +118,51 @@ test("sendMessage streams, persists content+tokens and emits stats", async () =>
   expect(events[events.length - 1]).toBe("done");
   expect(stats).toEqual([4]);
 
+  // 用量卡片依赖这些字段：网关不回 usage 时也得靠自己算出来。
+  expect(last!.inputTokens).toBe(10);
+  expect(last!.outputTokens).toBe(4);
+  expect(last!.source).toBe("usage");
+  expect(last!.elapsedMs).toBeGreaterThan(0);
+  expect(last!.tokensPerSec).toBeGreaterThan(0);
+  expect(last!.endToEndTokensPerSec).toBeGreaterThan(0);
+  expect(last!.ttftMs).toBeGreaterThanOrEqual(0);
+
   const { messages } = getConversation(conv.id);
   expect(messages.map((m) => m.role)).toEqual(["user", "assistant"]);
   expect(at(messages, 1).content).toBe("你好世界");
   expect(at(messages, 1).tokens).toBe(4);
+  // 统计随消息落库：重开会话（刷新页面）后详情卡片仍显示当时那次的速度。
+  expect(at(messages, 1).stats?.tokensPerSec).toBe(last!.tokensPerSec);
+  expect(at(messages, 1).stats?.inputTokens).toBe(10);
 
   offChunk();
   offDone();
   offStats();
+  offStatsFull();
 });
 
-test("deleteMessage removes the row", async () => {
+test("网关不回 usage 时退回本地估算并如实标注", async () => {
   const conv = createConversation(undefined, "chat");
+  let last: Parameters<Parameters<typeof onChatStats>[0]>[0] | null = null;
+  const offStats = onChatStats((s) => {
+    last = s;
+  });
+
+  const res = await sendMessage(conv.id, "没有 usage 的一次请求");
+  expect(res.ok).toBe(true);
+
+  expect(last!.source).toBe("estimate");
+  expect(last!.outputTokens).toBe(2); // "估算" → 2 个 CJK 字符
+  expect(last!.inputTokens).toBeGreaterThan(0); // 按请求体估算，不留空
+  expect(last!.ttftMs).toBeGreaterThanOrEqual(0);
+  expect(last!.tokensPerSec).toBeGreaterThan(0);
+
+  const { messages } = getConversation(conv.id);
+  expect(at(messages, 1).stats?.source).toBe("estimate");
+  offStats();
+});
+
+test("deleteMessage removes the row", async () => {  const conv = createConversation(undefined, "chat");
   const res = await sendMessage(conv.id, "to be deleted");
   expect(res.ok).toBe(true);
   const { messages } = getConversation(conv.id);
@@ -159,4 +205,22 @@ test("translateMessage appends a streamed translation", async () => {
   const translated = at(messages, messages.length - 1);
   expect(translated.role).toBe("assistant");
   expect(translated.content).toBe("你好世界");
+});
+
+test("会话标题取首条消息开头：压平空白、超长补省略号", () => {
+  expect(titleFromMessage("你好")).toBe("你好");
+  // 换行与连续空格归一成单个空格：标题里不该出现换行，也不该丢掉第二行
+  expect(titleFromMessage("\n\n  帮我分析日志  \n\n顺便看看磁盘")).toBe("帮我分析日志 顺便看看磁盘");
+  expect(titleFromMessage("帮我把这段代码\n改成 TypeScript")).toBe("帮我把这段代码 改成 TypeScript");
+
+  // 超长：截断并**补省略号**。此前四处各写一遍 `slice(0, 40)` —— 40 个字的 nowrap
+  // 标题放不进 275px 的侧栏，会把会话行顶到 530px，列表跟着长出横向滚动条。
+  const long = "我用TTS生成一个你自己的一段介绍的音频。不用太长你可以调用咱们系统里面你能用到的模型";
+  const title = titleFromMessage(long);
+  expect(title).toBe(`${long.slice(0, 24)}…`);
+  expect(title.endsWith("…")).toBe(true);
+  expect(title.length).toBeLessThan(long.length);
+
+  // 空白 / 只有图片时退回默认标题（与调用方约定一致）
+  expect(titleFromMessage("   \n  ")).toBe("New conversation");
 });

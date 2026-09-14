@@ -1,6 +1,6 @@
-import { expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
-import { useChatStore } from "./chat";
+import { liveOutputTokens, liveTokensPerSec, useChatStore, type LiveTurnStats } from "./chat";
 import type { ChatMessage } from "../../bun/chat";
 
 /**
@@ -81,4 +81,80 @@ test("本地乐观插入的用户消息：服务端收录后不重复，未收�
     [2, "上一个回答"],
     [3, "新问题"],
   ]);
+});
+
+/**
+ * 生成中的实时速度（底部胶囊那行跳动的 token/秒）。
+ * 这部分不碰 React，直接对 store 断言比渲染整棵聊天树稳定得多。
+ */
+describe("流式实时统计", () => {
+  beforeEach(() => {
+    useChatStore.setState({
+      activeConversationId: 1,
+      activeMessages: [],
+      streaming: false,
+      messageStats: {},
+      liveStats: {},
+      runStartedAt: null,
+    });
+  });
+
+  test("按增量累计字符，token 数不因多次取整而虚高", () => {
+    useChatStore.getState().setStreaming(true);
+    const store = useChatStore.getState();
+    // 20 个 "ab " 增量 = 60 个字符 = 15 tokens；
+    // 若每个增量各自 ceil 会得到 20 —— 必须按累计值折算。
+    for (let i = 0; i < 20; i += 1) store.appendChunk(1, 42, "ab ");
+    const live = useChatStore.getState().liveStats[42]!;
+    expect(liveOutputTokens(live)).toBe(15);
+  });
+
+  test("思考增量单独记，也算进输出总量", () => {
+    useChatStore.getState().setStreaming(true);
+    const store = useChatStore.getState();
+    store.appendChunk(1, 7, "你好", "reasoning");
+    store.appendChunk(1, 7, "abcd");
+    const live = useChatStore.getState().liveStats[7]!;
+    expect(live.reasoningCjk).toBe(2);
+    expect(live.contentOther).toBe(4);
+    expect(liveOutputTokens(live)).toBe(3); // 2 + ceil(4/4)
+  });
+
+  test("速度按首 token 之后的窗口算，没有首 token 时不报速度", () => {
+    const live: LiveTurnStats = {
+      startedAt: 1000,
+      firstTokenAt: 2000,
+      contentCjk: 0,
+      contentOther: 400, // 100 tokens
+      reasoningCjk: 0,
+      reasoningOther: 0,
+    };
+    expect(liveTokensPerSec(live, 4000)).toBe(50);
+    expect(liveTokensPerSec({ ...live, firstTokenAt: null }, 4000)).toBe(0);
+    // 窗口为 0 也不能除零。
+    expect(Number.isFinite(liveTokensPerSec(live, 2000))).toBe(true);
+  });
+
+  test("收尾后清掉实时进度，交给实测统计", () => {
+    useChatStore.getState().setStreaming(true);
+    useChatStore.getState().appendChunk(1, 9, "hello");
+    expect(useChatStore.getState().liveStats[9]).toBeDefined();
+    useChatStore.getState().finalizeMessage(1, 9, "hello");
+    expect(useChatStore.getState().liveStats[9]).toBeUndefined();
+    expect(useChatStore.getState().streaming).toBe(false);
+  });
+
+  test("切走会话时不留下别的会话的实时进度", () => {
+    useChatStore.getState().setStreaming(true);
+    useChatStore.getState().appendChunk(1, 5, "abc");
+    useChatStore.getState().setActiveMessages([assistant(6, "x")]);
+    expect(useChatStore.getState().liveStats[5]).toBeUndefined();
+  });
+
+  test("会话不匹配的增量被忽略（切会话竞态）", () => {
+    useChatStore.getState().setStreaming(true);
+    useChatStore.getState().appendChunk(999, 1, "nope");
+    expect(useChatStore.getState().liveStats[1]).toBeUndefined();
+    expect(useChatStore.getState().activeMessages).toHaveLength(0);
+  });
 });

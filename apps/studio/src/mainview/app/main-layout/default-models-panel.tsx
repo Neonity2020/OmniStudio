@@ -15,6 +15,7 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ENGINE_SHORT_NAMES } from "@/shared/engines";
+import { modelNameFromRef } from "@/shared/modelscope";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import {
@@ -209,10 +210,16 @@ function ChatModelCard() {
   const chatModel = settings?.CHAT_MODEL ?? "";
   const apiModel = settings?.VLLM_MODEL_NAME ?? "";
   const activePath = settings?.LOCAL_MODEL_PATH ?? "";
-  const current = mode === "remote" ? apiModel || chatModel : activePath || chatModel;
 
   const options = modelsQuery.data?.models ?? [];
+  // 本地先认「正在用的那个实例」：值对上了下拉框才显示模型名，而不是把
+  // LOCAL_MODEL_PATH / MLX 的请求 id（绝对路径）当名字摆出来。
+  const currentLocal = options.find((o) => o.type === "local" && o.isActive);
+  const current =
+    mode === "remote" ? apiModel || chatModel : (currentLocal?.value ?? (activePath || chatModel));
   const currentOption = options.find((o) => o.value === current);
+  // 清单里没有的当前值（老数据 / 厂商那边删掉的模型）：本地同样收敛成模型名再展示。
+  const currentLabel = currentOption?.label ?? modelNameFromRef(current);
 
   const selectMutation = useMutation({
     mutationFn: (opt: { type: "local" | "api"; value: string }) => rpcClient.selectChatModel(opt),
@@ -280,7 +287,7 @@ function ChatModelCard() {
           {current && !currentOption && (
             <SelectGroup>
               <SelectItem value={current}>
-                <span className="truncate">{current}</span>
+                <span className="truncate">{currentLabel}</span>
                 <span className="truncate text-[10px] text-muted-foreground/70">
                   {t("defaults.current")}
                 </span>

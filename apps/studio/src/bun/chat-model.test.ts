@@ -145,8 +145,14 @@ mock.module("./cloud-providers", () => ({
 }));
 
 const Served = await import("./model-servers");
-const { listChatModels, selectChatModel, getChatModelName, getChatModelLabel, getChatRequestModelId } =
-  await import("./chat-model");
+const {
+  listChatModels,
+  selectChatModel,
+  getChatModelName,
+  getChatModelLabel,
+  getChatRequestModelId,
+  chatModelSupportsImages,
+} = await import("./chat-model");
 
 const tmpDir = mkdtempSync(join(tmpdir(), "chat-model-test-"));
 const modelA = join(tmpDir, "a.gguf");
@@ -452,5 +458,42 @@ describe("请求侧模型 id", () => {
     SETTINGS.SERVER_MODE = "local";
     SETTINGS.CHAT_MODEL = "qwen3-8b";
     expect(getChatModelName()).toBe("qwen3-8b");
+  });
+});
+
+/**
+ * 视觉能力探测（决定 Agent 是否拿到 view_image）。
+ *
+ * 判错的代价不对称：把图片发给纯文本模型，服务端会直接 400（整轮报废）；
+ * 反过来只是"少一个工具"。所以默认按模型名猜 + 允许强制开关。
+ */
+describe("chatModelSupportsImages", () => {
+  test("本地模型按名字判断：视觉模型 / 纯文本模型", () => {
+    SETTINGS.SERVER_MODE = "local";
+    SETTINGS.CHAT_MODEL = "Qwen2.5-VL-7B-Instruct-4bit";
+    expect(chatModelSupportsImages()).toBe(true);
+
+    SETTINGS.CHAT_MODEL = "qwen3-8b";
+    expect(chatModelSupportsImages()).toBe(false);
+  });
+
+  test("云端模式默认放行（主力模型基本都支持视觉）", () => {
+    SETTINGS.SERVER_MODE = "remote";
+    SETTINGS.VLLM_MODEL_NAME = "gpt-5";
+    expect(chatModelSupportsImages()).toBe(true);
+  });
+
+  test("AGENT_VISION_TOOL 可以强制开关（auto 之外的档位不受模型名影响）", () => {
+    SETTINGS.SERVER_MODE = "local";
+    SETTINGS.CHAT_MODEL = "qwen3-8b";
+    SETTINGS.AGENT_VISION_TOOL = "on";
+    expect(chatModelSupportsImages()).toBe(true);
+
+    SETTINGS.CHAT_MODEL = "Qwen2.5-VL-7B";
+    SETTINGS.AGENT_VISION_TOOL = "off";
+    expect(chatModelSupportsImages()).toBe(false);
+
+    SETTINGS.AGENT_VISION_TOOL = "auto";
+    expect(chatModelSupportsImages()).toBe(true);
   });
 });

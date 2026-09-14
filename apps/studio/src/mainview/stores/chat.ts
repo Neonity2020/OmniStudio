@@ -1,6 +1,43 @@
 import { create } from "zustand";
 import type { Conversation, ChatMessage, ChatStats } from "../../bun/chat";
+import { tokenParts, tokensFromParts } from "../../shared/token-estimate";
 import type { KbCitation } from "../../shared/knowledge";
+
+/**
+ * 流式过程中的实时进度（按助手消息 id 索引）。
+ *
+ * 收尾统计要等 `chatStats` 推送，而"现在有多快"是用户边等边想看的：
+ * 这里按增量累计字符数，界面按当前时刻换算速度，生成中就能显示。
+ * 计数用**累计字符**而不是每个增量各自取整 —— 后者会把总数抬高一大截
+ * （每个增量向上取整一次，一秒几十次）。
+ */
+export type LiveTurnStats = {
+  /** 本轮请求发出的时刻（首 token 耗时的起点）。 */
+  startedAt: number;
+  /** 首个增量到达的时刻；还没有任何输出时为 null。 */
+  firstTokenAt: number | null;
+  /** 正文累计字符（CJK / 其他分开记，口径同 shared/token-estimate）。 */
+  contentCjk: number;
+  contentOther: number;
+  /** 思考过程累计字符。 */
+  reasoningCjk: number;
+  reasoningOther: number;
+};
+
+/** 实时估算的输出 tokens（正文 + 思考，口径与收尾统计一致）。 */
+export function liveOutputTokens(live: LiveTurnStats): number {
+  return (
+    tokensFromParts({ cjk: live.contentCjk, other: live.contentOther }) +
+    tokensFromParts({ cjk: live.reasoningCjk, other: live.reasoningOther })
+  );
+}
+
+/** 实时生成速度（tok/s）：只算首 token 之后的窗口，与收尾统计同一口径。 */
+export function liveTokensPerSec(live: LiveTurnStats, now: number = Date.now()): number {
+  if (live.firstTokenAt == null) return 0;
+  const windowMs = Math.max(1, now - live.firstTokenAt);
+  return Math.round((liveOutputTokens(live) / (windowMs / 1000)) * 10) / 10;
+}
 
 interface ChatState {
   conversations: Conversation[];
@@ -9,6 +46,15 @@ interface ChatState {
   streaming: boolean;
   /** 会话内本次运行生成的 token 统计，按消息 id 索引（重新生成/翻译后旧 id 失效被清理）。 */
   messageStats: Record<number, ChatStats>;
+  /** 正在生成的消息的实时进度（收尾后清掉，交给 messageStats）。 */
+  liveStats: Record<number, LiveTurnStats>;
+  /** 本轮请求发出的时刻：`setStreaming(true)` 记下，用来算首 token 耗时。 */
+  runStartedAt: number | null;
+  /**
+   * 每个会话最近一次的上下文占用（Agent 回合结束的实测值）。
+   * 输入框上方的占用条读它；打开旧会话时没有这个值，占用条会退回到 RPC 的估算。
+   */
+  contextUsage: Record<number, NonNullable<ChatStats["context"]>>;
   /** 提示词库「去试试」带过来的草稿，ChatWindow 挂载时读入输入框。 */
   pendingPrompt: string | null;
   setPendingPrompt: (prompt: string | null) => void;
@@ -50,6 +96,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   activeMessages: [],
   streaming: false,
   messageStats: {},
+  liveStats: {},
+  runStartedAt: null,
+  contextUsage: {},
   pendingPrompt: null,
 
   setPendingPrompt: (prompt) => set({ pendingPrompt: prompt }),
@@ -64,8 +113,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ([id]) => id !== "prototype" && messages.some((m) => String(m.id) === id),
         ),
       ),
+      liveStats: Object.fromEntries(
+        Object.entries(state.liveStats).filter(([id]) => messages.some((m) => String(m.id) === id)),
+      ),
     })),
-  setStreaming: (streaming) => set({ streaming }),
+  setStreaming: (streaming) =>
+    set({
+      streaming,
+      // 新的轮次开始：记下发出时刻（首 token 耗时的起点）；结束就清掉实时进度。
+      runStartedAt: streaming ? Date.now() : null,
+      ...(streaming ? {} : { liveStats: {} }),
+    }),
 
   mergeServerMessages: (messages) =>
     set((state) => {
@@ -116,40 +174,76 @@ export const useChatStore = create<ChatState>((set, get) => ({
             ([id]) => id !== "prototype" && merged.some((m) => String(m.id) === id),
           ),
         ),
+        liveStats: Object.fromEntries(
+          Object.entries(state.liveStats).filter(([id]) => merged.some((m) => String(m.id) === id)),
+        ),
       };
     }),
 
   setMessageStats: (conversationId, messageId, stats) => {
     if (conversationId !== get().activeConversationId) return;
-    set((state) => ({ messageStats: { ...state.messageStats, [messageId]: stats } }));
+    set((state) => ({
+      messageStats: { ...state.messageStats, [messageId]: stats },
+      // Agent 回合会带回上下文占用：留在会话上，切走再切回也还在。
+      contextUsage: stats.context
+        ? { ...state.contextUsage, [conversationId]: stats.context }
+        : state.contextUsage,
+    }));
   },
 
   appendChunk: (conversationId, messageId, delta, kind = "content") => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
+      const now = Date.now();
+      const parts = tokenParts(delta);
+      const previous = state.liveStats[messageId];
+      const live: LiveTurnStats = previous
+        ? {
+            ...previous,
+            firstTokenAt: previous.firstTokenAt ?? now,
+            ...(kind === "reasoning"
+              ? {
+                  reasoningCjk: previous.reasoningCjk + parts.cjk,
+                  reasoningOther: previous.reasoningOther + parts.other,
+                }
+              : {
+                  contentCjk: previous.contentCjk + parts.cjk,
+                  contentOther: previous.contentOther + parts.other,
+                }),
+          }
+        : {
+            startedAt: state.runStartedAt ?? now,
+            firstTokenAt: now,
+            contentCjk: kind === "reasoning" ? 0 : parts.cjk,
+            contentOther: kind === "reasoning" ? 0 : parts.other,
+            reasoningCjk: kind === "reasoning" ? parts.cjk : 0,
+            reasoningOther: kind === "reasoning" ? parts.other : 0,
+          };
+
       const last = state.activeMessages[state.activeMessages.length - 1];
-      if (last?.id === messageId) {
-        return {
-          activeMessages: [
-            ...state.activeMessages.slice(0, -1),
-            kind === "reasoning"
-              ? { ...last, reasoning: (last.reasoning ?? "") + delta }
-              : { ...last, content: last.content + delta },
-          ],
-        };
-      }
+      const activeMessages =
+        last?.id === messageId
+          ? [
+              ...state.activeMessages.slice(0, -1),
+              kind === "reasoning"
+                ? { ...last, reasoning: (last.reasoning ?? "") + delta }
+                : { ...last, content: last.content + delta },
+            ]
+          : [
+              ...state.activeMessages,
+              {
+                id: messageId,
+                conversationId,
+                role: "assistant" as const,
+                content: kind === "reasoning" ? "" : delta,
+                reasoning: kind === "reasoning" ? delta : undefined,
+                createdAt: now,
+              },
+            ];
+
       return {
-        activeMessages: [
-          ...state.activeMessages,
-          {
-            id: messageId,
-            conversationId,
-            role: "assistant" as const,
-            content: kind === "reasoning" ? "" : delta,
-            reasoning: kind === "reasoning" ? delta : undefined,
-            createdAt: Date.now(),
-          },
-        ],
+        activeMessages,
+        liveStats: { ...state.liveStats, [messageId]: live },
       };
     });
   },
@@ -181,7 +275,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
               createdAt: Date.now(),
             },
           ];
-      return { activeMessages: messages, streaming: false };
+      return {
+        activeMessages: messages,
+        streaming: false,
+        // 收尾统计已经随 chatStats 到了，实时进度留着只会跟正式数字打架。
+        liveStats: Object.fromEntries(
+          Object.entries(state.liveStats).filter(([id]) => Number(id) !== messageId),
+        ),
+      };
     });
   },
 
@@ -190,9 +291,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const messageStats = { ...state.messageStats };
       delete messageStats[messageId];
+      const liveStats = { ...state.liveStats };
+      delete liveStats[messageId];
       return {
         activeMessages: state.activeMessages.filter((m) => m.id !== messageId),
         messageStats,
+        liveStats,
       };
     });
   },
@@ -203,9 +307,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const messageStats = Object.fromEntries(
         Object.entries(state.messageStats).filter(([id]) => Number(id) < messageId),
       );
+      const liveStats = Object.fromEntries(
+        Object.entries(state.liveStats).filter(([id]) => Number(id) < messageId),
+      );
       return {
         activeMessages: state.activeMessages.filter((m) => m.id < messageId),
         messageStats,
+        liveStats,
       };
     });
   },
@@ -227,6 +335,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         state.activeConversationId === id ? null : state.activeConversationId,
       activeMessages: state.activeConversationId === id ? [] : state.activeMessages,
       messageStats: state.activeConversationId === id ? {} : state.messageStats,
+      liveStats: state.activeConversationId === id ? {} : state.liveStats,
     }));
   },
 }));
