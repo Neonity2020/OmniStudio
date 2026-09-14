@@ -69,16 +69,26 @@ describe("策略与包装", () => {
     expect(mac.degradedReason).toBeUndefined();
 
     /**
-     * Linux 现在是有后端的（bwrap）：本机（macOS）没有 bwrap，所以这里断言的是
-     * "因为缺 bwrap 而降级"——具体原因里要能看出是缺依赖，而不是笼统的"不支持"。
-     * 真机上 bwrap 可用时包出来的 argv 见下面「Linux（bwrap）」那一组用例。
+     * Linux 有两个后端（bwrap / Landlock），"能不能用"取决于**宿主**装没装 bwrap、
+     * 有没有 C 编译器、内核够不够新 —— 直接断言结果会变成"在 macOS 上碰巧成立"：
+     * 这台机器没有 bwrap，于是看着像"Linux 永远降级"，而在 Linux 上（有 gcc + 新内核）
+     * 同一个用例会拿到包好的 landlock argv 而失败。所以这里把两个后端的可用性**显式注入**，
+     * 断言的是分支逻辑本身。真机上 bwrap 可用时的 argv 见下面「Linux（bwrap）」那一组。
      */
-    const linux = wrapShellCommand("echo hi", { workspace, shell: "/bin/bash", platform: "linux" });
+    const linux = wrapShellCommand("echo hi", {
+      workspace,
+      shell: "/bin/bash",
+      platform: "linux",
+      bwrapReady: false,
+      landlockReady: false,
+    });
     expect(linux.cmd).toEqual(["/bin/bash", "-c", "echo hi"]);
     expect(linux.degradedReason).toContain("bwrap");
     expect(sandboxSupported("darwin")).toBe(true);
-    expect(sandboxSupported("linux")).toBe(false);
     expect(sandboxSupported("win32")).toBe(false);
+    expect(sandboxSupported("linux", { bwrapReady: false, landlockReady: false })).toBe(false);
+    expect(sandboxSupported("linux", { bwrapReady: true, landlockReady: false })).toBe(true);
+    expect(sandboxSupported("linux", { bwrapReady: false, landlockReady: true })).toBe(true);
   });
 
   test("策略里包含工作区（含 realpath）、临时目录与已授权目录，并拒绝凭据路径", () => {

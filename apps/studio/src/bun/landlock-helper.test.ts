@@ -190,9 +190,21 @@ describe("编译与探测", () => {
   test("缓存：探测过一次就不再重来（失败结果也缓存）", () => {
     const first = landlockHelper();
     const second = landlockHelper();
+    // 同一进程内重复调用：编译与探测都不重来，返回的是同一个结果对象。
     expect(second).toEqual(first);
     resetLandlockHelperCache();
-    expect(landlockHelper()).toEqual(first);
+    // 清掉进程内缓存后重探：**结论**必须一致。唯一允许的差异是 source ——
+    // 第一次可能要现编（built），第二次起复用同一份产物（cache）。
+    // 早先这里直接 toEqual，在 macOS 上碰巧成立（平台检查让三次都是同一个失败对象），
+    // 到了 Linux 真编一次就挂 —— 那是"只在开发机上成立"的断言。
+    const third = landlockHelper();
+    expect(third.ok).toBe(first.ok);
+    if (first.ok && third.ok) {
+      expect(third.path).toBe(first.path);
+      expect(third.abi).toBe(first.abi);
+    } else if (!first.ok && !third.ok) {
+      expect(third.reason).toBe(first.reason);
+    }
   });
 });
 
@@ -235,12 +247,18 @@ describe("辅助程序本体（真编译）", () => {
       '{"handled":["write_file"],"rules":[{"path":"/tmp"}]} trailing', // 尾部垃圾
       '{"handled":["write_file"],"rules":[{"path":"/tmp","access":"write_file"}]}', // access 不是数组
     ];
-    for (const spec of bad) {
+    const outcomes = bad.map((spec) => {
       const result = run([binary!, "--spec", spec, "--", "/bin/sh", "-c", `echo x > ${marker}`]);
-      expect(result.code).toBe(125);
-      expect(result.stderr).toContain("omni-landlock:");
-      expect(existsSync(marker)).toBe(false);
-    }
+      return { spec, result, markerWritten: existsSync(marker) };
+    });
+    // 一次列出全部不合格的（而不是断在第一条）：报错里带着规格原文与 stderr，
+    // 否则只知道"有一条坏了"，不知道是哪条、为什么。
+    const wrong = outcomes
+      .filter(({ result }) => result.code !== 125 || !result.stderr.includes("omni-landlock:"))
+      .map(({ spec, result }) => `${spec} → 退出码 ${result.code}，stderr：${result.stderr.trim()}`);
+    expect(wrong).toEqual([]);
+    // 任何一条坏规格都不许留下副作用。
+    for (const { markerWritten } of outcomes) expect(markerWritten).toBe(false);
   });
 
   test.if(compiles)("缺 `--` 或缺命令：用法错误，而不是默默跑起来", () => {
