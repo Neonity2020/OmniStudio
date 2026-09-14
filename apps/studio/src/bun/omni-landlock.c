@@ -374,7 +374,15 @@ static void apply_ruleset(struct jval *spec, long abi) {
     struct jval *rule = rules->items[i];
     struct jval *path = jget(rule, "path");
     if (!path || path->kind != 3) die(125, "rule without path");
-    unsigned long long allowed = mask_from(jget(rule, "access"), abi, handled);
+    struct jval *access = jget(rule, "access");
+    /* 类型不对是**规格写错了**，不是"这条规则本机用不上"：必须拒绝执行。
+       早先两者共用 `!allowed` 一条出口 —— `"access":"write_file"`（字符串而非数组）
+       会被 mask_from 当成 0 而 continue，于是 handled 里有 write_file、规则却一条没加，
+       结果是一条"只许写、又没允许写哪里"的规则集把命令的写操作全拒了：
+       命令照跑、退出码来自 sh 自己，用户看到的是莫名其妙的 EPERM，
+       而"看不懂规则就拒绝执行命令"这条约定被静默违反。 */
+    if (access && access->kind != 4) die(125, "invalid spec: access must be an array");
+    unsigned long long allowed = mask_from(access, abi, handled);
     if (!allowed) continue; /* 这一条在当前内核上没有任何有效权限：跳过 */
 
     int parent_fd = open(path->str, O_PATH | O_CLOEXEC);

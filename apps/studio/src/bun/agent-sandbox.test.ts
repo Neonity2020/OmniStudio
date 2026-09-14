@@ -155,7 +155,14 @@ describe("策略与包装", () => {
     updateSettings({ AGENT_SANDBOX_MODE: "workspace-write", AGENT_SANDBOX_NETWORK: "0" });
     const status = sandboxStatus();
     expect(status.mode).toBe("workspace-write");
-    expect(status.supported).toBe(onMac);
+    /**
+     * `supported` 是**本机**的实际结论，不能写成"macOS 为真、其余为假"：
+     * Linux 上有 bwrap 或有能用的 Landlock（内核 5.13+ 且有 C 编译器）都是真 ——
+     * 在 Linux runner 上断言 false 必然失败，而那是"这台开发机碰巧没有 bwrap"。
+     * 这里按机制对齐：有没有后端看平台，能不能用看本机探测。
+     */
+    const hasBackend = sandboxBackend() !== "none";
+    expect(status.supported).toBe(hasBackend ? sandboxSupported() : false);
     expect(status.allowNetwork).toBe(false);
     expect(sandboxAllowsNetwork()).toBe(false);
   });
@@ -176,9 +183,12 @@ describe("Linux（bwrap）", () => {
     expect(sandboxBackend("win32")).toBe("none");
     expect(sandboxSupported("darwin")).toBe(true);
     expect(sandboxSupported("win32")).toBe(false);
-    // Linux 取决于 bwrap 是否真的能用（容器里常常装了却起不来）。
-    expect(sandboxSupported("linux", { bwrapReady: true })).toBe(true);
-    expect(sandboxSupported("linux", { bwrapReady: false })).toBe(false);
+    // Linux 取决于 bwrap / Landlock 是否真的能用（容器里常常装了 bwrap 却起不来）。
+    // 两个后端的可用性都要显式给：只写 bwrapReady 时 landlockReady 会回落到本机探测，
+    // 于是一个装了 gcc 的 Linux runner 会得到 true —— 断言又变成"只在 macOS 成立"。
+    expect(sandboxSupported("linux", { bwrapReady: true, landlockReady: false })).toBe(true);
+    expect(sandboxSupported("linux", { bwrapReady: false, landlockReady: true })).toBe(true);
+    expect(sandboxSupported("linux", { bwrapReady: false, landlockReady: false })).toBe(false);
   });
 
   test("argv：整体只读挂根，再把工作区/临时目录挂成可写", () => {
