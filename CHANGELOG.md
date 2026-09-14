@@ -8,6 +8,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+- **Landlock 辅助程序：规格里 `access` 类型写错会被静默跳过（fail-closed 没兜住）**：`mask_from()`
+  遇到不是数组的 `access` 返回 0，而规则循环里 `if (!allowed) continue` 把"规格写错了"和
+  "这条规则在当前内核上没有有效权限（老内核，合法）"合成了同一个出口。于是一份坏规格
+  （`"access":"write_file"`）不是被拒绝，而是 handled 里留着 `write_file`、放行规则一条没加 ——
+  Landlock 的语义是"handled 里的权限默认全拒，只放行规则里给过的路径"，结果整条命令的写操作
+  全被拒：命令照跑、退出码来自 sh 自己（重定向失败是 2），用户看到的是莫名其妙的 EPERM，
+  而本文件开头写的"看不懂规则就拒绝执行命令"被静默违反。现在只有"缺 access"沿用宽容处理，
+  类型不对一律拒绝执行。**这是新增的 Linux 沙箱作业（真内核 + 真编译器）抓出来的**：同一次
+  运行还暴露了好几条"只在 macOS 成立"的断言（`/dev/pts`、`/dev/shm` 在 macOS 上不存在，
+  于是整段断言被静默跳过；`landlockReady` 留给本机探测又让"Linux 一定不支持"在装了 gcc 的
+  runner 上必然失败）—— 都改成注入式、与宿主无关。
+
 ## [0.0.8-canary.1] - 2026-09-14
 
 ### Added / 新增

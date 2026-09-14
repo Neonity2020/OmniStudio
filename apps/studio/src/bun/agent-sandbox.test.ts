@@ -262,6 +262,9 @@ describe("Linux（bwrap）", () => {
       shell: "/bin/bash",
       platform: "linux",
       bwrapReady: false,
+      // 两个后端都要显式关掉才是"不可用"：只关 bwrap 时 landlockReady 会回落到本机探测，
+      // 于是在有 gcc 的 Linux runner 上会真的包上 Landlock —— 断言又成了"只在 macOS 成立"。
+      landlockReady: false,
     });
     expect(missing.cmd).toEqual(["/bin/bash", "-c", "echo hi"]);
     expect(missing.degradedReason).toContain("bubblewrap");
@@ -369,26 +372,47 @@ describe("Linux（Landlock 规则生成）", () => {
   });
 
   test("设备例外：/dev/null 等必须可写（否则 `2>/dev/null` 会被拦），且不多给权限", () => {
-    const ruleset = landlockRuleset({ workspace, mode: "workspace-write" });
+    /**
+     * 用 `existingOnly: () => true` 让设备规则**在所有平台都生成**。
+     * 直接调 `landlockRuleset()` 时它看的是本机的路径存在性：macOS 上没有
+     * `/dev/pts`、`/dev/shm`，于是规则不生成、下面的断言整段被跳过 —— 断言写错了也
+     * 不会有人知道（这个用例原来就在 macOS 上"通过"、在 Linux 上直接挂）。
+     * 规则生成是纯函数，"路径在不在"本来就该是注入进来的。
+     */
+    const ruleset = landlockRuleset({
+      workspace,
+      mode: "workspace-write",
+      existingOnly: () => true,
+    });
     const devNull = ruleset.rules.find((rule) => rule.path === "/dev/null");
     // 这条不是"可有可无"：Landlock 的 write_file 管到 /dev/null，不放行连重定向都失败
     // （Linux 端到端第一次跑就把这条踩出来了）。
-    if (process.platform === "linux") {
-      expect(devNull).toBeDefined();
-      expect(devNull!.access).toContain("write_file");
-      expect(devNull!.access).toContain("read_file");
-      // 设备文件不需要造/删：多给的每一位都是过宽。
-      expect(devNull!.access).not.toContain("remove_file");
-      expect(devNull!.access).not.toContain("make_char");
-    }
-    // pty 与共享内存是目录：pty 要 make_char、shm 要 make_reg。
+    expect(devNull).toBeDefined();
+    expect(devNull!.access).toContain("write_file");
+    expect(devNull!.access).toContain("read_file");
+    // 设备文件不需要造/删：多给的每一位都是过宽。
+    expect(devNull!.access).not.toContain("remove_file");
+    expect(devNull!.access).not.toContain("make_char");
+
+    /**
+     * pty 与共享内存是目录，给完整的可写集（pty slave / 共享内存文件都要能建）。
+     *
+     * 这里**不断言 make_char**，虽然 pty 分配在概念上要它：
+     * `make_char` 不在 `handled` 里，而 Landlock 只管辖声明过的权限 —— 没声明就是全机放行，
+     * 所以 `mknod` 本来就不受拦。反过来，把 make_char 写进规则才是错的：Landlock 要求
+     * `rule.allowed_access ⊆ handled`，写了直接 EINVAL（辅助程序会拒掉整份规格）。
+     * 真正要钉的是"规则里的每一位都在 handled 里"—— 同一口径也见上面那条用例。
+     */
     const pts = ruleset.rules.find((rule) => rule.path === "/dev/pts");
     const shm = ruleset.rules.find((rule) => rule.path === "/dev/shm");
     for (const rule of [pts, shm]) {
-      if (!rule) continue;
-      expect(rule.access).toContain("make_char");
-      expect(rule.access).toContain("make_reg");
+      expect(rule).toBeDefined();
+      expect(rule!.access).toContain("make_reg");
+      expect(rule!.access).toContain("write_file");
+      for (const bit of rule!.access) expect(ruleset.handled).toContain(bit);
     }
+    // 设备节点本身（mknod）不在 Landlock 的管辖范围里：没声明就没人拦它。
+    expect(ruleset.handled).not.toContain("make_char");
     // 设备规则只在路径真的存在时出现（Landlock 对不存在路径加规则会 ENOENT）。
     const missing = landlockRuleset({
       workspace,
