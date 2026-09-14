@@ -5,6 +5,7 @@ import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
+import { decryptSecret, encryptSecret, isEncryptedSecret } from "../secrets";
 
 export type SettingsKey =
   | "SETUP_COMPLETE"
@@ -495,6 +496,32 @@ const DEFAULTS: Record<SettingsKey, string> = {
 const SETTINGS_CACHE_TTL_MS = 2000;
 const settingsCache = new Map<string, { value: string; at: number }>();
 
+/**
+ * 需要「存储加密」的设置槽位。
+ *
+ * 这些键落盘时存密文（AES-256-GCM，见 secrets.ts），读取时透明解密，消费方
+ * （网关 / chat / 翻译 / 嵌入等几十处 getSetting 调用点）零改动。这解决的是
+ * 「密钥明文躺 SQLite」的问题：拷走数据库读到的是密文，而密钥只在内存里解密。
+ *
+ * 目前有两类：模型云激活行回写的 VLLM_API_KEY，以及本地 API 网关自身的
+ * GATEWAY_API_KEY（网关是用户允许保留 Key 的两处之一，同样不该明文躺盘）。
+ * `EMPTY` 哨兵值不加密也不解密（它就是"无 key"的约定占位，解密会把它当成
+ * 普通明文透传）。
+ */
+const ENCRYPTED_KEYS = new Set<SettingsKey>(["VLLM_API_KEY", "GATEWAY_API_KEY"]);
+
+function maybeEncrypt(key: SettingsKey, value: string): string {
+  if (!ENCRYPTED_KEYS.has(key)) return value;
+  if (!value || value === "EMPTY") return value; // 哨兵 / 空：不制造密文
+  return encryptSecret(value);
+}
+
+function maybeDecrypt(key: SettingsKey, value: string): string {
+  if (!ENCRYPTED_KEYS.has(key)) return value;
+  if (!value || value === "EMPTY") return value;
+  return decryptSecret(value);
+}
+
 /** 清空设置缓存（跨进程写入后需要立即生效时手动调用）。 */
 export function invalidateSettingsCache() {
   settingsCache.clear();
@@ -505,7 +532,7 @@ export function getSetting(key: SettingsKey): string {
   const cached = settingsCache.get(key);
   if (cached && now - cached.at < SETTINGS_CACHE_TTL_MS) return cached.value;
   const row = db.select().from(settingsTable).where(eq(settingsTable.key, key)).get();
-  const value = row?.value ?? DEFAULTS[key];
+  const value = maybeDecrypt(key, row?.value ?? DEFAULTS[key]);
   settingsCache.set(key, { value, at: now });
   return value;
 }
@@ -518,20 +545,45 @@ export function getAllSettings(): Record<string, string> {
   const rows = db.select().from(settingsTable).all();
   const result: Record<string, string> = { ...DEFAULTS };
   for (const row of rows) {
-    result[row.key] = row.value;
-    settingsCache.set(row.key, { value: row.value, at: Date.now() });
+    // 敏感槽位解密后再交给调用方（RPC 会下发给渲染进程，落盘是密文，内存是明文 ——
+    // 与加密前行为一致，避免前端各处读 key 的逻辑崩掉）。
+    const plain = maybeDecrypt(row.key as SettingsKey, row.value);
+    result[row.key] = plain;
+    settingsCache.set(row.key, { value: plain, at: Date.now() });
   }
   return result;
 }
 
 export function updateSettings(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
+    const encrypted = maybeEncrypt(key as SettingsKey, value);
     db.insert(settingsTable)
-      .values({ key, value })
-      .onConflictDoUpdate({ target: settingsTable.key, set: { value } })
+      .values({ key, value: encrypted })
+      .onConflictDoUpdate({ target: settingsTable.key, set: { value: encrypted } })
       .run();
+    // 缓存内存的是解密后的明文（紧接的 getSetting 直接命中，行为一致）
     settingsCache.set(key, { value, at: Date.now() });
   }
+}
+
+/**
+ * 一次性把历史遗留的**明文**敏感设置加密落盘（幂等）。
+ *
+ * 升级前 `VLLM_API_KEY` / `GATEWAY_API_KEY` 是明文；读取侧能透传旧明文，但值仍
+ * 躺在盘上。本函数扫描 settings 表，把 `ENCRYPTED_KEYS` 里尚为明文的行交给
+ * `updateSettings` 统一加密写回；已在密文态的跳过，命中明文才写，日常开销可忽略。
+ */
+export function ensureSettingsEncrypted(): void {
+  const rows = db.select().from(settingsTable).all();
+  const patch: Record<string, string> = {};
+  for (const row of rows) {
+    const key = row.key as SettingsKey;
+    if (!ENCRYPTED_KEYS.has(key)) continue;
+    const raw = row.value;
+    if (!raw || raw === "EMPTY" || isEncryptedSecret(raw)) continue;
+    patch[key] = raw; // 明文 → 交给 updateSettings 统一加密
+  }
+  if (Object.keys(patch).length > 0) updateSettings(patch);
 }
 
 export function isConfigured(): boolean {

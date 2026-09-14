@@ -210,6 +210,14 @@ type AgentState = {
   markUnread: (conversationId: number) => void;
   clearUnread: (conversationId: number) => void;
   appendEvent: (event: AgentEventRow) => void;
+  /**
+   * 轨迹**增量**合并（按 id 去重、按 id 排序）。
+   *
+   * 与 `appendEvent`（推送单条）分开是因为两者的来源可靠性不同：推送会丢
+   * （窗口被系统节流 / webview 刷新过），追平用的是库里的事实。跑动中界面定期
+   * 按 `afterId` 取一次新事件，用这里并进列表 —— 重复到达的那几条不会渲染两遍。
+   */
+  mergeEvents: (events: AgentEventRow[]) => void;
   clear: () => void;
 };
 
@@ -417,6 +425,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     // 只跟随当前打开的会话，避免后台会话的事件串进来。
     if (get().conversationId !== event.conversationId) return;
     set((state) => ({ events: [...state.events, event] }));
+  },
+
+  mergeEvents: (incoming) => {
+    if (incoming.length === 0) return;
+    set((state) => {
+      // 同上：追平结果也按会话过滤（切会话那一刻在途的这次追平不能写进新会话）。
+      const fresh = incoming.filter((event) => event.conversationId === state.conversationId);
+      if (fresh.length === 0) return state;
+      const known = new Set(state.events.map((event) => event.id));
+      const added = fresh.filter((event) => !known.has(event.id));
+      if (added.length === 0) return state;
+      return { events: [...state.events, ...added].sort((a, b) => a.id - b.id) };
+    });
   },
 
   clear: () =>

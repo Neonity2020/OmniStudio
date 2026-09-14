@@ -1,6 +1,7 @@
 import { sqliteTable, text, int, real, unique, primaryKey, index } from "drizzle-orm/sqlite-core";
 import type { KbDocKind, KbDocStatus } from "../../shared/knowledge";
 import type { MemoryStatus } from "../../shared/memory";
+import type { UsageChannel, UsageUpstream } from "../../shared/usage";
 
 export type PromptKind = "image" | "llm" | "video";
 
@@ -98,7 +99,8 @@ export const agentEvents = sqliteTable("agent_events", {
   /** 事件归属的助手消息（一次运行对应一条 assistant 消息）。 */
   messageId: int("message_id"),
   kind: text("kind")
-    .$type<"status" | "tool_start" | "tool_end" | "error" | "subagent_start" | "subagent_end">()
+    /** text = 模型某一步说的话（时间轴上与工具行混排，见 agent.ts 的 flushStepText）。 */
+    .$type<"status" | "tool_start" | "tool_end" | "error" | "subagent_start" | "subagent_end" | "text">()
     .notNull(),
   toolName: text("tool_name"),
   /** 子智能体事件的归属 id（task 工具派出的子任务），主 Agent 的事件为 NULL。 */
@@ -944,3 +946,43 @@ export const agentPlans = sqliteTable("agent_plans", {
 });
 
 export type AgentPlanRow = typeof agentPlans.$inferSelect;
+
+/**
+ * 用量流水：**每一次**上游 LLM 请求一行（对话回答、Agent 的每一步、网关转发、
+ * 生图 / 生视频 / OCR / 翻译 / 向量化 / 重排）。
+ *
+ * 与 `messages.stats` 的分工：那个是「某条回答花了多少」的展示快照，只覆盖对话与
+ * Agent 的最终回合，且随消息一起删；这里是跨入口的**账本** —— 网关转发这种根本
+ * 不产生本地消息的调用只有它记得下来，设置页的分模型 / 分厂商统计也全从它出。
+ *
+ * `day` 冗余存一份本地日期而不是查询时用 SQL 换算：一是 group by 这一列能吃到索引，
+ * 二是时区在写入时就固定下来 —— 用户跨时区旅行后不该让历史记录整体挪一天。
+ */
+export const usageRecords = sqliteTable("usage_records", {
+  id: int().primaryKey({ autoIncrement: true }),
+  /** 记录时刻（毫秒）。 */
+  createdAt: int("created_at").notNull(),
+  /** 本地时区的 YYYY-MM-DD。 */
+  day: text("day").notNull(),
+  channel: text("channel").$type<UsageChannel>().notNull(),
+  upstream: text("upstream").$type<UsageUpstream>().notNull(),
+  /** 厂商展示名：本地是引擎名，云端是服务商名，认不出时是地址主机名。 */
+  provider: text("provider").notNull(),
+  model: text("model").notNull(),
+  inputTokens: int("input_tokens").notNull().default(0),
+  outputTokens: int("output_tokens").notNull().default(0),
+  /** 命中缓存的输入 tokens（input 的子集）。 */
+  cachedTokens: int("cached_tokens").notNull().default(0),
+  /** 思考 tokens（output 的子集）。 */
+  reasoningTokens: int("reasoning_tokens").notNull().default(0),
+  /** 这一行代表的请求数（批量嵌入等一次记多轮时 > 1）。 */
+  requests: int("requests").notNull().default(1),
+  /** 1 = token 是本地估算（上游没回 usage），统计页据此说明"含估算"。 */
+  estimated: int("estimated").notNull().default(0),
+}, (t) => ({
+  // 按天聚合（热力图 / 趋势 / 连击）是这张表最主要的读法。
+  dayIdx: index("usage_records_day_idx").on(t.day),
+  modelIdx: index("usage_records_model_idx").on(t.model),
+}));
+
+export type UsageRecordRow = typeof usageRecords.$inferSelect;

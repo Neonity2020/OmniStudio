@@ -632,6 +632,11 @@ export async function runOcrVlm(input: {
       base: provider.base,
       apiKey: provider.apiKey,
       model: provider.model || undefined,
+      // 记账要的是"哪家厂商"，光看地址分不出来（一个地址背后可能是聚合站）。
+      usage: {
+        provider: CloudProviders.getCloudProviderInfo(provider.providerId)?.name ?? "API",
+        upstream: "cloud",
+      },
     };
     remoteLabel = provider.model || "remote";
   } else {

@@ -5,6 +5,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
+  FilesIcon,
   GitBranchIcon,
   Loader2Icon,
   RotateCcwIcon,
@@ -20,6 +21,7 @@ import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { AgentEventTimeline } from "./timeline";
+import { flushedTextChars } from "./timeline-model";
 import { RevertTurnDialog } from "./revert-dialog";
 import { ARTIFACT_KIND_LABEL, artifactIcon, formatSize } from "./artifact-meta";
 import type { ArtifactItem } from "../../../bun/agent-artifacts";
@@ -29,6 +31,10 @@ import type { ChatMessage } from "../../../bun/chat";
 /**
  * 思考行：一行「思考 · 持续了 N 秒」，点开看思考原文。
  * 时长在本地按流式的起止时刻计（历史消息没有计时，只显示「思考」）。
+ *
+ * 跑动中额外缀一段前言（截断到 80 字）：那是"它正在想什么"的唯一线索，
+ * 静默十几秒时能证明它没卡死。**跑完就不缀**了 —— 一行「思考 · 持续了 37 秒」
+ * 是这行的常规形态，把那句话留在这里只会让每一条思考行都拖一条尾巴。
  */
 function ReasoningRow({ reasoning, streaming }: { reasoning: string; streaming: boolean }) {
   const t = useT();
@@ -67,7 +73,7 @@ function ReasoningRow({ reasoning, streaming }: { reasoning: string; streaming: 
         <ChevronRightIcon size={12} className={`pi-caret${open ? " open" : ""}`} aria-hidden />
         {streaming ? <span className="tool-spinner" aria-hidden /> : <BrainIcon size={12} aria-hidden />}
         <span>{label}</span>
-        {!open && reasoning ? (
+        {streaming && reasoning ? (
           <span className="tool-row-summary" style={{ maxWidth: 320 }}>
             {reasoning.replace(/\s+/g, " ").slice(0, 80)}
           </span>
@@ -100,134 +106,39 @@ function useTicker(active: boolean, intervalMs = 1000): number {
 }
 
 /**
- * 执行轨迹（思考 + 工具调用）：收成一行「处理中 · N 秒」，点开看这一轮到底做了什么。
+ * 这一轮的状态行（**最上面一行**，不进时间轴）：跑动中是「处理中 · N 秒」，
+ * 跑完换成实测耗时 + 工具调用次数（与右下角用量胶囊同一份数据）。
  *
- * 跑动中标题的秒数每秒都在走，末尾还挂着一条转圈行 —— 界面完全静止的那几秒
- * （等模型决定下一步、工具正在执行）没人分得清"它在想"和"它卡死了"，这两样就是
- * 唯一的证据。跑完自动收起是刻意的：长会话里轨迹最占地方，回看时用户要的首先是
- * 最终回答；秒数也随之换成这一轮的实测耗时（与右下角用量胶囊同一份数据）。
+ * 秒数每秒都在走 —— 界面完全静止的那几秒（等模型决定下一步、工具正在执行、首 token
+ * 还没出来）没人分得清"它在想"和"它卡死了"，这一行加上时间轴末尾的转圈行就是
+ * 唯一的证据。参考实现里 "已处理 · N 秒" 也在消息最上方，位置与此一致。
  */
-function AgentTraceBlock({
-  reasoning,
-  events,
-  streaming,
-  hasContent,
+function AgentRunStatus({
+  active,
+  elapsedMs,
+  toolCount,
+  /** 还没有任何可见输出：给一行占位。 */
   waiting,
-  workedMs,
-  runStartAt,
 }: {
-  reasoning?: string | null;
-  events: AgentEventRow[];
-  streaming: boolean;
-  /** 正文是否已开始输出（决定「思考中」行的写法）。 */
-  hasContent: boolean;
-  /** 还没有任何可见输出：给一行占位 + 慢速诊断提示。 */
+  active: boolean;
+  elapsedMs?: number;
+  toolCount: number;
   waiting: boolean;
-  /** 这一轮的实测耗时（跑完后用，与用量胶囊同源）。 */
-  workedMs?: number;
-  /** 这一轮的起点时刻：跑动中用它现算秒数，中间没有新事件时也在走。 */
-  runStartAt?: number;
 }) {
   const t = useT();
-  const active = streaming || waiting;
-  const [open, setOpen] = useState(active);
-  const wasActive = useRef(active);
-  const userToggled = useRef(false);
-  const [slow, setSlow] = useState(false);
-  const now = useTicker(active);
-
-  // 开跑就展开（看着它在干什么），跑完（或首字出现）自动收起：轨迹退成一行摘要。
-  // 刷新窗口时组件是在"还没同步到运行态"时挂载的，所以开跑那一下也得展开一次，
-  // 不能只在挂载时决定。用户自己手动收起来过就不再自动展开，别跟人抢。
-  useEffect(() => {
-    if (wasActive.current && !active) {
-      setOpen(false);
-      userToggled.current = false;
-    } else if (!wasActive.current && active && !userToggled.current) {
-      setOpen(true);
-    }
-    wasActive.current = active;
-  }, [active]);
-
-  // 等太久还没有第一个 token：多半是推理服务那边没出字，而不是界面卡了。
-  useEffect(() => {
-    if (!waiting) {
-      setSlow(false);
-      return;
-    }
-    const timer = window.setTimeout(() => setSlow(true), 20_000);
-    return () => window.clearTimeout(timer);
-  }, [waiting]);
-
-  // 跑动中按起点现算（每秒重渲染一次），跑完用实测值。
-  const elapsedMs = active && runStartAt != null ? Math.max(0, now - runStartAt) : workedMs;
   const label =
     elapsedMs != null
       ? t(active ? "chat.working.duration" : "chat.worked", { duration: formatDuration(t, elapsedMs) })
       : active
         ? t("agent.working")
         : t("agent.trace");
-
-  // 收起时的摘要：优先报工具调用次数（"做了几件事"比思考原文更有信息量）。
-  const toolCount = events.filter((event) => event.kind === "tool_start").length;
-  const preview = (reasoning ?? "").replace(/\s+/g, " ").slice(0, 80);
-  const summary = toolCount > 0 ? t("agent.trace.tools", { count: String(toolCount) }) : preview;
-
-  /**
-   * 有工具正在跑时它自己那行在转圈，这里就不再加一条 —— 同一时刻两个转圈是噪音。
-   * 剩下两种情况（模型在思考 / 没有任何输出）都补一条"还在干活"，让轨迹末尾
-   * 始终有个在动的东西：静默几秒时它是"没卡死"的唯一证据。
-   */
-  const toolRunning = useMemo(() => {
-    let openTools = 0;
-    for (const event of events) {
-      if (event.kind === "tool_start") openTools += 1;
-      else if (event.kind === "tool_end") openTools = Math.max(0, openTools - 1);
-    }
-    return openTools > 0;
-  }, [events]);
-
   return (
-    <div className="tool-group" style={{ margin: "2px 0" }}>
-      <button
-        type="button"
-        className="tool-group-header"
-        aria-expanded={open}
-        title={open ? t("chat.traceExpanded") : t("chat.traceCollapsed")}
-        onClick={() => {
-          userToggled.current = true;
-          setOpen((v) => !v);
-        }}
-      >
-        <ChevronRightIcon size={13} className={`pi-caret${open ? " open" : ""}`} aria-hidden />
-        {active ? <span className="tool-spinner" aria-hidden /> : null}
-        <span className="tool-group-label">{label}</span>
-        {!open && summary ? <span className="tool-row-summary">{summary}</span> : null}
-      </button>
-
-      <div className={`tool-group-collapse${open ? " open" : ""}`}>
-        <div>
-          <div className="tool-group-body">
-            {reasoning ? <ReasoningRow reasoning={reasoning} streaming={streaming && !hasContent} /> : null}
-            <AgentEventTimeline events={events} live={streaming} />
-            {active && (!toolRunning || waiting) ? (
-              <div className="working-indicator" style={{ paddingLeft: 0 }}>
-                <span className="working-mark" aria-hidden>
-                  <i />
-                  <i />
-                  <i />
-                </span>
-                <span>{t("agent.working")}</span>
-              </div>
-            ) : null}
-            {slow ? (
-              <div className="tool-note" style={{ color: "var(--ds-warning)", marginTop: 4 }}>
-                {t("agent.working.slow")}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </div>
+    <div className="run-status" title={waiting ? t("agent.working") : undefined}>
+      {active ? <span className="tool-spinner" aria-hidden /> : null}
+      <span className="tool-group-label">{label}</span>
+      {toolCount > 0 ? (
+        <span className="tool-group-count">{t("agent.trace.tools", { count: String(toolCount) })}</span>
+      ) : null}
     </div>
   );
 }
@@ -244,6 +155,48 @@ function ArtifactCard({ artifact, onOpen }: { artifact: ArtifactItem; onOpen: (a
         {size ? ` · ${size}` : ""}
       </span>
     </button>
+  );
+}
+
+/**
+ * 消息底部的产出物区：卡片 + 「查看所有产物」。
+ *
+ * 卡片是"这一轮产出了什么"的答案，点开直接在右侧面板预览；那一行入口对应参考实现里的
+ * 「查看所有产物（N）》」—— 会话里积了几轮的产物时，用户不必去右上角找面板开关。
+ * 卡片一个都没有、但会话确实有产物（比如产物属于别的消息）时，只留那一行入口。
+ */
+function ArtifactSection({
+  artifacts,
+  total,
+  onOpen,
+  onOpenAll,
+}: {
+  artifacts: ArtifactItem[];
+  /** 这个会话的产物总数（0 = 连入口都不显示）。 */
+  total: number;
+  onOpen: (artifact: ArtifactItem) => void;
+  onOpenAll: () => void;
+}) {
+  const t = useT();
+  // 没有卡片、也不知道总数（非最后一条助手消息）就整块不渲染。
+  if (artifacts.length === 0 && total === 0) return null;
+  return (
+    <div className="artifact-section">
+      {artifacts.length > 0 ? (
+        <div className="artifact-cards">
+          {artifacts.map((artifact) => (
+            <ArtifactCard key={artifact.id} artifact={artifact} onOpen={onOpen} />
+          ))}
+        </div>
+      ) : null}
+      {total > 0 ? (
+        <button type="button" className="artifact-more" onClick={onOpenAll}>
+          <FilesIcon size={12} aria-hidden />
+          <span>{t("agent.artifacts.all", { count: String(total) })}</span>
+          <ChevronRightIcon size={12} aria-hidden />
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -514,9 +467,11 @@ export function AgentAssistantMessage({
   conversationModel,
   events,
   artifacts,
+  artifactTotal = 0,
   streaming,
   snapshot,
   onOpenArtifact,
+  onOpenArtifacts,
 }: {
   message: ChatMessage;
   conversationId: number;
@@ -524,11 +479,16 @@ export function AgentAssistantMessage({
   conversationModel?: string;
   events: AgentEventRow[];
   artifacts: ArtifactItem[];
+  /** 会话产物总数：「查看所有产物（N）」用它（0 = 不显示入口）。 */
+  artifactTotal?: number;
   streaming: boolean;
   /** 本回合的开工快照：有它才给「撤销本轮」。 */
   snapshot?: { id: string; label: string };
   onOpenArtifact: (artifact: ArtifactItem) => void;
+  /** 打开右侧的产出物页签（「查看所有产物」）。 */
+  onOpenArtifacts?: () => void;
 }) {
+  const t = useT();
   const hasTrace = events.length > 0 || Boolean(message.reasoning);
   const waiting = streaming && !message.content && !message.reasoning && events.length === 0;
   // 这一轮的实测耗时（生成中是实时值）—— 轨迹行与用量胶囊读同一份数据。
@@ -551,35 +511,106 @@ export function AgentAssistantMessage({
   });
   const menu = usePiContextMenu(actionMenuItems(actions));
 
+  const active = streaming || waiting;
+  const now = useTicker(active);
+  // 跑动中按起点现算（每秒重渲染一次），跑完用实测值（与用量胶囊同源）。
+  const elapsedMs = active && runStartAt != null ? Math.max(0, now - runStartAt) : view?.elapsedMs;
+  const toolCount = useMemo(
+    () => events.filter((event) => event.kind === "tool_start").length,
+    [events],
+  );
+
+  /**
+   * 说到一半的那一段正文（还没落成 `text` 事件的部分）。
+   *
+   * 事件里已经有"这一步说了什么"（跑完最后一段也补了一条），所以整条正文减去
+   * 已落成事件的前缀就是**正在流出的这一段** —— 它跟在时间轴末尾，等这一步的工具
+   * 开始执行时被冲进时间轴（位置不变，从"尾巴"变成"时间轴上的一段"）。
+   * 老消息没有 `text` 事件 → 前缀是 0 → 整条正文照旧渲染（与改动前一致）。
+   */
+  const tail = message.content.slice(flushedTextChars(events));
+
+  /**
+   * 有工具正在跑时它自己那行在转圈，底部就不再加一条 —— 同一时刻两个转圈是噪音。
+   * 剩下两种情况（模型在思考 / 没有任何输出）都补一条"还在干活"，让时间轴末尾
+   * 始终有个在动的东西：静默几秒时它是"没卡死"的唯一证据。
+   */
+  const toolRunning = useMemo(() => {
+    let openTools = 0;
+    for (const event of events) {
+      if (event.kind === "tool_start") openTools += 1;
+      else if (event.kind === "tool_end") openTools = Math.max(0, openTools - 1);
+    }
+    return openTools > 0;
+  }, [events]);
+
+  // 等太久还没有第一个 token：多半是推理服务那边没出字，而不是界面卡了。
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!waiting) {
+      setSlow(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setSlow(true), 20_000);
+    return () => window.clearTimeout(timer);
+  }, [waiting]);
+
   return (
     <div className="msg-row assistant" onContextMenu={menu.onContextMenu}>
       <div className="msg-col agent">
         <MessageMeta model={view?.model ?? conversationModel} createdAt={message.createdAt} />
 
         {hasTrace || waiting ? (
-          <AgentTraceBlock
-            reasoning={message.reasoning}
-            events={events}
-            streaming={streaming}
-            hasContent={Boolean(message.content)}
+          <AgentRunStatus
+            active={active}
+            elapsedMs={elapsedMs}
+            toolCount={toolCount}
             waiting={waiting}
-            workedMs={view?.elapsedMs}
-            runStartAt={runStartAt}
           />
         ) : null}
 
-        {message.content ? (
-          <div className="msg-bubble-agent prose-pi selectable">
-            <Markdown content={message.content} />
-          </div>
-        ) : null}
+        <div className="msg-timeline">
+          {message.reasoning ? (
+            <ReasoningRow reasoning={message.reasoning} streaming={streaming && !message.content} />
+          ) : null}
+          {/*
+            * 时间轴：模型说的话与工具调用按发生顺序混排（顺序来自 `text` 事件，
+            * 见 agent.ts 的 flushStepText）。这一段是"过程"，可读性交给正文。
+            */}
+          <AgentEventTimeline events={events} live={streaming} />
+          {tail ? (
+            <div className="msg-bubble-agent prose-pi selectable">
+              <Markdown content={tail} />
+            </div>
+          ) : null}
+          {active && (!toolRunning || waiting) ? (
+            <div className="timeline-detail">
+              <div className="working-indicator" style={{ paddingLeft: 0 }}>
+                <span className="working-mark" aria-hidden>
+                  <i />
+                  <i />
+                  <i />
+                </span>
+                <span>{t("agent.working")}</span>
+              </div>
+            </div>
+          ) : null}
+          {slow ? (
+            <div className="timeline-detail">
+              <div className="tool-note" style={{ color: "var(--ds-warning)", marginTop: 4 }}>
+                {t("agent.working.slow")}
+              </div>
+            </div>
+          ) : null}
+        </div>
 
-        {artifacts.length > 0 ? (
-          <div className="artifact-cards">
-            {artifacts.map((artifact) => (
-              <ArtifactCard key={artifact.id} artifact={artifact} onOpen={onOpenArtifact} />
-            ))}
-          </div>
+        {artifacts.length > 0 || artifactTotal > 0 ? (
+          <ArtifactSection
+            artifacts={artifacts}
+            total={artifactTotal}
+            onOpen={onOpenArtifact}
+            onOpenAll={() => onOpenArtifacts?.()}
+          />
         ) : null}
 
         <MessageActionBar

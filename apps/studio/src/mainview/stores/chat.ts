@@ -69,6 +69,16 @@ interface ChatState {
   mergeServerMessages: (messages: ChatMessage[]) => void;
   setStreaming: (streaming: boolean) => void;
   setMessageStats: (conversationId: number, messageId: number, stats: ChatStats) => void;
+  /**
+   * 后端刚建好本轮助手消息的行（回合开跑、还没有任何输出）→ 立刻插进消息流。
+   *
+   * 首 token 之前隔着建会话 / 起推理服务 / 模型加载 / 长提示词预填充 / 检索，
+   * 几秒到几十秒都可能；此前界面要等第一个增量才建得出这条消息，那段时间屏幕上
+   * 只有用户刚发出去的那个气泡 —— 看起来就是程序挂了。这一行插进来之后，
+   * 对话页的「生成中…」与 Agent 页的「处理中 · N 秒」立刻有了落点。
+   * 只认当前会话：后台会话的行等打开时由服务端整份取回。
+   */
+  beginAssistantMessage: (conversationId: number, messageId: number) => void;
   appendChunk: (
     conversationId: number,
     messageId: number,
@@ -191,6 +201,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
   },
 
+  beginAssistantMessage: (conversationId, messageId) => {
+    if (conversationId !== get().activeConversationId) return;
+    set((state) => {
+      // 已经在了（推送重复到达 / 第一个增量先到）就别再插一条。
+      if (state.activeMessages.some((m) => m.id === messageId)) return state;
+      return {
+        activeMessages: [
+          ...state.activeMessages,
+          {
+            id: messageId,
+            conversationId,
+            role: "assistant" as const,
+            content: "",
+            createdAt: Date.now(),
+          },
+        ],
+      };
+    });
+  },
+
   appendChunk: (conversationId, messageId, delta, kind = "content") => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
@@ -251,10 +281,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   finalizeMessage: (conversationId, messageId, content, reasoning, citations) => {
     if (conversationId !== get().activeConversationId) return;
     set((state) => {
-      const exists = state.activeMessages.some((m) => m.id === messageId);
-      const messages = exists
+      /**
+       * 收尾落到哪一行：正常情况下就是 `messageId` 那一行。但调用方在"还没拿到
+       * 真实 id 就失败了"的路径上用时间戳兜底（RPC 抛错 / 后端直接回 ok:false），
+       * 而末尾此刻常常正躺着一条开跑时插进来、一个字都还没写的助手行 —— 那就是
+       * 这一轮的落点。另起一行的话，界面上会变成"一个空回复 + 一个报错回复"。
+       */
+      const known = state.activeMessages.some((m) => m.id === messageId);
+      const last = state.activeMessages[state.activeMessages.length - 1];
+      const target = !known && last?.role === "assistant" && !last.content ? last.id : messageId;
+      const messages = state.activeMessages.some((m) => m.id === target)
         ? state.activeMessages.map((m) =>
-            m.id === messageId
+            m.id === target
               ? {
                   ...m,
                   content,
@@ -280,7 +318,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         streaming: false,
         // 收尾统计已经随 chatStats 到了，实时进度留着只会跟正式数字打架。
         liveStats: Object.fromEntries(
-          Object.entries(state.liveStats).filter(([id]) => Number(id) !== messageId),
+          Object.entries(state.liveStats).filter(
+            ([id]) => Number(id) !== messageId && Number(id) !== target,
+          ),
         ),
       };
     });

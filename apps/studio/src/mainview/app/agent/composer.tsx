@@ -486,7 +486,7 @@ export function AgentComposer({
   };
 
   /** 执行输入框里的斜杠命令（选完就清空输入，命令本身不发给模型）。 */
-  const runSlashCommand = (id: SlashCommandId) => {
+  const runSlashCommand = (id: SlashCommandId, args?: string) => {
     setInput("");
     requestAnimationFrame(autoResize);
     if (id === "new") {
@@ -500,6 +500,13 @@ export function AgentComposer({
     if (id === "init") {
       // 对齐 Codex 的 /init：让它先摸清项目，再落一份 AGENTS.md（下一轮起自动注入系统提示）。
       handleSend("send", t("agent.slash.init.prompt"));
+      return;
+    }
+    if (id === "doctor") {
+      // 排障技能的入口：技能正文由模型自己 read_skill 取（渐进披露），这里只给任务书；
+      // 命令后面的那段话是用户描述的现象，原样带下去，别让他再打一遍。
+      const prompt = t("agent.slash.doctor.prompt");
+      handleSend("send", args ? `${prompt}\n\n${t("agent.slash.doctor.symptom")}${args}` : prompt);
       return;
     }
     if (id === "compact") {
@@ -527,6 +534,26 @@ export function AgentComposer({
     modeMutation.mutate(id);
   };
 
+  /**
+   * 输入正好是一条斜杠命令时执行它，返回是否命中。
+   *
+   * 回车与发送按钮**共用**这一条判定：只给回车接斜杠分支的话，敲完 `/goal` 去点发送
+   * 按钮就变成把 "/goal" 当消息发给模型了 —— 用户看到的就是"命令执行了但没生效"。
+   *
+   * 命令名允许连字符（`/omni-doctor`）；带参数的形式只有声明了 `takesArgs` 的命令才吃，
+   * 其余（如 `/goal 开始干活`）仍然按普通消息发出去，不静默吞话。
+   */
+  const runSlashIfExact = (text: string): boolean => {
+    const parsed = /^\/([a-z0-9-]+)(?:\s+(.*))?$/i.exec(text.trim());
+    if (!parsed) return false;
+    const match = SLASH_COMMANDS.find((command) => command.command === parsed[1]!.toLowerCase());
+    if (!match) return false;
+    const args = parsed[2]?.trim();
+    if (args && !match.takesArgs) return false;
+    runSlashCommand(match.id, args || undefined);
+    return true;
+  };
+
   // 补全面板打开时回车归它用，这里只处理「输入正好是纯命令」的情况。
   const onKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) return;
@@ -535,14 +562,7 @@ export function AgentComposer({
       handleSend(event.metaKey || event.ctrlKey ? "steer" : "queue");
       return;
     }
-    const slash = /^\/([a-z]+)\s*$/i.exec(input);
-    if (slash) {
-      const match = SLASH_COMMANDS.find((command) => command.command === slash[1]!.toLowerCase());
-      if (match) {
-        runSlashCommand(match.id);
-        return;
-      }
-    }
+    if (runSlashIfExact(input)) return;
     handleSend();
   };
 
@@ -725,7 +745,10 @@ export function AgentComposer({
                     type="button"
                     className="send-btn"
                     disabled={!canSend || sendMutation.isPending || queueMutation.isPending}
-                    onClick={() => handleSend(busy ? "queue" : "send")}
+                    onClick={() => {
+                      if (!busy && runSlashIfExact(input)) return;
+                      handleSend(busy ? "queue" : "send");
+                    }}
                   >
                     {sendMutation.isPending ? (
                       <Loader2Icon size={14} className="animate-spin" aria-hidden />

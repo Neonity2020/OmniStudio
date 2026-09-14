@@ -218,6 +218,13 @@
       "when": 1790095000004,
       "tag": "0030_calm_sunset_bain",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "6",
+      "when": 1790095000005,
+      "tag": "0031_nosy_jubilee",
+      "breakpoints": true
     }
   ]
 }

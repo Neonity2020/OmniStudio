@@ -2,8 +2,9 @@ import { eq } from "drizzle-orm";
 
 import { db } from "./db";
 import { cloudProviders } from "./db/schema";
-import { getAllSettings, getSetting, updateSettings } from "./db/settings";
+import { ensureSettingsEncrypted, getAllSettings, getSetting, updateSettings } from "./db/settings";
 import { logEvent } from "./app-log";
+import { decryptSecret, encryptSecret, isEncryptedSecret } from "./secrets";
 import {
   getPreset,
   isLocalBaseUrl,
@@ -39,13 +40,18 @@ function rowToInfo(row: typeof cloudProviders.$inferSelect): CloudProviderInfo {
     name: row.name,
     vendor: row.vendor,
     baseUrl: row.baseUrl,
-    apiKey: row.apiKey,
+    apiKey: decryptSecret(row.apiKey),
     models: parseCloudModels(row.models),
     enabled: row.enabled === 1,
     videoApi: (row.videoApi ?? "") as CloudVideoApi,
     createdAt: row.createdAt ?? 0,
     updatedAt: row.updatedAt ?? 0,
   };
+}
+
+/** 读行时取明文 apiKey（密文落盘、读取解密；旧明文透传）。 */
+function rowApiKey(row: { apiKey: string }): string {
+  return decryptSecret(row.apiKey);
 }
 
 function getRow(id: string) {
@@ -59,12 +65,36 @@ export function activeProviderId(): string | null {
 }
 
 /**
+ * 一次性把历史遗留的**明文** apiKey 加密落盘（幂等：已加密的跳过）。
+ *
+ * 老版本把 cloud_providers.apiKey 与 settings 里的密钥明文存 SQLite；升级后读取侧
+ * （decryptSecret / settings 透明层）能透传旧明文，但值仍躺在盘上。本函数在每次
+ * 访问云服务配置时兜底扫描，把明文翻成密文，保证「不写回就不落密文」的旧行也能
+ * 被收进来。成本是一次全表扫描，命中明文才写库，日常调用开销可忽略。
+ */
+function ensureApiKeysEncrypted(): void {
+  const rows = db.select().from(cloudProviders).all();
+  for (const row of rows) {
+    if (row.apiKey && !isEncryptedSecret(row.apiKey)) {
+      db.update(cloudProviders)
+        .set({ apiKey: encryptSecret(row.apiKey), updatedAt: Date.now() })
+        .where(eq(cloudProviders.id, row.id))
+        .run();
+    }
+  }
+  // settings 里的敏感槽位（VLLM_API_KEY / GATEWAY_API_KEY）同样兜底：交给 settings
+  // 层的 ENCRYPTED_KEYS 统一加密，这里不重复其明细逻辑。
+  ensureSettingsEncrypted();
+}
+
+/**
  * 首次访问时把散落在 settings 里的旧云服务配置迁移入表（幂等：表非空即跳过）。
  * - CUSTOM_PROVIDERS 里的自定义服务商 → 各一行（api_key 为空，旧版未存）；
  * - 当前 CLOUD_PROVIDER（预设或自定义）→ 一行，带上 VLLM_API_KEY 与 CLOUD_MODELS；
  * - 全新安装（无任何云配置）→ 预置一行 OmniLabs（未激活），引导用户补 Key。
  */
-function ensureMigrated(): void {
+export function ensureMigrated(): void {
+  ensureApiKeysEncrypted();
   const existing = db.select({ id: cloudProviders.id }).from(cloudProviders).all();
   if (existing.length > 0) return;
 
@@ -118,7 +148,7 @@ function ensureMigrated(): void {
         name: preset.name,
         vendor: preset.vendor,
         baseUrl: (legacy.VLLM_API_BASE ?? "").trim() || preset.baseUrl,
-        apiKey: key === "EMPTY" ? "" : key,
+        apiKey: key === "EMPTY" ? "" : encryptSecret(key),
         models: JSON.stringify(Array.from(merged.values())),
         // 迁移过来的激活厂商直接置为已启用：用户本来就在用它。
         enabled: 1,
@@ -150,10 +180,12 @@ function ensureMigrated(): void {
 
 /** 激活行的配置写回旧 settings 槽位（网关 / chat-model / CLI / 集成选择器消费）。 */
 function syncActiveSlot(row: typeof cloudProviders.$inferSelect): void {
+  // apiKey 落库是密文（见 secrets.ts）。传给 settings 前先解成明文 —— settings 层
+  // 对 VLLM_API_KEY 会再加密存储、读取时透明解出，所以这里拿到的一定是明文。
   updateSettings({
     CLOUD_PROVIDER: row.id,
     VLLM_API_BASE: row.baseUrl,
-    VLLM_API_KEY: row.apiKey || "EMPTY",
+    VLLM_API_KEY: decryptSecret(row.apiKey) || "EMPTY",
     CLOUD_MODELS: row.models,
   });
 }
@@ -245,7 +277,8 @@ export function updateCloudProvider(
   const next = {
     name: patch.name?.trim() || row.name,
     baseUrl: patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl,
-    apiKey: patch.apiKey !== undefined ? patch.apiKey.trim() : row.apiKey,
+    // 新 key 前端传来的是明文，落盘前加密；未提供时保持库里既有值（已是密文，不再动）。
+    apiKey: patch.apiKey !== undefined ? encryptSecret(patch.apiKey.trim()) : row.apiKey,
     models: patch.models !== undefined ? JSON.stringify(patch.models) : row.models,
     videoApi: patch.videoApi !== undefined ? patch.videoApi : (row.videoApi ?? ""),
   };
@@ -502,7 +535,7 @@ export async function setCloudProviderEnabled(
     return { ok: true };
   }
 
-  const probe = await probeProviderKey({ baseUrl: row.baseUrl, apiKey: row.apiKey });
+  const probe = await probeProviderKey({ baseUrl: row.baseUrl, apiKey: rowApiKey(row) });
   if (!probe.ok) {
     logEvent({
       level: "warn",
@@ -688,7 +721,7 @@ export function ensureAppProvidersMigrated(): void {
         name: providerNameForBase(base),
         vendor: "旧配置迁移",
         baseUrl: base,
-        apiKey: key,
+        apiKey: key ? encryptSecret(key) : "",
         models: "[]",
         // 正在被使用的厂商直接启用：它已经被用户用了很久了。
         enabled: 1,
@@ -701,7 +734,7 @@ export function ensureAppProvidersMigrated(): void {
     } else {
       const patch: Record<string, unknown> = { updatedAt: now };
       if (row.enabled !== 1) patch.enabled = 1;
-      if (key && !row.apiKey.trim()) patch.apiKey = key;
+      if (key && !row.apiKey.trim()) patch.apiKey = encryptSecret(key);
       if (app.videoApi && (row.videoApi ?? "") !== app.videoApi) patch.videoApi = app.videoApi;
       if (Object.keys(patch).length > 1) {
         db.update(cloudProviders).set(patch).where(eq(cloudProviders.id, row.id)).run();

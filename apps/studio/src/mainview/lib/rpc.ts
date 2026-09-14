@@ -103,6 +103,11 @@ const rpc = Electroview.defineRPC<AppRPC>({
           stats,
         );
       },
+      // 助手行一建好就插进消息流：首 token 之前的等待（模型加载 / 预填充 / 检索）
+      // 由此立刻有"生成中 · N 秒"可看，而不是干等一个不动的屏幕。
+      chatMessageStarted: ({ conversationId, messageId }) => {
+        useChatStore.getState().beginAssistantMessage(conversationId, messageId);
+      },
       // Agent 运行轨迹：工具调用 / 状态 / 错误
       agentEvent: (event) => {
         // 产出物有专门的 agentArtifact 推送（主进程登记时就发），这里不再顺带失效查询：

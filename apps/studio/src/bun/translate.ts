@@ -5,6 +5,8 @@ import { getSetting } from "./db/settings";
 import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
 import { ensureServerReady, getChatBaseUrl, maxOutputTokens } from "./chat";
 import { recordUsage } from "./stats";
+import { currentUpstream, providerLabelFor, recordUsageEvent } from "./usage";
+import { estimateTokens } from "../shared/token-estimate";
 import { translationLangLabel } from "../shared/translate";
 
 export type TranslationRecordRow = {
@@ -166,6 +168,18 @@ export async function runTranslation(params: {
     };
     const content = json.choices?.[0]?.message?.content?.trim() ?? "";
     recordUsage(modelLabel, json.usage?.prompt_tokens ?? 0, json.usage?.completion_tokens ?? 0);
+    // 整段翻译（长文档尤其）是实打实的一次调用，一样进用量账本。上游没回 usage
+    // 时按送出去的提示与回来的译文估算，来源如实标注。
+    const upstream = currentUpstream();
+    recordUsageEvent({
+      channel: "translate",
+      upstream,
+      provider: providerLabelFor(upstream),
+      model: modelLabel,
+      inputTokens: json.usage?.prompt_tokens ?? estimateTokens(instruction + text),
+      outputTokens: json.usage?.completion_tokens ?? estimateTokens(content),
+      estimated: json.usage == null,
+    });
     if (!content) return { error: "模型未返回译文" };
 
     if (params.save === false) return { text: content };

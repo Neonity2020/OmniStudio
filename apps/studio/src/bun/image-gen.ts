@@ -12,6 +12,7 @@ import * as MlxGen from "./mlx-gen";
 import { findMlxModel } from "./mlx-gen";
 import * as CloudProviders from "./cloud-providers";
 import { logEvent } from "./app-log";
+import { providerLabelFor, recordUsageEvent } from "./usage";
 
 /**
  * AI 生图模块。
@@ -368,11 +369,50 @@ async function generateViaMlx(
 
 type ApiImageItem = { b64_json?: string; url?: string };
 
+/**
+ * 生图接口的 usage（gpt-image-1 这一类按 token 计费的服务才会回）。
+ * 字段名沿用 OpenAI 的 `usage`：`input_tokens` / `output_tokens`。
+ */
+type ApiImageUsage = { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+
+/**
+ * 记一次生图调用。
+ *
+ * 生图和对话不是一套口径：多数服务只回图片、不回 token，所以**照样记一行**
+ * （token 为 0，只计次数）—— 用户眼里「我这个月生了几百张图」本身就是用量，
+ * 统计页里看不到反而奇怪。接口给了 usage 就照实填（gpt-image-1 会回）。
+ */
+function recordImageUsage(
+  backend: string,
+  provider: string,
+  model: string,
+  usage?: ApiImageUsage | null,
+): void {
+  recordUsageEvent({
+    channel: "image",
+    upstream: backend === "api" ? "cloud" : "local",
+    provider,
+    model,
+    inputTokens: usage?.input_tokens,
+    outputTokens: usage?.output_tokens,
+  });
+}
+
+/** 生图后端的厂商展示名：云端取服务商名，本地是引擎名。 */
+function imageProviderLabel(backend: string, providerId: string): string {
+  if (backend === "mlx") return "MLX";
+  if (backend === "comfyui") return "ComfyUI";
+  return CloudProviders.resolveCloudProvider(providerId)?.name ?? providerLabelFor("cloud");
+}
+
 /** 解析 OpenAI 兼容图片接口的返回，逐张落盘并返回 ref 列表。 */
-async function saveApiItems(res: Response): Promise<string[]> {
-  const json = (await res.json().catch(() => null)) as { data?: ApiImageItem[] } | null;
+async function saveApiItems(res: Response, ctx: { provider: string; model: string }): Promise<string[]> {
+  const json = (await res.json().catch(() => null)) as
+    | { data?: ApiImageItem[]; usage?: ApiImageUsage }
+    | null;
   const items = json?.data ?? [];
   if (items.length === 0) throw new Error("服务未返回任何图片");
+  recordImageUsage("api", ctx.provider, ctx.model, json?.usage);
 
   const refs: string[] = [];
   for (const item of items) {
@@ -399,6 +439,7 @@ async function generateViaApi(
 
   const count = Math.max(1, Math.min(params.count ?? 1, 8));
   const size = `${params.width ?? 1024}x${params.height ?? 1024}`;
+  const usageCtx = { provider: imageProviderLabel("api", cfg.providerId), model };
 
   // AI 修图：带参考图时走 /v1/images/edits（multipart 以图改图）；否则走纯文生图。
   if (params.referenceImageRef) {
@@ -426,7 +467,7 @@ async function generateViaApi(
       signal: AbortSignal.timeout(600_000),
     });
     if (!res.ok) throw new Error(await errorMessage(res, "修图请求失败"));
-    return saveApiItems(res);
+    return saveApiItems(res, usageCtx);
   }
 
   const body: Record<string, unknown> = {
@@ -448,7 +489,7 @@ async function generateViaApi(
     signal: AbortSignal.timeout(600_000),
   });
   if (!res.ok) throw new Error(await errorMessage(res, "生图请求失败"));
-  return saveApiItems(res);
+  return saveApiItems(res, usageCtx);
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +681,11 @@ export async function generateImage(
         : cfg.backend === "comfyui"
           ? await generateViaComfy(cfg, params)
           : await generateViaApi(cfg, params);
+    // 本地两个后端（MLX / ComfyUI）不走 HTTP 计费，也不回 usage —— 但一次生成
+    // 就是一次调用，照样记一行；模型名分别是 MLX 模型 id 与 ComfyUI 的 checkpoint。
+    if (cfg.backend !== "api") {
+      recordImageUsage(cfg.backend, imageProviderLabel(cfg.backend, cfg.providerId), params.model?.trim() || cfg.model);
+    }
 
     const records = refs.map((ref) =>
       toRow(

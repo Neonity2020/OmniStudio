@@ -375,6 +375,48 @@ function TimeBucketedSessions({
   );
 }
 
+/** 一段列表默认最多露 5 条，多出来的收在「查看更多」后面。 */
+const LIST_LIMIT = 5;
+
+/**
+ * 一段会话列表：默认只露前 5 条，点「查看更多」展开全部，再点收起。
+ *
+ * 列表是按最近更新排的（新的在最上面），所以收起的是最旧的那批 —— 不点开也
+ * 不会漏掉"刚动过的那个"。置顶段（用户自己攒的短名单，要的就是一眼看到）与归档段
+ * （本来就藏在"归档"折叠后面）不走这里。
+ */
+function SessionList({
+  sessions,
+  renderRow,
+}: {
+  sessions: AgentSessionView[];
+  renderRow: (session: AgentSessionView) => React.ReactNode;
+}) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const hidden = sessions.length - LIST_LIMIT;
+  const visible = expanded ? sessions : sessions.slice(0, LIST_LIMIT);
+
+  return (
+    <>
+      <TimeBucketedSessions sessions={visible} renderRow={renderRow} />
+      {hidden > 0 ? (
+        <button
+          type="button"
+          className="pi-list-more"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <ChevronDownIcon size={12} className={`pi-caret${expanded ? "" : " collapsed"}`} aria-hidden />
+          <span>
+            {expanded ? t("agent.sidebar.showLess") : t("agent.sidebar.showMore", { count: String(hidden) })}
+          </span>
+        </button>
+      ) : null}
+    </>
+  );
+}
+
 /**
  * Agent 会话侧栏。
  *
@@ -391,6 +433,9 @@ function TimeBucketedSessions({
  *
  * 动作区放在列表上方而不是页脚：这四个是"接下来去哪"的入口，跟会话内容不是一类；
  * 其中新建任务与搜索带 ⌘N / ⌘K 提示（按键在 AgentWindow 里监听）。
+ *
+ * 三段列表（置顶 / 会话 / 项目）一律**按最近更新倒序**，新的在最上面；每段默认只露
+ * 前 5 条，剩下的收在行尾的「查看更多」里。
  */
 export function AgentSessionSidebar({
   activeConversationId,
@@ -463,7 +508,17 @@ export function AgentSessionSidebar({
     },
   });
 
-  const live = sessions.filter((session) => !session.archived);
+  /**
+   * 列表顺序在这里定：**最近更新的在最上面**（新的排最前）。
+   *
+   * 服务端本来就按这个顺序返回，这里再排一次是有意的：它是"默认只露 5 条"的前提
+   * —— 顺序反了，收起来的就是最新的那批，而这种错在界面上看不出来。
+   * 时间相同时排序是稳定的（V8 保证），沿用服务端给的先后，行不会自己来回跳。
+   */
+  const live = useMemo(
+    () => sessions.filter((session) => !session.archived).sort((a, b) => b.updatedAt - a.updatedAt),
+    [sessions],
+  );
   const archived = sessions.filter((session) => session.archived);
 
   /**
@@ -477,6 +532,11 @@ export function AgentSessionSidebar({
     [live],
   );
 
+  /**
+   * 项目段：按工作区分组，**最近动过的排最前**。
+   * 组的时间取"组内最新那条会话的 updatedAt"，所以在这个项目里新建会话 / 发消息，
+   * 项目自己就会往前排；没人动过就保持原位置（稳定排序，时间相同沿用上面的先后）。
+   */
   const projects = useMemo(() => {
     const map = new Map<string, AgentSessionView[]>();
     for (const session of live) {
@@ -630,7 +690,7 @@ export function AgentSessionSidebar({
             </>
           ) : null}
 
-          <TimeBucketedSessions sessions={standalone} renderRow={renderRow} />
+          <SessionList sessions={standalone} renderRow={renderRow} />
           {!loading && live.length === 0 ? <p className="pi-empty center">{t("agent.session.empty")}</p> : null}
 
           {loading ? (
@@ -706,7 +766,7 @@ export function AgentSessionSidebar({
                   style={{ maxHeight: isOpen ? 2000 : 0 }}
                   aria-hidden={!isOpen}
                 >
-                  <TimeBucketedSessions sessions={items} renderRow={renderRow} />
+                  <SessionList sessions={items} renderRow={renderRow} />
                 </div>
               </div>
             );

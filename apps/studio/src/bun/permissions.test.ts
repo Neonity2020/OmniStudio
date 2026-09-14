@@ -3,9 +3,10 @@
  * 不依赖数据库与 electrobun，可直接跑 `bun test`。
  */
 import { describe, expect, test } from "bun:test";
+import { mkdirSync } from "node:fs";
 import path from "path";
 
-import { spillRoot } from "./agent-spill";
+import { conversationSpillDir, spillRoot } from "./agent-spill";
 import {
   canonicalCommand,
   defaultRules,
@@ -219,7 +220,14 @@ describe("permissionRequestForTool", () => {
   test("工具输出的转存目录不算「工作区之外」：读回超限输出不该再弹一次授权", () => {
     // 转存文件是应用自己从工具结果里写出来的（用户已授权过产生它的那次调用），
     // 不放行就等于"截断之后能读回原文"是句空话 —— 每读一次都要用户点一下。
-    const spillFile = path.join(spillRoot(), "42", "2026-01-01T00-00-00-000Z-bash.txt");
+    //
+    // 先把这个目录建出来：`isSpillPath` 拿**真实路径**比对（防"先建软链再读"，
+    // 见 agent-spill.ts），根目录在盘上不存在就无从解析，只能保守地判成"不在转存
+    // 目录里"。真实路径下它必定存在（有文件才谈得上读它），所以这里不能省 ——
+    // 省了就变成依赖"别的测试先写过一次转存"，单独跑本文件必然红。
+    const spillDir = conversationSpillDir(42);
+    mkdirSync(spillDir, { recursive: true });
+    const spillFile = path.join(spillDir, "2026-01-01T00-00-00-000Z-bash.txt");
     expect(permissionRequestForTool({ toolName: "read_file", args: { path: spillFile }, workspace })).toBeNull();
     expect(permissionRequestForTool({ toolName: "grep", args: { pattern: "x", path: spillFile }, workspace })).toBeNull();
     // 口子没有开大：数据目录的其余部分照旧要授权（设置表里存着全部云端 API Key）。

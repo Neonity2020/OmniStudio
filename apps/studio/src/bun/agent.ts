@@ -2,7 +2,7 @@ import { existsSync, mkdirSync } from "fs";
 import os from "os";
 import path from "path";
 import { randomUUID } from "crypto";
-import { and, asc, eq, inArray, like, sql } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, like, sql } from "drizzle-orm";
 
 import {
   Agent,
@@ -27,6 +27,7 @@ import { getSetting, updateSettings } from "./db/settings";
 import { getChatBaseUrl, getHistory, ensureServerReady, titleFromMessage } from "./chat";
 import { getChatModelLabel, getChatRequestModelId, getChatProviderLabel, chatModelSupportsImages } from "./chat-model";
 import { recordUsage } from "./stats";
+import { recordTokenUsage } from "./usage";
 import {
   buildAgentTools,
   buildReadOnlyTools,
@@ -119,7 +120,22 @@ export type AgentEventRow = {
   id: number;
   conversationId: number;
   messageId: number | null;
-  kind: "status" | "tool_start" | "tool_end" | "error" | "subagent_start" | "subagent_end";
+  kind:
+    | "status"
+    | "tool_start"
+    | "tool_end"
+    | "error"
+    | "subagent_start"
+    | "subagent_end"
+    /**
+     * 模型在**某一步**说的话（正文片段）。
+     *
+     * 一条助手消息的正文是整轮拼接的（多个步骤的话连成一整块），正文里没有
+     * "这句话说在哪次工具调用之前"这个信息；而界面要的是时间轴：说了什么 →
+     * 调了什么工具 → 又说了什么。所以每个步骤的正文额外落成一条带顺序的事件，
+     * 由 runAgentTurn 在"这一步的工具开始执行之前"冲出来（见 flushStepText）。
+     */
+    | "text";
   toolName: string | null;
   /** JSON 字符串，UI 渲染时再解析。 */
   args: string | null;
@@ -163,6 +179,15 @@ type DoneListener = (payload: {
 }) => void;
 
 /**
+ * 本轮助手消息的行刚建好（开跑瞬间，一个字还没出）。
+ *
+ * 这条推送是"点发送之后立刻有反馈"的唯一来源：建会话、起推理服务、等模型加载
+ * 都发生在第一个 token 之前，界面要等到那时才建得出消息行的话，干等的那几十秒
+ * 屏幕上什么都没有 —— 用户看到的就是"程序挂了"。
+ */
+type StartedListener = (payload: { conversationId: number; messageId: number }) => void;
+
+/**
  * 回合用量统计的推送负载：与聊天路径共用 `chat-stats.ts` 的 `MessageStats`
  * （输入 / 输出 / 思考 tokens、首 token 耗时、两种吞吐…），
  * 额外带上本轮结束时的上下文占用（输入框上方的占用条用它）。
@@ -181,6 +206,7 @@ const chunkListeners = new Set<ChunkListener>();
 const doneListeners = new Set<DoneListener>();
 const statsListeners = new Set<StatsListener>();
 const eventListeners = new Set<EventListener>();
+const startedListeners = new Set<StartedListener>();
 
 export function onAgentChunk(cb: ChunkListener): () => void {
   chunkListeners.add(cb);
@@ -197,6 +223,10 @@ export function onAgentStats(cb: StatsListener): () => void {
 export function onAgentEvent(cb: EventListener): () => void {
   eventListeners.add(cb);
   return () => eventListeners.delete(cb);
+}
+export function onAgentMessageStarted(cb: StartedListener): () => void {
+  startedListeners.add(cb);
+  return () => startedListeners.delete(cb);
 }
 
 // 待办 / 产出物 / 交互（授权、提问）四类推送：直接转给 RPC 层，UI 各自订阅。
@@ -306,6 +336,9 @@ function emitStats(payload: Parameters<StatsListener>[0]) {
 function emitEvent(payload: AgentEventRow) {
   for (const cb of eventListeners) cb(payload);
 }
+function emitStarted(payload: Parameters<StartedListener>[0]) {
+  for (const cb of startedListeners) cb(payload);
+}
 
 /** 记录一条轨迹事件：落库后立刻推送给 UI。 */
 function recordEvent(row: {
@@ -336,11 +369,20 @@ function recordEvent(row: {
   return inserted;
 }
 
-export function listAgentEvents(conversationId: number): AgentEventRow[] {
+/**
+ * 会话的运行轨迹。`afterId` = 只取比它新的事件（增量）。
+ *
+ * 为什么要增量：轨迹在界面上主要靠 `agentEvent` 推送逐条追加，而推送不是可靠的
+ * 账本 —— 窗口被系统节流、webview 刷新过、消息在信道里丢了，都会让界面停在某一刻，
+ * 库里却还在继续写。界面于是在跑动中按 `afterId` 定期追平一次（见 agent-screen 的
+ * tail 轮询）：正常情况下每次返回空数组，几乎不花钱；真丢了推送时就把缺的那几条补上。
+ * `afterId = 0` 就是"整份列表"（打开会话时用）。
+ */
+export function listAgentEvents(conversationId: number, afterId = 0): AgentEventRow[] {
   return db
     .select()
     .from(agentEvents)
-    .where(eq(agentEvents.conversationId, conversationId))
+    .where(and(eq(agentEvents.conversationId, conversationId), gt(agentEvents.id, afterId)))
     .orderBy(asc(agentEvents.id))
     .all() as AgentEventRow[];
 }
@@ -814,13 +856,26 @@ async function toolsForMode(
   },
 ): Promise<AgentTool<any>[]> {
   const allowShell = getSetting("AGENT_ALLOW_SHELL") !== "0";
+  /**
+   * 本轮助手消息 id 必须**调用时现取**，不能用建工具集那一刻的值。
+   *
+   * 会话实例（连带这份工具集）是跨回合复用的：模型 / 工作区 / 无人值守没变就一直
+   * 沿用（见 getOrCreateSession），于是建会话时 `currentMessageId()` 要么是 null
+   * ——第一轮里助手消息还没建出来——要么指向**上一轮**的消息。产出物就是这么丢的：
+   * 自动化那一轮产出的报告挂在了 message_id = NULL 上，右侧面板里能看到、消息底下
+   * 却没有卡片，点回看还以为它什么都没写。提问与授权请求同理（弹窗记录挂错消息）。
+   * 子智能体不走这里：它的父消息由 runSubagent 显式钉住。
+   */
+  const messageIdNow = () =>
+    (conversationId != null ? currentMessageId(conversationId) : null) ?? messageId ?? null;
   const ctx: ToolContext = {
     workspace,
     allowShell: allowShell && mode !== "plan",
     vision: chatModelSupportsImages(),
     systemPromptTokens,
     conversationId,
-    messageId: messageId ?? null,
+    // 快照值，供工具自身读取；注入的回调一律用 messageIdNow()（见上）。
+    messageId: messageIdNow(),
     onCheckpoint: toolHooks?.onCheckpoint,
     onRewind: toolHooks?.onRewind,
     onGoal: toolHooks?.onGoal,
@@ -834,7 +889,7 @@ async function toolsForMode(
       ? (questions) =>
           askQuestions({
             conversationId,
-            messageId: messageId ?? null,
+            messageId: messageIdNow(),
             questions: questions.map((q) => ({
               question: q.question,
               header: q.header ?? "问题",
@@ -852,7 +907,7 @@ async function toolsForMode(
         ? (input) =>
             authorizeToolCall({
               conversationId,
-              messageId: messageId ?? null,
+              messageId: messageIdNow(),
               toolName: "escalate_sandbox",
               args: { command: input.command, output: input.output },
               workspace,
@@ -863,7 +918,7 @@ async function toolsForMode(
       ? (opts) =>
           runSubagent({
             conversationId,
-            parentMessageId: messageId ?? null,
+            parentMessageId: messageIdNow(),
             workspace,
             mode,
             ...opts,
@@ -871,7 +926,7 @@ async function toolsForMode(
       : undefined,
     recordArtifact: conversationId
       ? (filePath, tool) => {
-          recordArtifact({ conversationId, messageId: messageId ?? null, filePath, workspace, tool });
+          recordArtifact({ conversationId, messageId: messageIdNow(), filePath, workspace, tool });
         }
       : undefined,
   };
@@ -1449,6 +1504,9 @@ async function runSubagent(opts: {
     toolName: "task",
     subagentId,
     output: label,
+    // 类型与描述另外给一份结构化的：界面上那一行是「子智能体 探索 · 找配置」，
+    // 从 `探索：找配置` 这段 label 里切字符串也读得出来，但读的是写入格式而不是事实。
+    args: { subagent_type: opts.subagentType, description: opts.description },
   });
 
   const { model, models, streamFn } = createStreamFn();
@@ -1545,6 +1603,12 @@ async function runSubagent(opts: {
       }
       case "turn_end": {
         subagentSteps += 1;
+        // 子智能体的每一步同样是真金白银的调用，之前只数步数、usage 直接丢掉。
+        recordTokenUsage({
+          channel: "agent",
+          model: model.name,
+          usage: (event.message as { usage?: { input?: number; output?: number } }).usage,
+        });
         return;
       }
       case "tool_execution_start": {
@@ -2353,6 +2417,9 @@ export async function runAgentTurn(opts: {
     .returning({ id: messages.id })
     .get();
   const assistantId = assistant.id;
+  // 建行就报备：下面建会话 / 起服务 / 等模型加载都是秒级到几十秒级的活儿，
+  // 界面上那条「处理中 · N 秒」从这里开始有落点（否则要等第一个 token）。
+  emitStarted({ conversationId, messageId: assistantId });
 
   const session = await getOrCreateSession(conversationId, mode, workspace, opts.headless === true);
   const { agent } = session;
@@ -2454,6 +2521,24 @@ export async function runAgentTurn(opts: {
     if (!flushTimer) flushTimer = setTimeout(flushChunks, FLUSH_INTERVAL_MS);
   };
 
+  /**
+   * 当前步骤的正文缓冲 —— 冲出去就是时间轴上的一段「它说的话」。
+   *
+   * 冲的时机是**这一步的工具开始执行之前**：文本事件因此正好排在自己那批工具
+   * 上面，界面上就是"说了一句 → 调了几个工具 → 又说一句"。最后一段（没有后续
+   * 工具的收尾回答）在模型循环结束时冲一次，于是正文与事件两条来源能对上：
+   * 界面按事件画时间轴，只把"还没落成事件的那截尾巴"当流式正文渲染。
+   */
+  let pendingStepText = "";
+  const flushStepText = () => {
+    if (!pendingStepText) return;
+    const text = pendingStepText;
+    pendingStepText = "";
+    // 纯空白（换行 / 缩进）不值得占一条事件：它留在正文尾巴里不显示任何东西。
+    if (!text.trim()) return;
+    recordEvent({ conversationId, messageId: assistantId, kind: "text", output: text });
+  };
+
   const unsubscribe = agent.subscribe((event: AgentEvent) => {
     switch (event.type) {
       case "message_update": {
@@ -2467,6 +2552,7 @@ export async function runAgentTurn(opts: {
         } else {
           fullText += delta.text;
           pendingContent += delta.text;
+          pendingStepText += delta.text;
           // 即时消费方（通话边生成边合成）仍按 token 回调，不走批量缓冲。
           opts.onDelta?.(delta.text, "content", assistantId);
           scheduleFlush();
@@ -2475,9 +2561,15 @@ export async function runAgentTurn(opts: {
       }
       case "turn_end": {
         step += 1;
-        const msg = event.message as { usage?: { input?: number; output?: number }; stopReason?: string };
+        const msg = event.message as {
+          usage?: { input?: number; output?: number; cacheRead?: number; reasoning?: number };
+          stopReason?: string;
+        };
         promptTokens += msg?.usage?.input ?? 0;
         completionTokens += msg?.usage?.output ?? 0;
+        // 每一步单独记一行：回合合计看不出"上下文复用了多少"，按步才能算清
+        // 输入缓存的命中率，也才对得上服务端的计费账单。
+        recordTokenUsage({ channel: "agent", model: modelName, usage: msg?.usage });
         // 实测输入量 = 本轮真实占用的窗口大小，会话内一直用它（比估算准）。
         if (msg?.usage?.input) rememberPromptTokens(conversationId, msg.usage.input);
         // turn_end 之间必然夹着工具执行 / 下一轮请求，不把这段间隔算进解码耗时。
@@ -2496,6 +2588,8 @@ export async function runAgentTurn(opts: {
       }
       case "tool_execution_start": {
         toolCalls += 1;
+        // 先说后做的顺序：这一步说的话先落成事件，再记工具调用（时间轴据此混排）。
+        flushStepText();
         recordEvent({
           conversationId,
           messageId: assistantId,
@@ -2658,6 +2752,9 @@ export async function runAgentTurn(opts: {
           }
           pendingContent = "";
           pendingReasoning = "";
+          // 失败那一步的正文同样作废：它已经被 fullText 回退掉了，落成事件就会让
+          // 时间轴上多出一段正文里并不存在的话（尾巴切片也会因此对不上）。
+          pendingStepText = "";
           fullText = committedText;
           reasoning = committedReasoning;
           const reason = failureReasonOf(failed);
@@ -2686,6 +2783,8 @@ export async function runAgentTurn(opts: {
       };
       await runTurnWithRecovery();
     }
+    // 模型循环结束：最后一段正文（收尾回答）也落成事件，时间轴到此完整。
+    flushStepText();
 
     /**
      * 认领"被吞掉的"收尾状态。

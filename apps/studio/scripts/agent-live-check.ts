@@ -63,6 +63,30 @@ function toolCallChunks(model: string, name: string, args: unknown): string[] {
   return chunks;
 }
 
+/**
+ * 一步里"先说一句、再调工具"（真实模型最常见的形态）：正文增量在前、工具调用在后，
+ * 收尾是 `tool_calls` 而不是 `stop`。这是时间轴混排的基础形态 —— 界面上必须排成
+ * "它说的话 → 这批工具"，而不是把这一轮所有工具挤到正文上面去。
+ */
+function sayThenToolChunks(model: string, text: string, name: string, args: unknown): string[] {
+  const chunks = textChunks(model, text);
+  // 这一步还没结束：去掉 textChunks 结尾的 stop，收尾交给工具调用那条。
+  chunks.pop();
+  const json = JSON.stringify(args);
+  chunks.push(
+    sseChunk(model, {
+      role: "assistant",
+      content: "",
+      tool_calls: [{ index: 0, id: `call_${name}`, type: "function", function: { name, arguments: "" } }],
+    }),
+  );
+  for (let i = 0; i < json.length; i += 24) {
+    chunks.push(sseChunk(model, { tool_calls: [{ index: 0, function: { arguments: json.slice(i, i + 24) } }] }));
+  }
+  chunks.push(sseChunk(model, {}, "tool_calls"));
+  return chunks;
+}
+
 function textChunks(model: string, text: string): string[] {
   const chunks = [sseChunk(model, { role: "assistant", content: "" })];
   // 思考增量（llama.cpp / vLLM 用 reasoning_content，mlx 用 reasoning）：
@@ -272,6 +296,11 @@ const stub = Bun.serve({
         prompt: "请列出工作区里有哪些文件，然后用一句话总结。",
         subagent_type: "explore",
       });
+    } else if (/timeline-混排/.test(firstUserText) && step === 0) {
+      // 时间轴场景：先说一句、再调工具（顺序必须落进事件里）。
+      chunks = sayThenToolChunks("stub-model", "先看一眼工作区里有什么。", "list_dir", { path: "." });
+    } else if (/timeline-混排/.test(firstUserText)) {
+      chunks = textChunks("stub-model", "看完了：目录就这些。");
     } else if (readOnly && step === 0) {
       chunks = toolCallChunks("stub-model", "list_dir", { path: "." });
     } else if (readOnly && step === 1) {
@@ -530,6 +559,27 @@ check(
   "产出物登记了 notes/live.md",
   Artifacts.listArtifacts(conversation.id).some((item) => item.path.includes("live.md")),
   JSON.stringify(Artifacts.listArtifacts(conversation.id).map((item) => item.path)),
+);
+/**
+ * 产出物必须挂在**本轮**的助手消息上。
+ *
+ * 这个字段决定界面把卡片画在哪条消息底下：挂空（或挂到上一轮的消息）时，右侧面板里
+ * 看得到、消息下面一张卡片都没有 —— 用户以为它什么都没产出。曾经的实现是在建会话
+ * 那一刻取消息 id，而第一轮里助手消息还没建出来（自动化跑的那一轮同样如此），
+ * 于是产出物全挂在了 NULL 上。这里让真实回合把它钉死。
+ */
+const turnArtifacts = Artifacts.listArtifacts(conversation.id);
+const assistantHistory = Chat.getHistory(conversation.id).filter(
+  (message) => message.role === "assistant",
+);
+const turnAssistant = assistantHistory[assistantHistory.length - 1];
+check(
+  "产出物挂在本轮助手消息上（挂空了消息底下就没有卡片）",
+  turnArtifacts.length > 0 && turnArtifacts.every((item) => item.messageId === turnAssistant?.id),
+  JSON.stringify({
+    assistantId: turnAssistant?.id,
+    artifacts: turnArtifacts.map((item) => ({ path: item.path, messageId: item.messageId })),
+  }),
 );
 check(
   "待办清单落库且三项都完成",
@@ -1440,6 +1490,47 @@ check(
 );
 Plans.clearPlan(planConversation.id);
 
+// ---------------------------------------------------------------------------
+// 时间轴混排：模型说的话与工具调用按发生顺序落成事件（界面据此混排，而不是
+// "所有工具在上、所有正文在下"）。顺序只有事件能给：正文在库里是整轮拼接的一块。
+// ---------------------------------------------------------------------------
+const timelineConversation = Chat.createConversation("时间轴混排", "agent");
+Agent.setConversationWorkspace(timelineConversation.id, workspace);
+await Agent.runAgentTurn({
+  conversationId: timelineConversation.id,
+  content: "timeline-混排：先说一句，再看一眼工作区，最后给结论。",
+  mode: "agent",
+  workspace,
+});
+const timelineEvents = Agent.listAgentEvents(timelineConversation.id);
+const timelineShape = timelineEvents
+  .map((event) =>
+    event.kind === "text" ? "text" : event.kind === "tool_start" ? "tool" : event.kind === "tool_end" ? null : null,
+  )
+  .filter(Boolean);
+check(
+  "时间轴：正文段与工具调用按发生顺序交错落库（说 → 做 → 说）",
+  JSON.stringify(timelineShape) === JSON.stringify(["text", "tool", "text"]),
+  JSON.stringify(timelineShape),
+);
+const timelineHistory = Chat.getHistory(timelineConversation.id).filter((m) => m.role === "assistant");
+const timelineAnswer = timelineHistory[timelineHistory.length - 1]?.content ?? "";
+const flushed = timelineEvents
+  .filter((event) => event.kind === "text")
+  .map((event) => event.output ?? "")
+  .join("");
+check(
+  "时间轴：text 事件拼起来正是正文的前缀（界面靠它算「还没进时间轴的尾巴」）",
+  flushed.length > 0 && timelineAnswer.startsWith(flushed),
+  JSON.stringify({ flushed: flushed.slice(0, 40), answer: timelineAnswer.slice(0, 60) }),
+);
+check(
+  "时间轴：最后一段正文也落了事件（跑完尾巴为空，不会与时间轴重复渲染）",
+  flushed === timelineAnswer,
+  JSON.stringify({ flushed: flushed.length, answer: timelineAnswer.length }),
+);
+
+Interactions.cancelPendingForConversation(timelineConversation.id);
 Interactions.cancelPendingForConversation(fifth.id);
 Interactions.cancelPendingForConversation(third.id);
 Interactions.cancelPendingForConversation(fourth.id);

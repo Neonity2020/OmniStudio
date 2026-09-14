@@ -12,6 +12,7 @@ import { AgentComposer } from "./agent/composer";
 import { activateNewSession, newTaskWorkspace } from "./agent/new-session";
 import { AgentRightPanel } from "./agent/right-panel";
 import { AgentAssistantMessage, AgentUserMessage } from "./agent/message";
+import { artifactsByMessage as groupArtifactsByMessage, lastAssistantMessageId } from "./agent/artifact-meta";
 import { AgentSearchDialog, AgentTopbar, WorkPanelToggle } from "./agent/topbar";
 import { AgentAutomationsView, AgentPluginsView } from "./agent/agent-views";
 import type { ArtifactItem } from "../../bun/agent-artifacts";
@@ -188,25 +189,58 @@ function AgentConversation({
     return map;
   }, [events]);
 
-  /** 产出物按所属消息预分组（消息里的文件卡片 + 「打开」进右侧预览）。 */
-  const artifactsByMessage = useMemo(() => {
-    const map = new Map<number, ArtifactItem[]>();
-    for (const artifact of artifacts) {
-      if (artifact.messageId == null) continue;
-      const bucket = map.get(artifact.messageId);
-      if (bucket) bucket.push(artifact);
-      else map.set(artifact.messageId, [artifact]);
-    }
-    return map;
-  }, [artifacts]);
+  /**
+   * 产出物按所属消息预分组；没有归属的（message_id 为空 / 归属的消息已经不在这一屏）
+   * 由 `artifactsByMessage` 统一挂到最后一条助手消息下面 —— 规则本身是纯函数，有单测。
+   */
+  const artifactsByMessage = useMemo(
+    () => groupArtifactsByMessage(artifacts, activeMessages),
+    [artifacts, activeMessages],
+  );
+
+  /** 最后一条助手消息（产出物兜底与「查看所有产物」都挂在它下面）。 */
+  const lastAssistantId = useMemo(() => lastAssistantMessageId(activeMessages), [activeMessages]);
 
   const openArtifact = (artifact: ArtifactItem) => {
     useAgentStore.getState().setPreview({ source: "artifact", artifactId: artifact.id });
   };
 
+  /** 「查看所有产物」：常驻的产出物页签（已经开着就聚焦过去，不叠一堆重复页签）。 */
+  const openArtifactsTab = () => {
+    useAgentStore.getState().openPanelTab({ kind: "artifacts" });
+  };
+
   const hasMessages = activeMessages.length > 0;
   const running = useAgentRunning();
   const conversationModel = convQuery.data?.conversation?.modelId ?? undefined;
+
+  /**
+   * 轨迹的兜底追平（`afterId` 增量）。
+   *
+   * 轨迹在界面上主要靠 `agentEvent` 推送一条条追加，而推送会丢：窗口被系统节流、
+   * webview 刷新过、消息在信道里掉了 —— 库里照写不误，界面却停在丢消息的那一刻，
+   * 看起来就是"执行到一半记录加不上"，而且不会再自己好（打开会话时的整份加载是唯一
+   * 的补救）。所以跑动中每几秒按 id 只取新增的那几条并进列表，收尾（running 转 false）
+   * 再补一次：正常情况下每次返回空数组，几乎不花钱。
+   */
+  useEffect(() => {
+    const catchUp = async () => {
+      const known = useAgentStore.getState().events;
+      const afterId = known.length > 0 ? known[known.length - 1]!.id : 0;
+      try {
+        const data = await rpcClient.listAgentEvents({ conversationId, afterId });
+        if (data.events.length > 0) useAgentStore.getState().mergeEvents(data.events);
+      } catch {
+        // 追平失败不影响这一屏：下一次 tick / 下一次打开会话会再对齐。
+      }
+    };
+    if (!running) {
+      void catchUp();
+      return;
+    }
+    const timer = window.setInterval(() => void catchUp(), 4000);
+    return () => window.clearInterval(timer);
+  }, [running, conversationId]);
 
   // 只有最后一条助手消息在流式时才转圈：前面的消息早就结束了。
   const lastMessage = activeMessages[activeMessages.length - 1];
@@ -227,6 +261,7 @@ function AgentConversation({
             activeMessages.map((message) => {
               const isLast = message.id === lastMessage?.id;
               const isStreamingMessage = running && isLast && message.role === "assistant";
+              const isLastAssistant = message.id === lastAssistantId;
 
               if (message.role === "user") {
                 return (
@@ -238,6 +273,12 @@ function AgentConversation({
                 );
               }
 
+              /**
+               * 这一条消息下面挂的产物：自己的 + （最后一条助手消息才有）没有归属的那些 ——
+               * 合并规则在 artifact-meta 的 artifactsByMessage 里（纯函数，有单测）。
+               */
+              const shown = artifactsByMessage.get(message.id) ?? [];
+
               return (
                 <AgentAssistantMessage
                   key={message.id}
@@ -245,10 +286,12 @@ function AgentConversation({
                   conversationId={conversationId}
                   conversationModel={conversationModel}
                   events={eventsByMessage.get(message.id) ?? []}
-                  artifacts={artifactsByMessage.get(message.id) ?? []}
+                  artifacts={shown}
+                  artifactTotal={isLastAssistant ? artifacts.length : 0}
                   streaming={isStreamingMessage}
                   snapshot={snapshotsByMessage.get(message.id)}
                   onOpenArtifact={openArtifact}
+                  onOpenArtifacts={openArtifactsTab}
                 />
               );
             })

@@ -10,6 +10,7 @@ import { computeTokenStats, parseMessageStats, type MessageStats } from "./chat-
 import { estimateMessagesTokens, estimateTokens } from "../shared/token-estimate";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
+import { currentUpstream, providerLabelFor, recordUsageEvent } from "./usage";
 import { webSearch } from "./web-search";
 import { getLastError, startServer } from "./server-manager";
 import * as Served from "./model-servers";
@@ -86,9 +87,20 @@ type DoneListener = (payload: {
   citations?: KbCitation[];
 }) => void;
 
+/**
+ * 助手消息的行刚建好（回合开跑，一个字还没出）。
+ *
+ * 从"按下发送"到"第一个 token 到达"之间隔着建会话、模型加载、长提示词预填充、
+ * 知识库检索这些活儿，几秒到几十秒都可能。界面此前要等第一个增量才建得出这条
+ * 消息，那段时间屏幕上只有用户自己刚发出去的那个气泡 —— 看起来就是程序挂了。
+ * 把"行已经建好"提前推过去，两个页面各自的「生成中 / 处理中」才有落点。
+ */
+type StartedListener = (payload: { conversationId: number; messageId: number }) => void;
+
 const chunkListeners = new Set<ChunkListener>();
 const doneListeners = new Set<DoneListener>();
 const statsListeners = new Set<(payload: ChatStats) => void>();
+const startedListeners = new Set<StartedListener>();
 
 export function onChatChunk(cb: ChunkListener): () => void {
   chunkListeners.add(cb);
@@ -105,6 +117,11 @@ export function onChatStats(cb: (payload: ChatStats) => void): () => void {
   return () => statsListeners.delete(cb);
 }
 
+export function onChatMessageStarted(cb: StartedListener): () => void {
+  startedListeners.add(cb);
+  return () => startedListeners.delete(cb);
+}
+
 function emitChunk(payload: Parameters<ChunkListener>[0]) {
   for (const cb of chunkListeners) cb(payload);
 }
@@ -115,6 +132,26 @@ function emitDone(payload: Parameters<DoneListener>[0]) {
 
 function emitChatStats(payload: ChatStats) {
   for (const cb of statsListeners) cb(payload);
+}
+
+function emitStarted(payload: Parameters<StartedListener>[0]) {
+  for (const cb of startedListeners) cb(payload);
+}
+
+/**
+ * 建一条空的助手消息行，并**立刻**告诉界面它存在了（返回新行 id）。
+ *
+ * 发送 / 重新生成 / 翻译 / 语音通话四条路都要"先落行、再流式写回"，
+ * 各自抄一遍插入语句就会各自漏掉那条推送 —— 收敛到这里，行与通知永远成对。
+ */
+function insertAssistantMessage(conversationId: number): number {
+  const inserted = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+  emitStarted({ conversationId, messageId: inserted.id });
+  return inserted.id;
 }
 
 const IMAGE_MEDIA_TYPES: Record<string, string> = {
@@ -708,7 +745,7 @@ async function streamAssistantReply(opts: {
     const outputTokens = measuredOutput ?? estimateTokens(full + reasoning);
     const elapsedMs = Math.max(1, performance.now() - startedAt);
     const decodePerSec = timings?.predicted_per_second;
-    return computeTokenStats({
+    const stats = computeTokenStats({
       // 输入侧没有实测值就按请求体估算（系统提示 + 全部历史 + 本轮提问都在里面）。
       inputTokens: measuredInput ?? estimateMessagesTokens(payload.messages),
       outputTokens,
@@ -728,6 +765,27 @@ async function streamAssistantReply(opts: {
       model: getChatModelLabel() || model,
       provider: getChatProviderLabel() ?? undefined,
     });
+
+    // 记进用量账本。`collectStats` 每次请求只会走到一次（正常结束或中断各一条路径），
+    // 所以账本不会重复计数。
+    //
+    // 一个字都没出、上游也没回 usage 的请求不记：连接一开始就断了 / 服务端直接拒绝，
+    // 这种失败重试几次就会把「调用次数」撑得比实际大，而它确实没消耗任何算力。
+    if (measuredOutput != null || measuredInput != null || outputTokens > 0) {
+      const upstream = currentUpstream();
+      recordUsageEvent({
+        channel: "chat",
+        upstream,
+        provider: providerLabelFor(upstream),
+        model: getChatModelLabel() || model,
+        inputTokens: stats.inputTokens,
+        outputTokens: stats.outputTokens,
+        cachedTokens: stats.cachedTokens,
+        reasoningTokens: stats.reasoningTokens,
+        estimated: stats.source !== "usage",
+      });
+    }
+    return stats;
   };
 
   const requestSignal = opts.signal
@@ -922,11 +980,9 @@ export async function sendMessage(
       .run();
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  // 先落行、再组 payload：组 payload 里有联网检索 / 知识库检索（可能要再跑一次模型），
+  // 行早一步存在，界面就能早一步显示"正在干活"。
+  const assistantId = insertAssistantMessage(conversationId);
 
   const { messages: payloadMessages, citations } = await buildPayloadMessages(
     conversationId,
@@ -935,7 +991,7 @@ export async function sendMessage(
   );
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
     citations: citations.length > 0 ? citations : undefined,
   });
@@ -981,16 +1037,12 @@ export async function streamChatTurn(opts: {
       .run();
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  const assistantId = insertAssistantMessage(conversationId);
 
   const { messages: payloadMessages } = await buildPayloadMessages(conversationId, content, {});
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
     signal: opts.signal,
     onDelta: opts.onDelta,
@@ -1033,6 +1085,10 @@ async function rewriteSearchQuery(latestQuery: string): Promise<string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (apiKey && apiKey !== "EMPTY") headers.Authorization = `Bearer ${apiKey}`;
 
+  const systemPrompt =
+    "你是搜索查询改写器。把用户的消息改写成适合网页搜索引擎的简短关键词" +
+    "（保留实体、数字、时间，去掉请求语气词）。只输出关键词本身，不要解释。";
+
   try {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
@@ -1042,19 +1098,31 @@ async function rewriteSearchQuery(latestQuery: string): Promise<string> {
         stream: false,
         max_tokens: 80,
         messages: [
-          {
-            role: "system",
-            content:
-              "你是搜索查询改写器。把用户的消息改写成适合网页搜索引擎的简短关键词" +
-              "（保留实体、数字、时间，去掉请求语气词）。只输出关键词本身，不要解释。",
-          },
+          { role: "system", content: systemPrompt },
           { role: "user", content: raw },
         ],
       }),
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) return fallback;
-    const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    const json = (await res.json()) as {
+      choices?: { message?: { content?: string } }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    // 改写查询也是实打实的一次模型调用，一样记账。上游没回 usage 时按请求/回答
+    // 文本估算（这条路径只发了两段很短的文本，估算误差无关紧要）。
+    const upstream = currentUpstream();
+    recordUsageEvent({
+      channel: "chat",
+      upstream,
+      provider: providerLabelFor(upstream),
+      model: getChatModelLabel() || model,
+      inputTokens: json.usage?.prompt_tokens ?? estimateTokens(systemPrompt + raw),
+      outputTokens:
+        json.usage?.completion_tokens ??
+        estimateTokens(json.choices?.[0]?.message?.content ?? ""),
+      estimated: json.usage == null,
+    });
     const rewritten = (json.choices?.[0]?.message?.content ?? "")
       .trim()
       .replace(/^["'""''\s]+|["'""''\s]+$/g, "");
@@ -1173,11 +1241,7 @@ export async function regenerateMessage(
     if (m.id >= messageId) deleteMessage(conversationId, m.id);
   }
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  const assistantId = insertAssistantMessage(conversationId);
 
   // 重新生成时沿用原提问挂载的知识库，重跑检索注入（引用随新消息落库）。
   const lastUser = [...context].reverse().find((m) => m.role === "user");
@@ -1191,7 +1255,7 @@ export async function regenerateMessage(
 
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
     citations: citations.length > 0 ? citations : undefined,
   });
@@ -1239,15 +1303,11 @@ export async function translateMessage(
     { role: "user", content: parts.length === 1 ? parts[0]?.text ?? "" : parts },
   ];
 
-  const assistant = db
-    .insert(messages)
-    .values({ conversationId, role: "assistant", content: "" })
-    .returning({ id: messages.id })
-    .get();
+  const assistantId = insertAssistantMessage(conversationId);
 
   const result = await streamAssistantReply({
     conversationId,
-    assistantId: assistant.id,
+    assistantId,
     payloadMessages,
   });
   return { ok: result.ok, error: result.error };

@@ -21,6 +21,7 @@ import {
   ArchiveIcon,
   SparklesIcon,
   SlidersHorizontalIcon,
+  ChartColumnIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -43,6 +44,7 @@ import { AgentCapsTab } from "./agent-caps-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
+import { UsageScreen } from "../usage-screen";
 import { ConsoleScreen } from "./console-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { ModelsScreen } from "../models-screen";
@@ -79,6 +81,7 @@ type SettingsTab =
   | "gateway"
   | "integrations"
   | "logs"
+  | "usage"
   | "stats"
   | "websearch"
   | "mcp"
@@ -99,6 +102,7 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
   logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "console.title" },
+  usage: { icon: <ChartColumnIcon className="size-4" />, labelKey: "settings.usage.title" },
   stats: { icon: <LayoutDashboardIcon className="size-4" />, labelKey: "settings.dashboard" },
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
   mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
@@ -124,7 +128,7 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   },
   { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "agentcaps", "cli"] },
   { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
-  { labelKey: "settings.group.data", tabs: ["logs", "backup"] },
+  { labelKey: "settings.group.data", tabs: ["usage", "logs", "backup"] },
 ];
 
 /** 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题。 */
@@ -465,6 +469,11 @@ export function SettingsScreen() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <DashboardScreen />
         </div>
+      ) : activeTab === "usage" ? (
+        // 使用统计是宽版仪表盘（热力图 + 三张图），与「概览」一样绕开通用窄栏。
+        <ScrollArea className="min-h-0 min-w-0 flex-1">
+          <UsageScreen />
+        </ScrollArea>
       ) : activeTab === "logs" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ConsoleScreen />

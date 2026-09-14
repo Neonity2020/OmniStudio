@@ -13,6 +13,7 @@ export type SlashCommandId =
   | "goal"
   | "new"
   | "init"
+  | "doctor"
   | "model"
   | "compact"
   | "status"
@@ -25,6 +26,13 @@ export type SlashCommand = {
   /** 触发词（不含 /）。 */
   command: string;
   labelKey: string;
+  /**
+   * 允许 `/命令 参数` 这种带尾巴的形式（参数由命令自己解释）。
+   *
+   * 不声明此字段的命令必须**整条**就是命令，`/goal 开始干活` 依旧按普通消息发出去 ——
+   * 否则用户那句话会被静默吞掉。
+   */
+  takesArgs?: boolean;
 };
 
 /** 输入框内可用命令（对齐 OpenWork 的 slash command；`/init` 对齐 Codex 的同名命令）。 */
@@ -34,6 +42,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { id: "goal", command: "goal", labelKey: "agent.slash.goal" },
   { id: "new", command: "new", labelKey: "agent.slash.new" },
   { id: "init", command: "init", labelKey: "agent.slash.init" },
+  // /omni-doctor：内置排障技能（`builtin-skills/omni-doctor`）的入口。症状可以直接跟在
+  // 后面（`/omni-doctor 生图失败`），所以声明 takesArgs。
+  { id: "doctor", command: "omni-doctor", labelKey: "agent.slash.doctor", takesArgs: true },
   // /model：对齐 Codex 的同名命令 —— 在会话里直接换模型，不用去设置页。
   { id: "model", command: "model", labelKey: "agent.slash.model" },
   // /compact 与 /status：对齐 Codex —— 手动收紧一次上下文、看一眼会话配置。
@@ -57,7 +68,9 @@ function flattenFiles(nodes: WorkspaceTreeNode[], out: string[] = []): string[] 
  * 返回 null 表示当前输入不该弹补全。
  */
 export function useComposerSuggestions(input: string, workspace: string) {
-  const slashMatch = /^\/([a-z]*)$/i.exec(input.trimStart());
+  // 命令名允许连字符（`/omni-doctor`）：字符集与 composer 里执行命令的那条判定保持一致，
+  // 否则输入 `/omni-doctor` 时补全面板根本不弹，用户只能靠手敲整条命令。
+  const slashMatch = /^\/([a-z0-9-]*)$/i.exec(input.trimStart());
   // `/model` 与 `/model <查询词>`：后面这半截是"选哪个模型"，单独一条候选路径。
   const modelMatch = /^\/model(?:\s+(.*))?$/i.exec(input.trim());
   const mentionMatch = /@([^\s@]*)$/.exec(input);

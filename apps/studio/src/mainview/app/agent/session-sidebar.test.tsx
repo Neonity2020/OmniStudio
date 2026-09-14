@@ -12,6 +12,11 @@ import { Window } from "happy-dom";
  *   3. 项目行尾的 ＋ → 在那个工作区里新建会话；
  *   4. 「打开工作区」→ 文件夹里已有会话就进去，没有就当场在里面建一个；
  *   5. 一个项目都没有时，段落与入口仍在 —— 否则新用户永远打不开第一个文件夹。
+ *
+ * 后来又补了两条：每段列表默认只露 5 条（多的收在「查看更多」后面），且一律新的在
+ * 最上面。这两件事是一体的 —— 上限收的是排在后面的那些，顺序反了收起来的就是最新
+ * 的会话，界面上还看不出来。会话行的**点击区**（整行都可点）在 styles/agent-pi.test.ts
+ * 里钉，那里量不了真机布局，只能钉 CSS 声明。
  */
 
 // happy-dom 提供真实 DOM（组件要用 document / MouseEvent），afterAll 还原全局。
@@ -189,12 +194,37 @@ async function renderSidebar(sessions: SidebarSession[], activeConversationId: n
   const projectName = (row: HTMLElement) => row.querySelector("span")?.textContent ?? "";
   const projectRow = (name: string) => projectRows().find((row) => projectName(row) === name) ?? null;
   const headerOf = (row: HTMLElement | null) => row?.closest(".pi-group-header") as HTMLElement | null;
+  /** 某个项目的分组外壳：头（.pi-group-header）与身子（.pi-group-body）都挂在它下面。 */
+  const wrapperOf = (row: HTMLElement | null) => headerOf(row)?.parentElement ?? null;
+  const bodyOf = (name: string) =>
+    wrapperOf(projectRow(name))?.querySelector<HTMLElement>(".pi-group-body") ?? null;
+  const requireBodyOf = (name: string) => {
+    const body = bodyOf(name);
+    if (!body) throw new Error(`项目 ${name} 不在 DOM 里`);
+    return body;
+  };
+  /** 一段列表里渲染出来的会话标题（按渲染顺序）。 */
+  const titlesIn = (root: ParentNode) =>
+    [...root.querySelectorAll<HTMLElement>(".pi-thread-title")].map((el) => el.textContent ?? "");
 
   return {
     container,
     newTaskCalls,
     projectNames: () => projectRows().map(projectName),
     projectRow,
+    /** 「会话」段渲染出来的标题。 */
+    titles: () => titlesIn(container),
+    projectTitles: (name: string) => titlesIn(requireBodyOf(name)),
+    /** 段尾的「查看更多」；一段最多 5 条，没超出就没有这个按钮。 */
+    moreButton: (root: ParentNode = container) =>
+      root.querySelector<HTMLButtonElement>(".pi-list-more"),
+    moreInProject: (name: string) => requireBodyOf(name).querySelector<HTMLButtonElement>(".pi-list-more"),
+    async toggleMore(root: ParentNode = container) {
+      await click(root.querySelector<HTMLButtonElement>(".pi-list-more"));
+    },
+    async toggleMoreInProject(name: string) {
+      await click(requireBodyOf(name).querySelector<HTMLButtonElement>(".pi-list-more"));
+    },
     async enterProject(name: string) {
       await click(projectRow(name));
     },
@@ -208,9 +238,7 @@ async function renderSidebar(sessions: SidebarSession[], activeConversationId: n
       await click(container.querySelector<HTMLButtonElement>(`button[aria-label="${OPEN_WORKSPACE}"]`));
     },
     groupCollapsed(name: string) {
-      // 分组行的外层包裹 div 同时装着头（.pi-group-header）与身子（.pi-group-body）
-      const wrapper = headerOf(projectRow(name))?.parentElement;
-      return wrapper?.querySelector(".pi-group-body")?.getAttribute("aria-hidden") === "true";
+      return bodyOf(name)?.getAttribute("aria-hidden") === "true";
     },
     async unmount() {
       await act(async () => {
@@ -338,4 +366,92 @@ test("每行的新建按钮有可读的无障碍名字（只有一个 ＋ 图标
   const buttons = sidebar.container.querySelectorAll(`button[aria-label="${NEW_IN_PROJECT}"]`);
   expect(buttons.length).toBe(2);
   await sidebar.unmount();
+});
+
+/*
+ * 列表长度与顺序。这两件事是一体的：列表默认只露 5 条，所以必须**新的在最上面**
+ * —— 顺序反了，被收起来的就是最新那批，而这种错在界面上看不出来。
+ */
+
+test("会话段默认只露 5 条，点「查看更多」才给全，再点收起", async () => {
+  const many = Array.from({ length: 8 }, (_, i) => session({ id: i + 1, updatedAt: 900 - i * 10 }));
+  const sidebar = await renderSidebar(many, null);
+
+  expect(sidebar.titles()).toEqual(["任务 1", "任务 2", "任务 3", "任务 4", "任务 5"]);
+  expect(sidebar.moreButton()?.textContent).toBe(
+    translate("zh", "agent.sidebar.showMore", { count: "3" }),
+  );
+
+  await sidebar.toggleMore();
+  expect(sidebar.titles()).toHaveLength(8);
+  expect(sidebar.titles()[7]).toBe("任务 8");
+  expect(sidebar.moreButton()?.textContent).toBe(zh("agent.sidebar.showLess"));
+
+  await sidebar.toggleMore();
+  expect(sidebar.titles()).toHaveLength(5);
+
+  await sidebar.unmount();
+});
+
+test("每个项目各算各的 5 条：展开一个不影响另一个", async () => {
+  const alpha = Array.from({ length: 7 }, (_, i) =>
+    session({
+      id: 100 + i,
+      sessionWorkspace: "/repo/alpha",
+      workspace: "/repo/alpha",
+      updatedAt: 700 - i * 10,
+    }),
+  );
+  const beta = [
+    session({ id: 200, sessionWorkspace: "/repo/beta", workspace: "/repo/beta", updatedAt: 100 }),
+  ];
+  const sidebar = await renderSidebar([...alpha, ...beta], null);
+
+  expect(sidebar.projectTitles("alpha")).toEqual([
+    "任务 100",
+    "任务 101",
+    "任务 102",
+    "任务 103",
+    "任务 104",
+  ]);
+  // 只有一条的段不该冒出「查看更多」
+  expect(sidebar.moreInProject("beta")).toBeNull();
+
+  await sidebar.toggleMoreInProject("alpha");
+  expect(sidebar.projectTitles("alpha")).toHaveLength(7);
+  expect(sidebar.projectTitles("beta")).toEqual(["任务 200"]);
+
+  await sidebar.unmount();
+});
+
+test("列表按最近更新倒序渲染，即使数据回来是旧→新", async () => {
+  const ascending = [1, 2, 3].map((i) => session({ id: i, updatedAt: i * 100 }));
+  const sidebar = await renderSidebar(ascending, null);
+  expect(sidebar.titles()).toEqual(["任务 3", "任务 2", "任务 1"]);
+  await sidebar.unmount();
+});
+
+test("项目按组内最近活动排：在哪个项目里动过，它就排到最前", async () => {
+  const before = await renderSidebar(
+    [
+      session({ id: 1, sessionWorkspace: "/repo/alpha", workspace: "/repo/alpha", updatedAt: 100 }),
+      session({ id: 2, sessionWorkspace: "/repo/beta", workspace: "/repo/beta", updatedAt: 300 }),
+    ],
+    null,
+  );
+  expect(before.projectNames()).toEqual(["beta", "alpha"]);
+  await before.unmount();
+
+  // alpha 里刚发过消息 / 刚新建会话（updatedAt 最大）→ alpha 排到最前
+  const after = await renderSidebar(
+    [
+      session({ id: 1, sessionWorkspace: "/repo/alpha", workspace: "/repo/alpha", updatedAt: 400 }),
+      session({ id: 3, sessionWorkspace: "/repo/alpha", workspace: "/repo/alpha", updatedAt: 900 }),
+      session({ id: 2, sessionWorkspace: "/repo/beta", workspace: "/repo/beta", updatedAt: 300 }),
+    ],
+    null,
+  );
+  expect(after.projectNames()).toEqual(["alpha", "beta"]);
+  expect(after.projectTitles("alpha")).toEqual(["任务 3", "任务 1"]);
+  await after.unmount();
 });

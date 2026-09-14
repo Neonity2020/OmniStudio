@@ -19,6 +19,7 @@ import { serializeConversation } from "@earendil-works/pi-agent-core";
 import type { Api, Message, Model, Models } from "@earendil-works/pi-ai";
 
 import { estimateMessagesTokens, type MessageLike } from "../shared/token-estimate";
+import { recordTokenUsage } from "./usage";
 
 /** 摘要要覆盖的段落：固定五段，弱模型也能照着填。 */
 export const SUMMARY_SECTIONS = ["目标", "已完成", "关键结论与决策", "涉及的文件", "未解决 / 下一步"] as const;
@@ -190,6 +191,9 @@ export async function summarizeHistory<T extends { role?: string; content?: unkn
       // 输出上限按窗口给足，否则弱模型容易在第五段前面被截断。
       { maxTokens: input.maxTokens ?? 2048, maxRetries: 0, signal },
     );
+    // 压缩摘要是一次实打实的模型调用（本地模型动辄几秒），一样记进用量账本 ——
+    // 它不在任何一条消息上，不记就完全看不见。
+    recordTokenUsage({ channel: "agent", model: input.model.name, usage: reply.usage });
     const summary = textOfAssistant(reply.content).trim();
     if (!summary) return { ok: false, reason: "模型返回了空摘要" };
     return {

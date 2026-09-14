@@ -166,6 +166,8 @@ import type {
 import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
 import { getServerStats, type ServerStats } from "../stats";
+import { getUsageStats } from "../usage";
+import type { UsageStats } from "../../shared/usage";
 import {
   startBenchmark,
   getBenchmarkRun,
@@ -397,6 +399,14 @@ export type AppRPC = {
       getServerStats: {
         params: undefined;
         response: ServerStats;
+      };
+      /**
+       * 用量统计（设置 → 数据 → 使用统计）。`rangeDays` 只影响趋势与分组表，
+       * 「累计」那几个数永远是全量口径。
+       */
+      getUsageStats: {
+        params: { rangeDays?: number } | undefined;
+        response: UsageStats;
       };
       clearServerLogs: {
         params: undefined;
@@ -732,7 +742,8 @@ export type AppRPC = {
         response: { ok: boolean; error?: string };
       };
       listAgentEvents: {
-        params: { conversationId: number };
+        /** `afterId` = 只取比它新的事件（跑动中界面按 id 增量追平，见 Agent.listAgentEvents）。 */
+        params: { conversationId: number; afterId?: number };
         response: { events: AgentEventRow[] };
       };
       /** 会话当前是否在跑（打开会话时取一次：刷新窗口 / 切回会话都要能把状态补上）。 */
@@ -2481,6 +2492,15 @@ export type AppRPC = {
         /** 知识库引用溯源（挂了知识库的回答才有）。 */
         citations?: KbCitation[];
       };
+      /**
+       * 本轮助手消息的行刚建好（开跑瞬间，一个字还没出）。
+       *
+       * 从"按下发送"到"第一个 token"之间是建会话 / 起推理服务 / 模型加载 / 预填充 /
+       * 检索这些活儿，几秒到几十秒都可能。界面据此**立刻**把这条消息画出来
+       * （对话页「生成中…」、Agent 页「处理中 · N 秒」），而不是干等到第一个增量
+       * 才凭空冒出一个气泡 —— 那段没有任何反馈的等待看着就是"程序挂了"。
+       */
+      chatMessageStarted: { conversationId: number; messageId: number };
       /** 知识库数据变化（摄取进度/删除/向量补齐），前端据此刷新列表。 */
       knowledgeChanged: { kbId?: number; docId?: number };
       chatStats: ChatStats;
@@ -2688,6 +2708,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       getServerStats: async () => {
         return getServerStats();
+      },
+
+      getUsageStats: async ({ rangeDays } = {}) => {
+        return getUsageStats(rangeDays);
       },
 
       getLaunchCommand: async ({ path }) => {
@@ -3233,8 +3257,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Agent.regenerateAgentMessage(conversationId, messageId);
       },
 
-      listAgentEvents: async ({ conversationId }) => {
-        return { events: Agent.listAgentEvents(conversationId) };
+      listAgentEvents: async ({ conversationId, afterId }) => {
+        return { events: Agent.listAgentEvents(conversationId, afterId ?? 0) };
       },
 
       getAgentRunState: async ({ conversationId }) => {
@@ -5153,6 +5177,12 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
       win.webview.rpc?.send.chatStats(payload);
     } catch {}
   });
+  // 助手行一建好就推：界面立刻画出这条消息并开始走秒（见 chatMessageStarted 的说明）。
+  Chat.onChatMessageStarted((payload) => {
+    try {
+      win.webview.rpc?.send.chatMessageStarted(payload);
+    } catch {}
+  });
   Agent.onAgentEvent((payload) => {
     try {
       win.webview.rpc?.send.agentEvent(payload);
@@ -5179,6 +5209,12 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   Agent.onAgentStats((payload) => {
     try {
       win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
+  // 同上：Agent 回合开跑时的"行已建好"也走同一条通道。
+  Agent.onAgentMessageStarted((payload) => {
+    try {
+      win.webview.rpc?.send.chatMessageStarted(payload);
     } catch {}
   });
   // Agent 交互：工具授权弹窗、ask_user 提问、待办清单、产出物登记。

@@ -692,6 +692,13 @@ button.pi-brand:hover {
     压回 0 之后标题才有机会走 .pi-thread-title 的省略号。
   */
   min-width: 0;
+  /*
+    width: 100% 不是装饰：`<button>` 即使在 display: flex 下，width: auto 也按
+    **内容**（fit-content）算，而行外面还套着一层定位用的 div（用来装行尾的"更多"
+    按钮），拿不到父级 flex 的 stretch —— 结果整行的点击区只有文字那么宽，标题长的
+    行还会撑出行宽、把"更多"按钮顶到侧栏外面点不着。显式铺满即可。
+  */
+  width: 100%;
   padding: 0 2px 0 0;
   border: 0;
   border-radius: var(--r-sm);
@@ -821,6 +828,40 @@ button.pi-brand:hover {
   font-size: 9.5px;
   line-height: 15px;
   font-variant-numeric: tabular-nums;
+}
+/*
+  列表尾部的「查看更多」：一段最多露 5 条，多出来的收在这一行后面。
+  箭头落在会话行状态点的那条车道里，标签于是和标题同列 —— 点开之后看起来还是同一份
+  列表，只是多了几行。同样是 `<button>`，同样要显式铺满（见 .pi-thread 的说明）。
+*/
+.pi-list-more {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 4px 6px 4px 4px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.pi-list-more:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
+}
+.pi-list-more > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 分组（项目 / 时间）表头 */
@@ -1448,6 +1489,48 @@ button.pi-brand:hover {
   content-visibility: auto;
   contain-intrinsic-size: auto 40px;
 }
+
+/*
+ * 时间轴：模型说的话与工具调用按发生顺序混排（说了什么 → 调了什么 → 又说了什么）。
+ * 正文段贴消息左沿（它们是这轮说的话），工具 / 状态 / 交互卡片缩进一级
+ * （它们是过程）。`.timeline-detail` 的缩进与旧轨迹体的缩进一致，视觉上仍是
+ * "正文为主、过程为辅"。
+ */
+.msg-timeline {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.msg-timeline > .msg-bubble-agent {
+  margin: 4px 0;
+}
+.timeline-detail {
+  margin-left: 7px;
+  padding-left: 12px;
+}
+
+/*
+ * 这一轮的状态行：跑动中「处理中 · N 秒」、跑完「已处理 · N 秒 · N 次工具调用」。
+ *
+ * 铺满整列 + 底下压一条发丝线（同行/参考实现就是这个写法）：它是"这一轮"的表头，
+ * 上面是别轮的历史，下面是这一轮的过程 —— 一条线比再加一条间距更省地方。
+ * `width: 100%` 不可省：`.msg-col.agent` 是 `align-items: flex-start`，不写就只
+ * 撑到文字宽，线也跟着断在中间。
+ */
+.run-status {
+  display: flex;
+  width: 100%;
+  min-height: 22px;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 7px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ds-border-subtle);
+  color: var(--ds-text-secondary);
+  font-size: 12.5px;
+}
 .tool-group-header {
   display: inline-flex;
   min-height: 26px;
@@ -1543,6 +1626,52 @@ button.pi-brand:hover {
   font-family: var(--pi-font-mono);
   font-size: 11.5px;
 }
+/*
+ * 分组行（「查阅 · 2 搜索, 1 列表」）的三截：家族名 + `·` + 计数。
+ * 计数走名词、不走等宽字体：它是给人读的"两个文件、一个列表"，不是参数。
+ */
+.tool-row-counts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.tool-sep {
+  flex: none;
+  color: var(--ds-text-faint);
+}
+/* 子智能体那一行的任务描述：与文件名不同，它是自然语言，会截断但不用等宽字体。 */
+.tool-row-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+}
+/*
+ * 子智能体行是过程里最重的一行：标签与类型取正文色（参考实现里也只有这行是深色），
+ * 描述与计数仍然收在弱化灰里 —— 一行读下来是「谁去干了什么」。
+ */
+.subagent-head .tool-group-label,
+.subagent-head .tool-group-type {
+  color: var(--ds-text-primary);
+}
+.tool-group-type {
+  flex: none;
+  font-weight: 500;
+}
+/*
+ * 展开后的成员行：只缩进一级（与单个工具行展开自己的细节同一档），
+ * 不再叠加 .tool-group-body 的缩进 —— 两层加起来成员行会被推到 50px 开外。
+ */
+.tool-group-rows {
+  margin: 2px 0 6px 24px;
+  padding-left: 12px;
+}
 .tool-row-state {
   display: inline-flex;
   flex: none;
@@ -1554,14 +1683,12 @@ button.pi-brand:hover {
 .tool-row-state.error {
   color: var(--ds-error);
 }
+/* 状态点：只有"出错"一种活着 —— 正常的行不画点（满屏绿点等于没说任何事）。 */
 .tool-row-dot {
   width: 6px;
   height: 6px;
   border-radius: var(--r-full);
   background: var(--ds-text-faint);
-}
-.tool-row-dot.ok {
-  background: var(--ds-success);
 }
 .tool-row-dot.error {
   background: var(--ds-error);
@@ -1684,12 +1811,38 @@ button.pi-brand:hover {
   font-size: 10.5px;
 }
 
-/* 产出物卡片：挂在助手消息下面 */
+/* 产出物区：卡片 + 「查看所有产物」入口（挂在助手消息下面） */
+.artifact-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
 .artifact-cards {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 6px;
+}
+.artifact-more {
+  display: inline-flex;
+  align-self: flex-start;
+  align-items: center;
+  gap: 4px;
+  margin-left: -6px;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ds-text-muted);
+  font-size: 11.5px;
+  cursor: default;
+  transition:
+    background var(--m-fast) var(--e-out),
+    color var(--m-fast) var(--e-out);
+}
+.artifact-more:hover {
+  background: var(--ds-bg-hover);
+  color: var(--ds-text-primary);
 }
 .artifact-card {
   display: flex;

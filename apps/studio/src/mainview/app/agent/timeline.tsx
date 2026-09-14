@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
 import {
+  BotIcon,
   ChevronRightIcon,
   FileSearchIcon,
   GlobeIcon,
   ImageIcon,
   ListTodoIcon,
   MessageCircleQuestionIcon,
-  NetworkIcon,
   PencilIcon,
   SparklesIcon,
   SquareTerminalIcon,
@@ -15,8 +15,15 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 import { useT } from "@stores/ui-lang";
+import { Markdown } from "@components/markdown";
 import { InlinePermissionCard, InlineQuestionCard } from "./inline-interactions";
-import { buildTimelineItems } from "./timeline-model";
+import {
+  buildTimelineItems,
+  toolLabel,
+  type TimelineItem,
+  type TimelineToolCall,
+  type ToolFamily,
+} from "./timeline-model";
 import type { AgentEventRow } from "../../../bun/agent";
 
 function parseArgs(args: string | null): Record<string, unknown> {
@@ -215,7 +222,7 @@ function toolMeta(toolName: string, args: string | null): ToolMeta {
     case "ask_user":
       return { icon: MessageCircleQuestionIcon, labelKey: "agent.tool.ask", detail: "" };
     case "task":
-      return { icon: NetworkIcon, labelKey: "agent.tool.task", detail: oneLine(str(value.description) || str(value.prompt)) };
+      return { icon: BotIcon, labelKey: "agent.tool.task", detail: oneLine(str(value.description) || str(value.prompt)) };
     default: {
       // 媒体类工具（生图 / 生视频 / 语音）走同一套行样式，只是图标不同。
       const isMedia = toolName.startsWith("generate") || toolName.includes("image") || toolName.includes("video");
@@ -226,6 +233,73 @@ function toolMeta(toolName: string, args: string | null): ToolMeta {
       };
     }
   }
+}
+
+/** 家族的图标与动作名（分组行的一行里只有家族名 + 计数，细节收在展开区）。 */
+const FAMILY_META: Record<ToolFamily, { icon: LucideIcon; labelKey: string }> = {
+  browse: { icon: FileSearchIcon, labelKey: "agent.tool.family.browse" },
+  net: { icon: GlobeIcon, labelKey: "agent.tool.family.net" },
+  edit: { icon: PencilIcon, labelKey: "agent.tool.family.edit" },
+};
+
+/**
+ * 分组行里"每种调用几次"的量词：`2 搜索, 1 列表`。
+ *
+ * 用名词而不是动作名（"文件"而不是"读取"、"列表"而不是"目录"）：`2 文件, 1 列表`
+ * 读起来是"两个文件、一个列表"，而不是"读了两次、列了一次目录"。
+ */
+function toolUnitKey(toolName: string): string {
+  switch (toolName) {
+    case "read_file":
+    case "write_file":
+    case "edit_file":
+    case "apply_patch":
+      return "agent.tool.unit.file";
+    case "list_dir":
+      return "agent.tool.unit.list";
+    case "glob":
+      return "agent.tool.unit.match";
+    case "grep":
+    case "web_search":
+      return "agent.tool.unit.search";
+    case "knowledge_search":
+      return "agent.tool.unit.knowledge";
+    case "view_image":
+      return "agent.tool.unit.image";
+    case "web_fetch":
+      return "agent.tool.unit.fetch";
+    default:
+      // 未知工具（MCP / 外部接入）走工具名本身，画不出 `agent.tool.unit.*` 这种内部 key。
+      return "";
+  }
+}
+
+/** 组内每种调用各几次，按**首次出现**的顺序（先搜后读，读起来就是先搜后读）。 */
+function groupBreakdown(t: (key: string, params?: Record<string, string>) => string, tools: TimelineToolCall[]): string {
+  // 按"量词键"归并（`grep` 与 `web_search` 都算「搜索」），展示的是翻好的文案。
+  const counts = new Map<string, { label: string; count: number }>();
+  for (const tool of tools) {
+    const name = tool.start.toolName ?? "";
+    const unitKey = toolUnitKey(name);
+    const label = unitKey ? t(unitKey) : toolLabel(t, `agent.tool.${name}`, name);
+    const bucket = counts.get(unitKey || name);
+    if (bucket) bucket.count += 1;
+    else counts.set(unitKey || name, { label, count: 1 });
+  }
+  return [...counts.values()].map(({ label, count }) => `${count} ${label}`).join(", ");
+}
+
+/** 组内每次调用的关键参数（分组行的 title：不展开也能看到读了 / 改了哪些文件）。 */
+function groupDetails(tools: TimelineToolCall[], t: (key: string) => string): string {
+  return tools
+    .map((tool) => {
+      const name = tool.start.toolName ?? "";
+      const meta = toolMeta(name, tool.start.args);
+      // 有路径 / 关键词就给完整的那一份（行内是短名，悬浮时给全路径）。
+      return meta.file || meta.detail || toolLabel(t, meta.labelKey, name);
+    })
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** diff 块：新增 / 删除分别染色，上下文不着色。 */
@@ -284,6 +358,25 @@ function ToolDetail({
 }
 
 /**
+ * 工具行的状态位：跑动中转圈、没配到结果留一行灰字、出错一个红点。
+ *
+ * 跑完且正常时**什么都不画**：每一行都缀一个绿点等于什么都没说（真实的调研里
+ * 几十行清一色是绿的），只有例外值得被看见 —— 收着的那一行更该是干净的一行字。
+ * "还在跑吗"由消息最上面那一行与时间轴末尾的转圈行回答。
+ */
+function ToolRowState({ pending, missing, failed }: { pending: boolean; missing: boolean; failed: boolean }) {
+  const t = useT();
+  if (pending) return <span className="tool-spinner" aria-hidden />;
+  if (missing) return <span className="tool-row-state">{t("agent.tool.interrupted")}</span>;
+  if (!failed) return null;
+  return (
+    <span className="tool-row-state error">
+      <span className="tool-row-dot error" aria-hidden />
+    </span>
+  );
+}
+
+/**
  * 单条工具调用：一行「图标 + 动作名 + 关键参数」，点开看 diff / 命令 / 输出。
  *
  * `live` = 这一轮还在跑：只有还在跑的时候才转圈。跑完（或会话早就结束）却因为
@@ -316,7 +409,7 @@ function ToolRow({ start, end, live }: { start: AgentEventRow; end?: AgentEventR
       >
         <ChevronRightIcon size={13} className={`pi-caret${open ? " open" : ""}`} aria-hidden />
         <Icon size={13} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
-        <span className="tool-row-name">{t(meta.labelKey)}</span>
+        <span className="tool-row-name">{toolLabel(t, meta.labelKey, toolName)}</span>
         {meta.detail ? <span className="tool-row-summary">{meta.detail}</span> : null}
         {summary && (summary.added > 0 || summary.removed > 0) ? (
           <span className="review-counters">
@@ -324,19 +417,79 @@ function ToolRow({ start, end, live }: { start: AgentEventRow; end?: AgentEventR
             {summary.removed > 0 ? <span className="review-del">-{summary.removed}</span> : null}
           </span>
         ) : null}
-        {pending ? (
-          <span className="tool-spinner" aria-hidden />
-        ) : missing ? (
-          <span className="tool-row-state">{t("agent.tool.interrupted")}</span>
-        ) : (
-          <span className={`tool-row-state${failed ? " error" : ""}`}>
-            <span className={`tool-row-dot ${failed ? "error" : "ok"}`} aria-hidden />
-          </span>
-        )}
+        <ToolRowState pending={pending} missing={missing} failed={failed} />
       </button>
       {open ? (
         <div className="tool-row-body">
           <ToolDetail toolName={toolName} args={start.args} output={output} pending={pending} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 分组行：同家族的相邻调用收成一行 —— 「查阅 · 2 搜索, 1 列表」，点开是每一次调用。
+ *
+ * 一次调研十几个 read / grep，一个调用一行的话过程会把时间轴铺满（真实会话里
+ * 四十行工具里三十行是 read_file），模型说的话反而读不到。收起来只留"做了什么、
+ * 各几次"，展开还是原来那一行行（各自的 diff / 命令 / 输出），信息一点没少；
+ * `title` 里带着每次调用的文件名，不展开也能看到改的是哪些文件。
+ *
+ * 编辑家族额外报 +/- 合计：那一行正是"这一轮改了多少"最该出现的位置。
+ */
+function ToolGroupRow({ family, tools, live }: { family: ToolFamily; tools: TimelineToolCall[]; live: boolean }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const pending = live && tools.some((tool) => !tool.end);
+  const missing = !live && tools.some((tool) => !tool.end);
+  const failed = tools.some((tool) => (tool.end?.isError ?? 0) === 1);
+  const meta = FAMILY_META[family];
+  const Icon = meta.icon;
+  const breakdown = useMemo(() => groupBreakdown(t, tools), [t, tools]);
+  // title 要解析每次调用的参数：工具行会随流式增量重渲染（每秒几十次），不缓存白解析。
+  const details = useMemo(() => groupDetails(tools, t), [t, tools]);
+  const counters = useMemo(() => {
+    if (family !== "edit") return null;
+    let added = 0;
+    let removed = 0;
+    for (const tool of tools) {
+      const summary = summarizeEdit(tool.start.args);
+      added += summary?.added ?? 0;
+      removed += summary?.removed ?? 0;
+    }
+    return added > 0 || removed > 0 ? { added, removed } : null;
+  }, [family, tools]);
+
+  return (
+    <div className="tool-row">
+      <button
+        type="button"
+        className="tool-row-header"
+        aria-expanded={open}
+        title={details}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <ChevronRightIcon size={13} className={`pi-caret${open ? " open" : ""}`} aria-hidden />
+        <Icon size={13} aria-hidden style={{ flex: "none", color: "var(--ds-text-muted)" }} />
+        <span className="tool-row-name">{t(meta.labelKey)}</span>
+        <span className="tool-sep" aria-hidden>
+          ·
+        </span>
+        <span className="tool-row-counts">{breakdown}</span>
+        {counters ? (
+          <span className="review-counters">
+            <span className="review-add">+{counters.added}</span>
+            {counters.removed > 0 ? <span className="review-del">-{counters.removed}</span> : null}
+          </span>
+        ) : null}
+        <ToolRowState pending={pending} missing={missing} failed={failed} />
+      </button>
+      {open ? (
+        <div className="tool-group-rows">
+          {tools.map((tool) => (
+            <ToolRow key={tool.start.id} start={tool.start} end={tool.end} live={live} />
+          ))}
         </div>
       ) : null}
     </div>
@@ -354,9 +507,36 @@ function StatusLine({ event }: { event: AgentEventRow }) {
   );
 }
 
+/** 子智能体的类型：词条给界面语言，缺词条时退回类型名本身。 */
+const SUBAGENT_TYPE_KEYS: Record<string, string> = {
+  explore: "agent.subagent.type.explore",
+  review: "agent.subagent.type.review",
+  general: "agent.subagent.type.general",
+};
+
+/** 老记录（`subagent_start` 没有结构化参数）从 label 前缀还原类型 —— 写入端见 agent.ts 的 `label`。 */
+const LEGACY_SUBAGENT_TYPES: Record<string, string> = { 探索: "explore", 审阅: "review", 执行: "general" };
+
+/**
+ * 子智能体的类型 + 任务描述。
+ *
+ * 事件里 `subagent_start` 的 output 是 `探索：<描述>`（agent.ts 拼的 label），
+ * 新记录另外带上了 `subagent_type` / `description` 两个结构化参数；老记录只有
+ * 那段 label，就从"："切出描述、按前缀认类型 —— 界面上不该出现 `探索：` 这个前缀，
+ * 类型已经单独占了一格。
+ */
+function subagentMeta(event: AgentEventRow): { typeName: string; typeKey: string; description: string } {
+  const value = parseArgs(event.args);
+  const text = oneLine(event.output ?? "");
+  const colon = text.indexOf("：");
+  const declared = str(value.subagent_type) || LEGACY_SUBAGENT_TYPES[colon > 0 ? text.slice(0, colon) : ""] || "general";
+  const description = str(value.description) || (colon > 0 ? text.slice(colon + 1) : text);
+  return { typeName: declared, typeKey: SUBAGENT_TYPE_KEYS[declared] ?? "", description };
+}
+
 /**
  * 子智能体分组：一条 task 派发 → 它自己的工具调用 → 结论，收进一个可折叠块，
- * 主线只留一行「子任务：描述 · N 次工具调用」。
+ * 主线只留一行「子智能体 探索 · 找配置 · N 次工具调用」。
  */
 function SubagentGroup({
   start,
@@ -374,17 +554,33 @@ function SubagentGroup({
   const failed = (end?.isError ?? 0) === 1;
   const running = !end && live;
   const toolCount = children.filter((event) => event.kind === "tool_start").length;
+  const meta = useMemo(() => subagentMeta(start), [start]);
+  const typeLabel = meta.typeKey ? t(meta.typeKey) : meta.typeName;
 
   return (
     <div className="tool-group" style={{ margin: "4px 0" }}>
-      <button type="button" className="tool-group-header" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+      <button
+        type="button"
+        className="tool-group-header subagent-head"
+        aria-expanded={open}
+        title={meta.description}
+        onClick={() => setOpen((v) => !v)}
+      >
         <ChevronRightIcon size={13} className={`pi-caret${open ? " open" : ""}`} aria-hidden />
-        <NetworkIcon size={13} aria-hidden style={{ flex: "none", color: "var(--ds-purple)" }} />
-        <span className="tool-group-label">{t("agent.tool.task")}</span>
+        <BotIcon size={13} aria-hidden style={{ flex: "none", color: "var(--ds-purple)" }} />
+        <span className="tool-group-label">{t("agent.subagent.label")}</span>
+        <span className="tool-group-type">{typeLabel}</span>
+        {meta.description ? (
+          <>
+            <span className="tool-sep" aria-hidden>
+              ·
+            </span>
+            <span className="tool-row-desc">{meta.description}</span>
+          </>
+        ) : null}
         {toolCount > 0 ? (
           <span className="tool-group-count">{t("agent.subagent.tools", { count: String(toolCount) })}</span>
         ) : null}
-        {start.output ? <span className="tool-row-summary">{oneLine(start.output)}</span> : null}
         {running ? (
           <span className="tool-spinner" aria-hidden />
         ) : failed ? (
@@ -415,7 +611,10 @@ function SubagentGroup({
 }
 
 /**
- * 把一次运行的事件流渲染成时间线：
+ * 把一次运行的事件流渲染成**时间轴**：
+ * 模型说的话（`text` 事件）与工具行按发生顺序混排 —— 说了什么 → 调了什么工具 →
+ * 又说了什么，而不是"所有工具在上、所有正文在下"（正文在库里是整轮拼接的一块，
+ * 顺序只能靠事件还原，见 agent.ts 的 flushStepText）。
  * 配对逻辑在 timeline-model.ts（纯函数，有单测），这里只负责画。
  * `live` = 这一轮还在跑（只有最后一条消息在流式时才是 true），
  * 用来区分"正在执行"和"没有结果记录"。
@@ -431,33 +630,60 @@ export function AgentEventTimeline({
 
   if (items.length === 0) return null;
 
+  // 不自己套容器：时间轴的容器（.msg-timeline）由消息那一层提供 —— 思考行、
+  // 流式尾巴、转圈行都要和这些项排在同一个队列里，套两层会让它们之间的间距与
+  // 缩进规则各管一半。
   return (
-    <div style={{ display: "flex", minWidth: 0, flexDirection: "column" }}>
+    <>
       {items.map((item, index) => {
-        if (item.type === "tool") {
-          return <ToolRow key={`${item.start.id}-${index}`} start={item.start} end={item.end} live={live} />;
-        }
-        if (item.type === "status") {
-          return <StatusLine key={`${item.event.id}-${index}`} event={item.event} />;
-        }
-        if (item.type === "permission") {
+        if (item.type === "text") {
           return (
-            <InlinePermissionCard key={`${item.ask.id}-${index}`} askEvent={item.ask} settleEvent={item.settle} />
+            <div key={`${item.event.id}-${index}`} className="msg-bubble-agent prose-pi selectable">
+              <Markdown content={item.event.output ?? ""} />
+            </div>
           );
         }
-        if (item.type === "question") {
-          return (
-            <InlineQuestionCard key={`${item.ask.id}-${index}`} askEvent={item.ask} settleEvent={item.settle} />
-          );
-        }
+        // 工具 / 状态 / 卡片都缩进一级：它们是"过程"，正文才是这轮说的话。
         return (
-          <SubagentGroup key={`${item.start.id}-${index}`} start={item.start} end={item.end} live={live}>
-            {item.children}
-          </SubagentGroup>
+          <div key={timelineItemKey(item, index)} className="timeline-detail">
+            {item.type === "tool" ? (
+              <ToolRow start={item.start} end={item.end} live={live} />
+            ) : item.type === "toolGroup" ? (
+              <ToolGroupRow family={item.family} tools={item.tools} live={live} />
+            ) : item.type === "status" ? (
+              <StatusLine event={item.event} />
+            ) : item.type === "permission" ? (
+              <InlinePermissionCard askEvent={item.ask} settleEvent={item.settle} />
+            ) : item.type === "question" ? (
+              <InlineQuestionCard askEvent={item.ask} settleEvent={item.settle} />
+            ) : (
+              <SubagentGroup start={item.start} end={item.end} live={live}>
+                {item.children}
+              </SubagentGroup>
+            )}
+          </div>
         );
       })}
-    </div>
+    </>
   );
+}
+
+/** 时间轴每一项的 React key（工具行按起始事件 id，其它按自身事件 id）。 */
+function timelineItemKey(item: TimelineItem, index: number): string {
+  switch (item.type) {
+    case "tool":
+      return `${item.start.id}-${index}`;
+    case "toolGroup":
+      return `${item.tools[0]?.start.id ?? "group"}-${index}`;
+    case "text":
+    case "status":
+      return `${item.event.id}-${index}`;
+    case "permission":
+    case "question":
+      return `${item.ask.id}-${index}`;
+    default:
+      return `${item.start.id}-${index}`;
+  }
 }
 
 /** 已经处理完的工具调用次数（折叠行的摘要用）。 */

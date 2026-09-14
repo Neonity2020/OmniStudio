@@ -10,36 +10,36 @@ import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { join } from "path";
+
+import * as schema from "./db/schema";
+import { mockModulePartial } from "./test-mocks";
 import * as fs from "fs";
 
 const tmpDb = `/tmp/chat-test-${process.pid}.db`;
 fs.rmSync(tmpDb, { force: true });
 const sqlite = new Database(tmpDb, { create: true });
-const db = drizzle({ client: sqlite });
+const db = drizzle({ client: sqlite, schema });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
-mock.module("./db", () => ({ db }));
-mock.module("./db/settings", () => {
-  const getSetting = (key: string) =>
-    key === "SERVER_MODE"
-      ? "remote"
-      : key === "VLLM_API_BASE"
-        ? "http://fake:8000"
-        : key === "CHAT_MODEL"
-          ? "test-model"
-          : "";
-  return {
-    getSetting,
-    // knowledge.ts → vllm/vllm.ts 会读重试次数等数值设置。
-    getNumericSetting: (key: string) => Number(getSetting(key)),
-    updateSettings: () => {},
-    getAllSettings: () => ({}),
-    getActiveServerPort: () => "18080",
-    // 已启动模型注册表（chat.ts → model-servers.ts）会经 runtimes/* 读这两个：
-    // 部分 mock 少了它们会让整个模块图命名导入失败（"Export named ... not found"）。
-    getServerPort: () => "18080",
-    ENGINE_EXTRA_ARGS_KEYS: { "llama.cpp": "", vllm: "", sglang: "", mlx: "" },
-  };
+/** 假设置：只有对话链路真正会读的三个键有值，其余一律空串。 */
+const fakeGetSetting = (key: string) =>
+  key === "SERVER_MODE"
+    ? "remote"
+    : key === "VLLM_API_BASE"
+      ? "http://fake:8000"
+      : key === "CHAT_MODEL"
+        ? "test-model"
+        : "";
+
+await mockModulePartial<typeof import("./db")>("./db", { db });
+await mockModulePartial<typeof import("./db/settings")>("./db/settings", {
+  getSetting: fakeGetSetting,
+  // knowledge.ts → vllm/vllm.ts 会读重试次数等数值设置。
+  getNumericSetting: (key) => Number(fakeGetSetting(key)),
+  updateSettings: () => {},
+  getAllSettings: () => ({}),
+  getActiveServerPort: () => "18080",
+  getServerPort: () => "18080",
 });
 const realChatModel = await import("./chat-model");
 mock.module("./chat-model", () => ({ ...realChatModel, getChatModelName: () => "test-model" }));
@@ -47,12 +47,15 @@ mock.module("./chat-model", () => ({ ...realChatModel, getChatModelName: () => "
 // 别的文件（image-server.route.test）拿到被换掉的模块就只能无声跳过——media 403 正是
 // 从"本地从没跑到"的路由漏出去的。本文件只用到目录工具函数，真实实现（数据目录已由
 // test-preload 隔离）本来就是安全的，起服务也是显式调用才会发生。
-mock.module("./stats", () => ({ recordUsage: () => {}, markServerStarted: () => {} }));
-mock.module("./server-manager", () => ({
+await mockModulePartial<typeof import("./stats")>("./stats", {
+  recordUsage: () => {},
+  markServerStarted: () => {},
+});
+await mockModulePartial<typeof import("./server-manager")>("./server-manager", {
   getStatus: () => "running",
-  getLastError: () => null,
+  getLastError: () => "",
   startServer: async () => ({ ok: true }),
-}));
+});
 
 // 一段两条 token 的流式 SSE 响应，末尾带 usage。
 const sseChunks = [
@@ -84,7 +87,7 @@ globalThis.fetch = mock(async (_url: unknown, init: unknown) => {
   return new Response(stream, { status: 200 });
 }) as never;
 
-const { createConversation, sendMessage, deleteMessage, regenerateMessage, translateMessage, getConversation, onChatChunk, onChatDone, onChatStats, titleFromMessage } = await import("./chat");
+const { createConversation, sendMessage, deleteMessage, regenerateMessage, translateMessage, getConversation, onChatChunk, onChatDone, onChatStats, onChatMessageStarted, titleFromMessage } = await import("./chat");
 
 afterAll(() => {
   // 恢复全局 fetch，避免把 mock 泄漏给同一批次运行的其他测试文件。
@@ -139,6 +142,58 @@ test("sendMessage streams, persists content+tokens and emits stats", async () =>
   offDone();
   offStats();
   offStatsFull();
+});
+
+/**
+ * 助手行一建好就推「行已存在」（chatMessageStarted）。
+ *
+ * 界面靠它把"生成中 / 处理中"立刻画出来：推送必须早于第一个增量，且推的那个 id
+ * 就是最终写回正文的那一行 —— 否则界面要么干等（首 token 前没反馈），要么挂出
+ * 两条助手消息（一条空、一条有内容）。
+ */
+test("建好助手行就先推 started，再开始流增量", async () => {
+  const conv = createConversation(undefined, "chat");
+  const timeline: string[] = [];
+  const started: number[] = [];
+  const offStarted = onChatMessageStarted((payload) => {
+    expect(payload.conversationId).toBe(conv.id);
+    started.push(payload.messageId);
+    timeline.push("started");
+    // 推送这一刻行就必须已经存在（界面拿到 id 立刻渲染，读回来不能是空的）。
+    const row = getConversation(conv.id).messages.find((m) => m.id === payload.messageId);
+    expect(row?.role).toBe("assistant");
+    expect(row?.content).toBe("");
+  });
+  const offChunk = onChatChunk(() => timeline.push("chunk"));
+  const offDone = onChatDone(() => timeline.push("done"));
+
+  const res = await sendMessage(conv.id, "你好");
+  expect(res.ok).toBe(true);
+
+  expect(timeline[0]).toBe("started");
+  expect(timeline.filter((t) => t === "started")).toHaveLength(1);
+  // 推的就是最后写回正文的那一行。
+  const { messages } = getConversation(conv.id);
+  expect(started).toEqual([at(messages, 1).id]);
+  expect(at(messages, 1).content).toBe("你好世界");
+
+  offStarted();
+  offChunk();
+  offDone();
+});
+
+test("重新生成也会先推 started（界面先看到「在重答」再看到字）", async () => {
+  const conv = createConversation(undefined, "chat");
+  await sendMessage(conv.id, "q1");
+  const firstAssistantId = getConversation(conv.id).messages[1]!.id;
+
+  const started: number[] = [];
+  const offStarted = onChatMessageStarted((payload) => started.push(payload.messageId));
+  await regenerateMessage(conv.id, firstAssistantId);
+  offStarted();
+
+  expect(started).toHaveLength(1);
+  expect(started[0]).not.toBe(firstAssistantId);
 });
 
 test("网关不回 usage 时退回本地估算并如实标注", async () => {

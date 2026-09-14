@@ -74,3 +74,70 @@ test("切会话：运行态跟着清（上一个会话在跑 ≠ 这个会话在
   store().setRunningFor(1, true);
   expect(store().running).toBe(false);
 });
+
+/**
+ * 轨迹的增量合并（`mergeEvents`）。
+ *
+ * 跑动中界面按 `afterId` 定期追平推送丢掉的那几条 —— 同一条事件可能既走了推送
+ * 又被追平取回来，所以这里必须按 id 去重；顺序也必须按 id 排（追平是"补历史"，
+ * 不是"追加到现在"）。这是"执行到一半记录加不上"的最后一道保险，丢了就是
+ * 用户看到界面永远停在某一刻。
+ */
+const traceEvent = (id: number, conversationId = 1) => ({
+  id,
+  conversationId,
+  messageId: 10,
+  kind: "tool_start" as const,
+  toolName: "bash",
+  args: null,
+  output: null,
+  isError: 0,
+  subagentId: null,
+  createdAt: id,
+});
+
+test("轨迹增量：补上的事件按 id 排好，重复到达的不渲染两遍", () => {
+  store().setEvents([traceEvent(1), traceEvent(2)]);
+  store().mergeEvents([traceEvent(4), traceEvent(3)]); // 追平拿回来的顺序不保证
+  expect(store().events.map((e) => e.id)).toEqual([1, 2, 3, 4]);
+
+  // 推送与追平撞在同一条上（真实会发生）：列表不变。
+  store().mergeEvents([traceEvent(4)]);
+  expect(store().events.map((e) => e.id)).toEqual([1, 2, 3, 4]);
+
+  // 空数组是常态（没丢推送时每次追平都返回空），不能把列表清掉。
+  store().mergeEvents([]);
+  expect(store().events.map((e) => e.id)).toEqual([1, 2, 3, 4]);
+});
+
+test("轨迹增量：别的会话的事件不串进来", () => {
+  store().setEvents([traceEvent(1)]);
+  store().mergeEvents([traceEvent(2, 2)]);
+  expect(store().events.map((e) => e.id)).toEqual([1]);
+});
+
+test("点产物：右侧面板打开这个产物的预览页签", () => {
+  useAgentStore.setState({ panelOpen: false, panelTabs: [{ kind: "artifacts" }], activeTabIndex: 0 });
+  store().setPreview({ source: "artifact", artifactId: 7 });
+
+  expect(store().panelOpen).toBe(true);
+  expect(store().panelTabs[store().panelTabs.length - 1]).toEqual({ kind: "artifact", artifactId: 7 });
+  expect(store().activeTabIndex).toBe(store().panelTabs.length - 1);
+
+  // 同一个产物再点一次：聚焦已有页签，不叠重复的。
+  store().setPreview({ source: "artifact", artifactId: 7 });
+  expect(store().panelTabs.filter((tab) => tab.kind === "artifact")).toHaveLength(1);
+
+  store().closePreviewTabs();
+});
+
+test("「查看所有产物」：聚焦常驻的产出物页签并展开面板", () => {
+  useAgentStore.setState({ panelOpen: false, panelTabs: [], activeTabIndex: 0 });
+  store().openPanelTab({ kind: "artifacts" });
+  expect(store().panelOpen).toBe(true);
+  expect(store().panelTabs).toEqual([{ kind: "artifacts" }]);
+
+  // 已经开着就不再叠一个（用户点两次不该出现两个产出物页签）。
+  store().openPanelTab({ kind: "artifacts" });
+  expect(store().panelTabs).toHaveLength(1);
+});

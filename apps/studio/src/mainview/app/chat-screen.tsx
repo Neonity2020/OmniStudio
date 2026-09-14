@@ -329,6 +329,38 @@ function AssistantTraceRow({
   );
 }
 
+/**
+ * 「生成中…」那一行：转圈 + 已等待的秒数。
+ *
+ * 秒数必须在**一个 token 都还没出来**的静默期里继续走：模型加载、长提示词预填充、
+ * 云端排队这几段能到几十秒，而这时界面上没有别的东西在动 —— 一行静止的转圈与
+ * "卡死"在观感上没有区别。计时起点用本轮请求发出的时刻（store 的 runStartedAt），
+ * 拿不到（刷新窗口后接上的推送）就从挂载时刻算起。
+ */
+function GeneratingRow() {
+  const t = useT();
+  const runStartedAt = useChatStore((s) => s.runStartedAt);
+  const mountedAt = useRef(Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const elapsedMs = Math.max(0, now - (runStartedAt ?? mountedAt.current));
+  return (
+    <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
+      <Loader2Icon className="size-3.5 animate-spin" />
+      <span>{t("chat.generating")}</span>
+      {/* 头一秒不报数：那一瞬间还没什么好等的，蹦一个「0 ms」反而像在报错。 */}
+      {elapsedMs >= 1000 ? (
+        <span className="text-xs tabular-nums text-muted-foreground/70">
+          {t("chat.generating.elapsed", { duration: formatDuration(t, elapsedMs) })}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 /** 助手消息底部的知识库引用溯源：编号 + 来源文档，悬浮显示片段预览。 */
 function CitationBar({ citations }: { citations: KbCitation[] }) {
   const t = useT();
@@ -411,10 +443,7 @@ function MessageBubble({
               )}
             </div>
           ) : isStreamingMessage ? (
-            <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
-              <Loader2Icon className="size-3.5 animate-spin" />
-              {t("chat.generating")}
-            </div>
+            <GeneratingRow />
           ) : null}
           {!isStreamingMessage && citations && citations.length > 0 && (
             <CitationBar citations={citations} />
