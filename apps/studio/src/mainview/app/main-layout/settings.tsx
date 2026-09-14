@@ -19,6 +19,8 @@ import {
   ShieldIcon,
   PaletteIcon,
   ArchiveIcon,
+  SparklesIcon,
+  SlidersHorizontalIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -33,9 +35,11 @@ import { AboutTab } from "./about-tab";
 import { WebSearchTab } from "./web-search-tab";
 import { McpTab } from "./mcp-tab";
 import { AppearanceTab } from "./prefs-tabs";
+import { GeneralTab } from "./general-tab";
 import { CliTab } from "./cli-tab";
 import { BackupTab } from "./backup-tab";
 import { PermissionsTab } from "./permissions-tab";
+import { AgentCapsTab } from "./agent-caps-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
@@ -79,8 +83,10 @@ type SettingsTab =
   | "websearch"
   | "mcp"
   | "permissions"
+  | "agentcaps"
   | "cli"
   | "backup"
+  | "general"
   | "appearance"
   | "about";
 
@@ -97,8 +103,10 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
   mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
   permissions: { icon: <ShieldIcon className="size-4" />, labelKey: "settings.permissions.title" },
+  agentcaps: { icon: <SparklesIcon className="size-4" />, labelKey: "settings.agentCaps.title" },
   cli: { icon: <TerminalIcon className="size-4" />, labelKey: "settings.cli.title" },
   backup: { icon: <ArchiveIcon className="size-4" />, labelKey: "settings.backup.title" },
+  general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.general.title" },
   appearance: { icon: <PaletteIcon className="size-4" />, labelKey: "settings.appearance" },
   about: { icon: <GithubIcon className="size-4" />, labelKey: "settings.aboutTab.title" },
 };
@@ -114,8 +122,8 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
     labelKey: "settings.group.services",
     tabs: ["gateway", "integrations"],
   },
-  { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "cli"] },
-  { labelKey: "settings.group.prefs", tabs: ["appearance", "about"] },
+  { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "agentcaps", "cli"] },
+  { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
   { labelKey: "settings.group.data", tabs: ["logs", "backup"] },
 ];
 
@@ -127,8 +135,10 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "websearch",
   "mcp",
   "permissions",
+  "agentcaps",
   "cli",
   "backup",
+  "general",
   "appearance",
 ];
 
@@ -490,10 +500,15 @@ export function SettingsScreen() {
 
             {activeTab === "mcp" && <McpTab />}
             {activeTab === "permissions" && <PermissionsTab />}
+            {activeTab === "agentcaps" && <AgentCapsTab />}
 
             {activeTab === "cli" && <CliTab />}
 
             {activeTab === "backup" && <BackupTab />}
+
+            {activeTab === "general" && (
+              <GeneralTab form={form} updateField={updateField} />
+            )}
 
             {activeTab === "appearance" && (
               <AppearanceTab form={form} updateField={updateField} />
