@@ -68,6 +68,9 @@ const startCalls: {
   batchSize?: number;
 }[] = [];
 
+/** 导出的报告（断言"点一下真的把整份报告交出去了"）。 */
+const exportCalls: { filename: string; html: string }[] = [];
+
 /** 一份跑过三种缓存场景的历史记录：界面据此渲染"缓存命中对比"。 */
 const CACHE_RECORD_ROWS = [
   {
@@ -190,6 +193,11 @@ mock.module("@lib/rpc", () => ({
     },
     getBenchmarkRun: async () => ({ run: null }),
     cancelBenchmark: async () => ({ ok: true }),
+    exportBenchmarkReport: async (params: { filename: string; html: string }) => {
+      exportCalls.push(params);
+      return { ok: true, path: `/Users/me/Downloads/${params.filename}` };
+    },
+    showInExplorer: async () => ({ ok: true }),
   },
 }));
 
@@ -502,6 +510,45 @@ test("完全命中却没变快：界面直接点名「没吃到前缀缓存」",
     expect(screen.text()).toContain("服务端没吃到前缀缓存");
   } finally {
     recordRows = [];
+    await screen.cleanup();
+  }
+});
+
+test("右上角「导出 HTML」：把当前这份报告整份交给主进程落盘，并回报位置", async () => {
+  recordRows = CACHE_RECORD_ROWS;
+  recordSummary = {
+    avgTps: 20,
+    peakTps: 60,
+    avgTtftMs: 800,
+    bestTtftMs: 800,
+    peakAggTps: 60,
+    peakPrefillTps: 102400,
+    totalTokens: 384,
+    basis: "cold",
+  };
+  const screen = await renderScreen();
+  try {
+    exportCalls.length = 0;
+    await screen.clickByText("导出 HTML");
+    // 导出是异步的（要等主进程写盘回来才显示落点）：多刷一轮微任务。
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(exportCalls).toHaveLength(1);
+    const call = exportCalls[0]!;
+    expect(call.filename).toMatch(/^omni-benchmark-.+\.html$/);
+    // 报告是完整文档：模型名、明细表、缓存对比都在里面
+    expect(call.html.startsWith("<!doctype html>")).toBe(true);
+    expect(call.html).toContain(MODEL_NAME);
+    expect(call.html).toContain("缓存命中对比");
+    expect(call.html).toContain("冷启（不命中）");
+    // 落盘位置要说出来，否则用户不知道文件去哪了
+    expect(screen.text()).toContain("已导出到");
+    expect(screen.text()).toContain("Downloads");
+  } finally {
+    recordRows = [];
+    recordSummary = null;
     await screen.cleanup();
   }
 });

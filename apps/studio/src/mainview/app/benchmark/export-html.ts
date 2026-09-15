@@ -129,6 +129,7 @@ td.tps { font-weight: 600; color: var(--primary); }
 .bar-row { display: flex; align-items: center; gap: 10px; font-size: 11px; }
 .bar-ctx { width: 46px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .bar-cache { width: 96px; color: var(--muted); }
+.bar-label { width: 190px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-track { flex: 1; height: 9px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .bar-fill { height: 100%; border-radius: 999px; background: var(--primary); opacity: .75; }
 .bar-value { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
@@ -147,7 +148,7 @@ footer { margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--border
 
 /** 一行里的数字单元格（失败档位标红）。 */
 function numCell(value: string | number, cls = ""): string {
-  return `<td class="num ${cls}">${esc(value)}</td>`;
+  return `<td class="num${cls ? ` ${cls}` : ""}">${esc(value)}</td>`;
 }
 
 function summaryCards(result: DisplayResult, t: ReportT): string {
@@ -165,7 +166,7 @@ function summaryCards(result: DisplayResult, t: ReportT): string {
     ? `<p class="hint">${esc(t("benchmark.summaryBasis", { basis: t(`benchmark.cache.${s.basis}`) }))}</p>`
     : "";
   return `<section>
-  <h2>${esc(t("benchmark.summary.avgTps"))} / ${esc(t("benchmark.summary.peakTps"))}</h2>
+  <h2>${esc(t("benchmark.export.summary"))}</h2>
   ${basis}
   <div class="grid">
     ${cards
@@ -188,7 +189,7 @@ function configSection(result: DisplayResult, t: ReportT): string {
     sampleSize?: number;
   };
   const rows: { label: string; value: string }[] = [
-    { label: t("benchmark.source"), value: t(`benchmark.tab.${result.kind}`) },
+    { label: t("benchmark.tab"), value: t(`benchmark.tab.${result.kind}`) },
     { label: t("benchmark.model"), value: result.model },
   ];
   if (result.kind === "speed") {
@@ -289,7 +290,10 @@ function speedTable(result: DisplayResult, t: ReportT): string {
   const body = result.rows
     .map((r) => {
       const ctxCls = r.error ? " bad" : r.truncated ? " warn" : "";
-      const ok = r.fails > 0 ? `<span class="bad">${r.ok}/${r.fails}</span>` : String(r.ok);
+      const okCell =
+        r.fails > 0
+          ? `<td class="num"><span class="bad">${esc(`${r.ok}/${r.fails}`)}</span></td>`
+          : numCell(r.ok);
       return `<tr>
       <td class="txt${ctxCls}">${esc(fmtCtx(r.contextLength))}</td>
       <td class="txt">${esc(t(`benchmark.cache.${r.cache ?? "warm"}`))}</td>
@@ -301,7 +305,7 @@ function speedTable(result: DisplayResult, t: ReportT): string {
       ${numCell(r.aggTps)}
       ${numCell(r.prefillTps)}
       ${numCell(r.tokens)}
-      ${numCell(ok)}
+      ${okCell}
       ${numCell(r.totalMs)}
     </tr>`;
     })
@@ -367,7 +371,7 @@ function evalBody(result: DisplayResult, t: ReportT): string {
   const bars = categories
     .map(
       (c) => `<div class="bar-row">
-      <span class="bar-cache" style="width:200px;overflow:hidden;text-overflow:ellipsis">${esc(c.category)}</span>
+      <span class="bar-label" title="${esc(c.category)}">${esc(c.category)}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${Math.min(Math.max(c.accuracy, 0), 100).toFixed(2)}%"></span></span>
       <span class="bar-value">${esc(c.accuracy)}% (${esc(c.correct)}/${esc(c.total)})</span>
     </div>`,

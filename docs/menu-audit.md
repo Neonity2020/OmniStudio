@@ -605,6 +605,9 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 新增 `listBenchmarkRecordSummaries()`（轻量元数据 + `total`，上限 500）与 `getBenchmarkRecord(id)`；
 界面侧列表只取元数据、结果页按需单条拉正文；`readJsonl` 逐行容错并接 `eval.dataset.bad_lines`；
 `ROADMAP.md` OPS-04 修正为 ✅。评测数据集仍整文件读入（各套件 < 10MB，抽样需要全量做按类别采样），记为已知取舍。
+另外补一个导出报告的真 bug：`benchmark.export.title/config/footer/generatedAt`（以及新增的 `summary`）词条
+从未写进 i18n，导出的 HTML 里直接显示英文 key；「成功/失败」列被 `numCell()` 二次转义成字面量标签。
+本轮补齐中英词条 + 修正单元格拼接，新增 `export-html.test.ts` 2 条钉住。
 
 ---
 

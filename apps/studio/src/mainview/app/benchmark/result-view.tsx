@@ -1,9 +1,10 @@
 import { Badge } from "@ui/badge";
 import { GaugeIcon, GraduationCapIcon } from "lucide-react";
-import { cacheComparison, fmtCtx } from "@/shared/benchmark";
+import { fmtCtx } from "@/shared/benchmark";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-import type { EvalSuiteId } from "../../../bun/eval";
+import { ReportExportButton } from "./export-button";
+import { cacheRowsOf, engineLabelOf, evalReportStats, speedReportNotes } from "./report-data";
 import { fmtTime, type DisplayResult } from "./parts";
 
 const STATUS_STYLES: Record<DisplayResult["status"], string> = {
@@ -24,12 +25,7 @@ export function ResultView({
 }) {
   const t = useT();
   const summary = result.summary;
-  const engineLabel =
-    result.serverMode === "cloud"
-      ? t("benchmark.mode.cloud", { provider: result.engine ?? "" })
-      : result.serverMode === "remote"
-        ? t("benchmark.mode.remote")
-        : t("benchmark.mode.local", { engine: result.engine ?? "llama.cpp" });
+  const engineLabel = engineLabelOf(result, t);
   const speedParams = result.params as { genLength?: number; batchSize?: number } | undefined;
   const evalParams = result.params as { suite?: string; sampleSize?: number } | undefined;
 
@@ -56,57 +52,14 @@ export function ResultView({
     : [];
 
   // 每一档的"为什么没数据/数据不可信"：失败原因与静默截断都不能只体现在数字里。
-  const notes: { key: string; text: string; tone: "error" | "warn" }[] = [];
-  const stopped = summary?.stopped;
-  if (stopped) {
-    notes.push({
-      key: "stopped",
-      tone: stopped.reason === "context-overflow" ? "warn" : "error",
-      text: t(
-        stopped.reason === "context-overflow"
-          ? "benchmark.note.stopped.overflow"
-          : "benchmark.note.stopped.timeout",
-        { ctx: fmtCtx(stopped.contextLength) },
-      ),
-    });
-  }
-  for (const r of result.rows) {
-    if (r.error) {
-      notes.push({
-        key: `error-${r.contextLength}-${r.cache ?? ""}`,
-        tone: "error",
-        text: t("benchmark.note.failed", { ctx: fmtCtx(r.contextLength), error: r.error }),
-      });
-    }
-    if (r.truncated) {
-      notes.push({
-        key: `truncated-${r.contextLength}`,
-        tone: "warn",
-        text: t("benchmark.note.truncated", {
-          ctx: fmtCtx(r.contextLength),
-          actual: r.promptTokens.toLocaleString(),
-        }),
-      });
-    }
-  }
+  const notes = speedReportNotes(result, t);
 
-  // 缓存对比：同档位下"冷启 vs 命中"的差就是缓存买到的速度。命中档没有变快时
-  // 单独提示 —— 那说明这台服务端根本没吃到前缀缓存，是排查配置的第一步。
-  const cacheRows = cacheComparison(result.rows).filter(
-    (c) => (c.cold ? 1 : 0) + (c.partial ? 1 : 0) + (c.warm ? 1 : 0) > 1,
-  );
-  const noCacheGain = cacheRows.filter((c) => c.warmSpeedup != null && c.warmSpeedup < 1.2);
-  for (const c of noCacheGain) {
-    notes.push({
-      key: `nocache-${c.contextLength}`,
-      tone: "warn",
-      text: t("benchmark.note.noCacheGain", { ctx: fmtCtx(c.contextLength), speedup: String(c.warmSpeedup) }),
-    });
-  }
+  // 缓存对比：同档位下"冷启 vs 命中"的差就是缓存买到的速度。
+  const cacheRows = cacheRowsOf(result);
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
-      {/* 头部：模型 / 引擎 / 时间 / 状态 */}
+      {/* 头部：模型 / 引擎 / 时间 / 状态 / 导出 */}
       <div className="flex flex-wrap items-center gap-2">
         <GaugeIcon className="size-4 text-primary" />
         <span className="text-sm font-semibold">{result.model}</span>
@@ -123,7 +76,10 @@ export function ResultView({
             ? t("benchmark.status.running")
             : t(`benchmark.status.${result.status}`)}
         </Badge>
-        <span className="ml-auto text-xs tabular-nums text-muted-foreground">{fmtTime(result.createdAt)}</span>
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs tabular-nums text-muted-foreground">{fmtTime(result.createdAt)}</span>
+          <ReportExportButton result={result} />
+        </div>
       </div>
 
       {result.error && (
@@ -338,21 +294,14 @@ export function EvalResultView({
   evalParams: { suite?: string; sampleSize?: number } | undefined;
 }) {
   const t = useT();
-  const summaryEval = result.summary?.eval;
   // 运行中读实时 eval 进度；结束后读落库汇总。
-  const live = result.eval;
-  const suite = summaryEval?.suite ?? live?.suite ?? (evalParams?.suite as EvalSuiteId | undefined) ?? "mmlu";
-  const accuracy = summaryEval?.accuracy ?? live?.accuracy ?? 0;
-  const correct = summaryEval?.correctCount ?? live?.correct ?? 0;
-  const answered = summaryEval?.totalQuestions ?? live?.done ?? 0;
-  const datasetTotal = summaryEval?.datasetTotal ?? live?.datasetTotal ?? 0;
-  const sampleSize = evalParams?.sampleSize ?? live?.sampleSize ?? 0;
+  const stats = evalReportStats(result, evalParams);
+  const { suite, accuracy, correct, answered, datasetTotal, sampleSize, failures } = stats;
   const categories = result.evalRows ?? [];
-  const failures = summaryEval?.failures ?? live?.failures ?? 0;
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-col gap-5">
-      {/* 头部：模型 / 套件 / 引擎 / 状态 / 时间 */}
+      {/* 头部：模型 / 套件 / 引擎 / 状态 / 时间 / 导出 */}
       <div className="flex flex-wrap items-center gap-2">
         <GraduationCapIcon className="size-4 text-primary" />
         <span className="text-sm font-semibold">{result.model}</span>
@@ -367,7 +316,10 @@ export function EvalResultView({
             ? t("benchmark.status.running")
             : t(`benchmark.status.${result.status}`)}
         </Badge>
-        <span className="ml-auto text-xs tabular-nums text-muted-foreground">{fmtTime(result.createdAt)}</span>
+        <div className="ml-auto flex items-center gap-3">
+          <span className="text-xs tabular-nums text-muted-foreground">{fmtTime(result.createdAt)}</span>
+          <ReportExportButton result={result} />
+        </div>
       </div>
 
       {result.error && (

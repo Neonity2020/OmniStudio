@@ -20,6 +20,7 @@ import {
 } from "../image-server";
 import { artifactPreviewUrl } from "../../shared/server-info";
 import { safeBaseName, safeJoin } from "../path-safety";
+import { exportHtmlReport } from "../report-export";
 import { processDocumentPages } from "../queue";
 import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
 import * as ReleaseCheck from "../release-check";
@@ -1660,6 +1661,16 @@ export type AppRPC = {
       clearBenchmarkRecords: {
         params: undefined;
         response: { ok: boolean };
+      };
+      /**
+       * 导出基准报告为单文件 HTML（正文由界面生成，主进程只负责落盘）。
+       *
+       * 界面已经握着 rows / summary / params，HTML 在那边拼好传过来；写盘、去重、
+       * 文件名清洗留在主进程，产物落在系统「下载」目录。
+       */
+      exportBenchmarkReport: {
+        params: { filename: string; html: string };
+        response: { ok: boolean; path?: string; error?: string };
       };
       /** 能力评测套件清单（含题库下载状态）。 */
       getEvalSuites: {
@@ -4129,6 +4140,29 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
       clearBenchmarkRecords: async () => {
         return clearBenchmarkRecords();
+      },
+      exportBenchmarkReport: async ({ filename, html }) => {
+        // 目标目录：系统「下载」（用户的直觉位置）。Electrobun 在极简环境下可能拿不到
+        // 这个路径，退到数据目录的 exports/ —— 宁可换个地方，也不能让导出失败。
+        const dir = Utils.paths.downloads || path.join(getUserDataDir(), "exports");
+        const res = exportHtmlReport({ dir, filename, html });
+        if (res.ok) {
+          logEvent({
+            source: "benchmark",
+            event: "benchmark.report.exported",
+            message: `基准报告已导出：${res.path}`,
+            detail: { path: res.path, bytes: Buffer.byteLength(html, "utf8") },
+          });
+        } else {
+          logEvent({
+            level: "error",
+            source: "benchmark",
+            event: "benchmark.report.export_failed",
+            message: `基准报告导出失败：${res.error}`,
+            detail: { filename, dir, error: res.error },
+          });
+        }
+        return res.ok ? { ok: true, path: res.path } : { ok: false, error: res.error };
       },
       getEvalSuites: async () => {
         return { suites: listEvalSuites() };
