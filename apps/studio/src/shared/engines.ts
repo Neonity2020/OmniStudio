@@ -96,6 +96,14 @@ export const ENGINE_OPTIONS: { value: InferenceEngine; labelKey: string }[] = EN
   labelKey: ENGINE_SPECS[id].labelKey,
 }));
 
+/**
+ * 当前平台的引擎选项。UI 不要自己判断 `value !== "mlx"`，平台限制只声明在
+ * `ENGINE_SPECS[id].macOnly`（否则新增 macOnly 引擎时选择器又会漏掉）。
+ */
+export function engineOptions(isMac = process.platform === "darwin"): { value: InferenceEngine; labelKey: string }[] {
+  return ENGINE_OPTIONS.filter((o) => !ENGINE_SPECS[o.value].macOnly || isMac);
+}
+
 /** 各引擎监听端口的设置键（UI 侧读取设置 blob 用）。 */
 export const ENGINE_PORT_KEYS: Record<InferenceEngine, string> = Object.fromEntries(
   ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].portKey]),

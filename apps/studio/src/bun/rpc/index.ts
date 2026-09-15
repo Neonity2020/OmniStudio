@@ -1037,6 +1037,8 @@ export type AppRPC = {
           effective: EffectivePermissionRow[];
           authorizedFolders: string[];
           sessionGrants: (PermissionRule & { id: number; scopeRef: string })[];
+          /** 可手写规则的权限名（唯一权威清单，取自 permissions.ts）。 */
+          permissionNames: string[];
         };
       };
       setAgentApprovalMode: {
@@ -3577,6 +3579,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           rules: Permissions.settingRules().map((rule) => ({ ...rule })),
           effective: Permissions.summarizeEffectivePermissions(conversationId, workspace),
           authorizedFolders: Permissions.getAuthorizedFolders(),
+          permissionNames: Object.keys(Permissions.HUMAN_PERMISSION_LABELS),
           sessionGrants: rows
             .filter((row) => row.scope === "session")
             .map((row) => ({

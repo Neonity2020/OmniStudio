@@ -634,8 +634,19 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 
 ## 收尾：设置页 19 个标签
 
-（待逐菜单清完后处理；已知需核对的点：`engines.ts` + 一个 Runtime 的引擎扩展规则、
-`CloudProviderPanel` 的模型类型标注、`AGENT_PERMISSION_RULES` 与 `permissions.ts` 的规则链一致性。）
+设置页是并列一级页面（齿轮），19 个标签分 6 组，横跨全部子系统。三项已知点核对如下：
+
+1. **引擎扩展规则**：引擎名列在 `shared/engines.ts`（`ENGINE_SPECS`），端口键 / 附加参数键 / 平台限制 /
+   可加载格式 / 市场检索格式都从这里派生；`availableEngines()` 已按 `macOnly` 过滤。
+   **本轮修复**：`local-models/engine-selector.tsx` 原先硬编码 `o.value !== "mlx"`，改为
+   新增的 `engineOptions(isMac)` —— 以后再加 macOnly 引擎，选择器不会再漏。
+2. **`CloudProviderPanel` 的模型类型标注**：面板已有 `ModelCategoryChips` + 添加时的 `dlgType`
+   （auto 时由 `modelTypeOf` 推断），逐模型可改类型，无需改动。
+3. **`AGENT_PERMISSION_RULES` 与规则链一致性**：`permissions.ts` 的求值链
+   （内置默认 → 设置规则 → 工作区规则 → 会话规则）已统一；**本轮修复**发现设置页下拉的
+   权限名清单是**另一份会漂移的副本**（漏了 `websearch` / `doom_loop`）。
+   现在 `permissions.ts` 导出唯一权威清单 `HUMAN_PERMISSION_LABELS`，
+   `getAgentPermissions` 响应新增 `permissionNames`，设置页直接消费（新增 2 条单测钉住）。
 
 ---
 
@@ -643,8 +654,8 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 
 1. ~~第 0 项 验证层~~（已完成，见上）
 2. ~~菜单 1 Chat~~（已完成，剩一条跨菜单重复实现挪到菜单 2）
-3. 菜单 2 Agent → 3 Voice Call → 4 Voice → 5 Image → 6 Video → 7 OCR → 8 Translate
-   → 9 Prompt → 10 Skills → 11 KB → 12 Memory → 13 Benchmark → 设置页
+3. ~~菜单 2 Agent → 3 Voice Call → 4 Voice → 5 Image → 6 Video → 7 OCR → 8 Translate
+   → 9 Prompt → 10 Skills → 11 KB → 12 Memory → 13 Benchmark → 设置页~~（全部完成）
 4. 每个菜单的验收口径：`bun run typecheck` + `bun run lint` + `bun run test` 全绿，
    且该菜单的每条修复要么有新测试钉住、要么在清单里写明手工验证方式。
 5. 跨菜单 A/B/C 三类缺口在**每个菜单自己那一节**里清零（不另开「统一整改」的大改动）。
@@ -667,4 +678,4 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 | 11 KB | ✅ | 摄取/检索/重排失败接 logEvent、导入结果与错误有界面反馈、docs/chunks 列表加上限并回传总数（截断有提示）。剩「KB 云模型选择走 cloud_providers」归跨菜单 C（需改 KB 表结构） |
 | 12 Memory | ✅ | 判重/维护补向量失败接 logEvent、搜索 300ms 防抖、置顶改服务端过滤 + LIKE 转义 |
 | 13 Benchmark | ✅ | 历史列表改轻量元数据 + 单条 `getBenchmarkRecord` 取正文、eval 逐行解析并容忍坏行、ROADMAP OPS-04 状态修正 |
-| 设置页 19 标签 | ⏳ | 最后处理 |
+| 设置页 19 标签 | ✅ | 引擎选择器去掉硬编码 mlx（改走 `engineOptions`）；权限名清单收敛到 `HUMAN_PERMISSION_LABELS` + RPC `permissionNames`（新增 2 条单测）；云厂商面板模型类型标注本已具备 |

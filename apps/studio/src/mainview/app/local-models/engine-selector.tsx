@@ -4,7 +4,7 @@ import { rpcClient } from "@lib/rpc";
 import { useEngine } from "@lib/use-engine";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useT } from "@stores/ui-lang";
-import { ENGINE_OPTIONS, type InferenceEngine } from "@/shared/modelscope";
+import { engineOptions, type InferenceEngine } from "@/shared/engines";
 
 // ---------------------------------------------------------------------------
 // 引擎选择
@@ -19,7 +19,8 @@ export function EngineSelector() {
   });
   // MLX 只面向 macOS，非 mac 不展示该引擎选项。
   const isMac = data?.platform === "darwin";
-  const options = ENGINE_OPTIONS.filter((o) => o.value !== "mlx" || isMac);
+  // 平台限制（MLX 仅 macOS）由 engines.ts 的 macOnly 声明，这里不再硬编码引擎名。
+  const options = engineOptions(isMac);
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
