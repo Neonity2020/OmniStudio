@@ -20,7 +20,7 @@ import { useMlxModelRunStore } from "@stores/mlx-model-run";
 import type { ImageGenBackend, ImageRecordRow } from "../../../bun/image-gen";
 import type { MlxModelInfo } from "../../../bun/mlx-gen";
 import { cn } from "@/mainview/lib/utils";
-import { RATIOS, RANDOM_PROMPTS, MLX_FALLBACKS, formatTime, formatBytes, ImageCard, GenLoading, RecentStrip } from "./parts";
+import { RATIOS, RANDOM_PROMPTS, MLX_FALLBACKS, formatTime, formatBytes, ImageCard, GenLoading, RecentStrip, isForeignModel } from "./parts";
 
 export function GenerateTab() {
   const t = useT();
@@ -231,7 +231,9 @@ export function GenerateTab() {
       : backend === "comfyui"
         ? !!comfyBase.trim()
         : // 云端：选了已启用的厂商与模型才算配好（地址与密钥由厂商行提供）。
-          !!providerId.trim() && !!model.trim();
+          // 本地引擎的 id（切后端留下的残留）不算配好 —— 它到了厂商那边只会换来
+          // 一句 "Model does not exist"，而界面此时若写着"已配置"，用户只能去猜。
+          !!providerId.trim() && !!model.trim() && !isForeignModel("api", model, mlxModels);
 
   // MLX 后端：引擎就绪 + 已选模型 + 权重已下载，才允许生图。
   const mlxModelReady =
@@ -310,8 +312,18 @@ export function GenerateTab() {
               variant="attached"
               value={backend}
               onChange={(key) => {
-                setBackend(key);
-                void rpcClient.saveImageGenConfig({ backend: key });
+                const next = key as ImageGenBackend;
+                setBackend(next);
+                // 三个后端共用一个 IMG_MODEL 槽位：从本地 MLX 切到云端时它不会被清掉，
+                // 于是 z-image-turbo 这种本地 preset id 会被当成云端模型发给厂商，
+                // 界面还显示"已配置"，直到生成时才拿回一句 "Model does not exist"。
+                // 判定为"不属于目标后端"就清空，让用户重选（值也一起写回，别留着假配置）。
+                const stale = isForeignModel(next, model, mlxModels);
+                if (stale) setModel("");
+                void rpcClient.saveImageGenConfig({
+                  backend: next,
+                  ...(stale ? { model: "" } : {}),
+                });
               }}
               options={[
                 { value: "api", label: t("image.backend.cloud") },

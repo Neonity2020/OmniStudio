@@ -35,6 +35,24 @@ export function getImagesBaseDir(): string {
 }
 
 /**
+ * 把 `images/` 下的相对 ref 解析成绝对路径，**限制在该目录内**。
+ *
+ * ref 会从 RPC / 控制套接字 / 小应用一路传进来，`../../omni-studio.db` 这类输入
+ * 能指到数据目录里的任意文件，所以穿越校验必须在这里做一次、且只有一次。
+ * 放在 image-server 而不是各功能模块里：这里只依赖 paths/fs，不碰数据库，
+ * 任何媒体相关模块都能直接引；此前 image-gen / video-gen / ocr 各写了一份，
+ * 新增功能再抄一份就是第四份了。ocr.ts 的 `resolveOcrImage` 现在转调这里。
+ */
+export function resolveImageRef(ref: string): string | null {
+  if (!ref || typeof ref !== "string") return null;
+  const base = getImagesBaseDir();
+  const resolved = path.resolve(base, ref);
+  // 用 `base + sep` 前缀判定，避免 `/images-evil/...` 这种同前缀不同目录混进来。
+  if (!resolved.startsWith(base + path.sep)) return null;
+  return existsSync(resolved) ? resolved : null;
+}
+
+/**
  * 提示词库媒体素材根目录：seed 数据里的 `/prompt-library/...` 路径指向
  * vibedesign 仓库 `frontend/public/prompt-library`（图片/视频封面，未打进本应用包）。
  * 目录不存在时返回 null，由本地缓存 / 云端直链兜底。

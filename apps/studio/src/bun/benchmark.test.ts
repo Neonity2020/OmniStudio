@@ -87,6 +87,7 @@ export const FAKE_PROVIDER = {
   models: [{ id: "test-model", type: "chat" as const }],
   enabled: true,
   videoApi: "" as const,
+  musicApi: "" as const,
   createdAt: 0,
   updatedAt: 0,
   apiKey: "sk-test",

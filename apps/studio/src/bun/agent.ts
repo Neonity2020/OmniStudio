@@ -39,6 +39,7 @@ import {
 } from "./agent-tools";
 import { loadProjectInstructions } from "./agent-instructions";
 import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
+import { buildNotesAgentTools } from "./notes-tools";
 import { cancelMediaSetup } from "./media-setup";
 import { buildMcpAgentTools } from "./mcp";
 import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection, memoryRecallSection } from "./memory";
@@ -912,9 +913,12 @@ async function toolsForMode(
   const base = mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
   // 素材检索是只读的（看看用户和 Agent 都生成过什么），三模式都给。
   const mediaRead = buildMediaReadTools();
+  // 笔记三件套（list / search / read）同样是只读：Plan 模式分析需求时也该读得到
+  // 用户之前写下的东西。开关关掉时它返回空数组（工具直接不出现）。
+  const notesRead = buildNotesAgentTools();
   // Plan 模式只多一个 write_plan：方案要能留痕（否则切回 Agent 模式后模型手里没有那份方案）。
   // 它写的是数据目录，不碰工作区，所以"Plan 模式不改任何东西"这条仍然成立。
-  if (mode === "plan") return [...base, ...mediaRead, createWritePlan(ctx)];
+  if (mode === "plan") return [...base, ...mediaRead, ...notesRead, createWritePlan(ctx)];
   // 记忆工具带上下文：写入记项目作用域（按工作区隔离）与审计来源（哪个会话写的）。
   const extras = memoryEnabled()
     ? buildMemoryAgentTools({
@@ -923,7 +927,7 @@ async function toolsForMode(
       })
     : [];
   const mcpTools = await buildMcpAgentTools();
-  return [...base, ...mediaRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
+  return [...base, ...mediaRead, ...notesRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
 }
 
 /**

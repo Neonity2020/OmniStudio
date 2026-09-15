@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { isRemoteClient } from "@lib/remote";
 import { Button } from "@ui/button";
 import { Textarea } from "@ui/textarea";
 import { useChatStore } from "@stores/chat";
@@ -324,34 +325,40 @@ export function ChatComposer({
         />
 
         <div className="flex items-center gap-0.5 px-2.5 pb-2.5">
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground"
-            tooltip={t("chat.attachFile")}
-            onClick={() => attachFileMutation.mutate()}
-            disabled={streaming || attachFileMutation.isPending}
-          >
-            {attachFileMutation.isPending ? (
-              <Loader2Icon className="size-4 animate-spin" />
-            ) : (
-              <PaperclipIcon className="size-4" />
-            )}
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="text-muted-foreground"
-            tooltip={t("chat.attachImage")}
-            onClick={() => attachMutation.mutate()}
-            disabled={streaming || attachMutation.isPending}
-          >
-            {attachMutation.isPending ? (
-              <Loader2Icon className="size-4 animate-spin" />
-            ) : (
-              <ImagePlusIcon className="size-4" />
-            )}
-          </Button>
+          {/* 附件要开宿主机的原生文件对话框 —— 网页端（/chat）没有这条通道，
+              按钮先不显示，免得点了没反应。浏览器直传附件是后续单独的一件事。 */}
+          {!isRemoteClient() && (
+            <>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                tooltip={t("chat.attachFile")}
+                onClick={() => attachFileMutation.mutate()}
+                disabled={streaming || attachFileMutation.isPending}
+              >
+                {attachFileMutation.isPending ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <PaperclipIcon className="size-4" />
+                )}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-muted-foreground"
+                tooltip={t("chat.attachImage")}
+                onClick={() => attachMutation.mutate()}
+                disabled={streaming || attachMutation.isPending}
+              >
+                {attachMutation.isPending ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <ImagePlusIcon className="size-4" />
+                )}
+              </Button>
+            </>
+          )}
           <Button
             variant="ghost"
             size="icon-sm"

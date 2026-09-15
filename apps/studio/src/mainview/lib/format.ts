@@ -109,3 +109,13 @@ export function formatDuration(ms: number): string {
   const remMins = mins % 60;
   return remMins > 0 ? `${hrs}h ${remMins}m` : `${hrs}h`;
 }
+
+/** 侧栏记录条目里的短时间戳：`MM-DD HH:mm`（当天也只显示日期，与历史一致）。 */
+export function formatRecordTime(ts: number): string {
+  return new Date(ts).toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}

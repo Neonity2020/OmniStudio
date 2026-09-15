@@ -55,6 +55,7 @@ await mockModulePartial<typeof import("./cloud-providers")>("./cloud-providers",
           models: [],
           enabled: true,
           videoApi: "",
+          musicApi: "",
           createdAt: 0,
           updatedAt: 0,
         }
@@ -86,7 +87,38 @@ globalThis.fetch = mock(async (url: URL | string) => {
 }) as never;
 
 // 所有 mock 注册后再动态加载被测模块。
-const { generateImage, listImageGenModelIds } = await import("./image-gen");
+const { generateImage, listImageGenModelIds, upstreamErrorText, modelNotFoundHint } =
+  await import("./image-gen");
+
+test("上游报错取 message，而不是把整段 JSON 丢给用户", async () => {
+  // 国内聚合网关的信封是 { code, message }（不是 OpenAI 的 { error: { message } }）：
+  // 只认后者的结果是小应用里直接显示 {"code":20012,"message":"Model does not exist…"}
+  expect(upstreamErrorText('{"code":20012,"message":"Model does not exist.","data":null}')).toBe(
+    "Model does not exist.",
+  );
+  expect(upstreamErrorText('{"error":{"message":"bad key"}}')).toBe("bad key");
+  expect(upstreamErrorText('{"error":"plain string"}')).toBe("plain string");
+  // 非 JSON 原样保留（有些网关直接回一段 HTML / 纯文本）
+  expect(upstreamErrorText("<html>502</html>")).toBe("<html>502</html>");
+  expect(upstreamErrorText("")).toBe("");
+});
+
+test("「模型不存在」补一句能照着做的提示（并带上厂商名）", async () => {
+  const message = '{"code":20012,"message":"Model does not exist. Please check it carefully."}';
+  const text = upstreamErrorText(message);
+  const hinted = modelNotFoundHint(text, "z-image-turbo", "硅基流动");
+  expect(hinted).toContain("硅基流动");
+  expect(hinted).toContain("z-image-turbo");
+  expect(hinted).toContain("图像生成");
+  // 原始报错留着：排查时要能看到上游到底说了什么
+  expect(hinted).toContain("Model does not exist");
+
+  // 别的错误一个字都不改（别把网络超时、鉴权失败也套上"换模型"的结论）
+  expect(modelNotFoundHint("connection reset", "flux", "硅基流动")).toBe("connection reset");
+  expect(modelNotFoundHint("Incorrect API key", "flux")).toBe("Incorrect API key");
+  // 没给厂商名时也要成句
+  expect(modelNotFoundHint("Model does not exist", "x")).toContain("当前厂商");
+});
 
 afterAll(() => {
   globalThis.fetch = originalFetch;

@@ -3,41 +3,42 @@ import * as CloudProviders from "./cloud-providers";
 import { proxyWebSocketOptions } from "./proxy";
 
 /**
- * Qwen Audio Realtime（DashScope「实时语音通话」云端模式）。
+ * 云端实时语音（OpenAI-Realtime 兼容 WebSocket），两家厂商：
  *
- * 走 OpenAI-Realtime 兼容 WebSocket 协议（endpoint/api-ws/v1/realtime），
- * 协议细节对照 qwen-audio-agent（Apache-2.0）的 realtime-gateway.mjs /
- * providers/dashscope.mjs 逐条核实：
+ * **百炼 Qwen Audio Realtime**（`api-ws/v1/realtime`，协议细节对照 qwen-audio-agent
+ * （Apache-2.0）的 realtime-gateway.mjs / providers/dashscope.mjs 逐条核实）：
  *   - 连接：`<base>?model=<model>`，Header `Authorization: Bearer <API_KEY>`
  *   - 上行：session.update / input_audio_buffer.append（base64 PCM16 16k）/
- *           response.cancel（打断）
+ *           input_audio_buffer.commit / response.cancel（打断）
  *   - 下行：response.audio_transcript.delta（助手流式文本）/
  *           response.audio.delta（base64 PCM16 24k 音频块）/
  *           conversation.item.input_audio_transcription.{delta,text}（用户转写）/
  *           input_audio_buffer.speech_started/stopped（服务端 VAD）/ response.done
  *   - 音频模型族 turn_detection 用 smart_turn（服务端智能断句 + 自动打断），
  *     Omni 族用 semantic_vad；输入 16k / 输出 24k，格式 pcm。
+ *
+ * **阶跃 StepAudio Realtime**（`wss://api.stepfun.com/v1/realtime`，对照开放平台
+ * 「双向实时语音」文档 + 官方 Step-Realtime-Console 演示）：事件名与上面完全相同，
+ * 差别只在字段取值 —— `input_audio_format` / `output_audio_format` 固定 `pcm16`，
+ * `turn_detection` 只支持 `{type:"server_vad"}`（默认为关闭，所以必须显式开），
+ * 上行也是 24k（演示端 wavRecorder 就录在 24k）。user 转写定稿事件里文本在
+ * `transcript` 字段（百炼在 `text`）。方言判定见 `realtimeDialectFor`。
  */
 
 export type VoiceCallProvider = "local" | "cloud";
 
-/** 可选的云端实时模型（qwen-audio-agent 默认即 plus 档）。 */
-// 常量定义在 shared（通话页也要用；webview 不能值导入本模块，见那边的说明），
-// 这里转出去保持既有导入方不变。
+// 常量与方言判定定义在 shared（通话页与采集团也要用；webview 不能值导入本模块，
+// 见那边的说明）。
 import {
   DEFAULT_REALTIME_BASE_URL,
   DEFAULT_REALTIME_MODEL,
-  DEFAULT_REALTIME_VOICE,
-  REALTIME_MODELS,
+  isPresetRealtimeEndpoint,
   realtimeBaseUrlForProvider,
+  realtimeDefaultModel,
+  realtimeDefaultVoice,
+  realtimeDialectFor,
+  type RealtimeDialect,
 } from "../shared/realtime-voice";
-
-export {
-  DEFAULT_REALTIME_BASE_URL,
-  DEFAULT_REALTIME_MODEL,
-  DEFAULT_REALTIME_VOICE,
-  REALTIME_MODELS,
-};
 
 export type RealtimeProviderConfig = {
   provider: VoiceCallProvider;
@@ -66,20 +67,24 @@ export function getRealtimeProviderConfig(): RealtimeProviderConfig {
   /**
    * WebSocket 地址：优先用「厂商推导值」，其次才看手填的设置。
    *
-   * 手填值只有在**用户真的改过**时才优先（比如自建中转）—— 判据是"存的值不等于默认值"。
-   * 否则选了百炼却还连着上一个厂商的地址，表现为"换厂商后连不上"，而界面上地址那一栏
-   * 看着是对的（它是旧的）。
+   * 手填值只有在**用户真的改过**时才优先（比如自建中转）—— 判据是"存的值不是任何一家
+   * 的预设端点"。否则选了百炼却还连着上一个厂商的地址，表现为"换厂商后连不上"，
+   * 而界面上地址那一栏看着是对的（它是旧的）。
    */
   const stored = (getSetting("VOICE_CALL_REALTIME_BASE_URL") || "").trim();
   const derived = realtimeBaseUrlForProvider(provider?.baseUrl);
-  const customized = stored !== "" && stored !== DEFAULT_REALTIME_BASE_URL;
+  const customized = stored !== "" && !isPresetRealtimeEndpoint(stored);
+  const baseUrl = customized ? stored : (derived ?? stored ?? DEFAULT_REALTIME_BASE_URL);
+  // 方言由地址 + 模型共同决定；没配过的模型 / 音色跟着方言取默认值 ——
+  // 把百炼的 longanqian 发给阶跃只会在连接时报一句上游的 "invalid voice"。
+  const dialect = realtimeDialectFor({ baseUrl, model: getSetting("VOICE_CALL_REALTIME_MODEL") });
   return {
     provider: getVoiceCallProvider(),
     providerId,
     apiKey,
-    baseUrl: customized ? stored : (derived ?? stored ?? DEFAULT_REALTIME_BASE_URL),
-    model: (getSetting("VOICE_CALL_REALTIME_MODEL") || DEFAULT_REALTIME_MODEL).trim(),
-    voice: (getSetting("VOICE_CALL_REALTIME_VOICE") || DEFAULT_REALTIME_VOICE).trim(),
+    baseUrl,
+    model: (getSetting("VOICE_CALL_REALTIME_MODEL") || realtimeDefaultModel(dialect)).trim(),
+    voice: (getSetting("VOICE_CALL_REALTIME_VOICE") || realtimeDefaultVoice(dialect)).trim(),
     configured: !!apiKey,
   };
 }
@@ -332,8 +337,26 @@ export class RealtimeVoiceClient {
     }
   }
 
+  /**
+   * 会话配置：音频格式 / 断句方式按厂商方言发。
+   * 阶跃只认 `pcm16` + `server_vad`（且默认关闭，必须显式开）；百炼音频族用
+   * smart_turn（服务端智能断句 + 说话即打断），Omni 族用 semantic_vad，格式写 `pcm`。
+   */
   private sendSessionUpdate(): void {
-    // 音频模型族默认 smart_turn（服务端智能断句 + 说话即打断），Omni 族 semantic_vad。
+    if (this.dialect() === "stepfun") {
+      this.send({
+        type: "session.update",
+        session: {
+          modalities: ["text", "audio"],
+          voice: this.cfg.voice,
+          instructions: this.cfg.instructions,
+          input_audio_format: "pcm16",
+          output_audio_format: "pcm16",
+          turn_detection: { type: "server_vad" },
+        },
+      });
+      return;
+    }
     const isOmni = /omni/i.test(this.cfg.model);
     this.send({
       type: "session.update",
@@ -346,6 +369,11 @@ export class RealtimeVoiceClient {
         turn_detection: isOmni ? { type: "semantic_vad" } : { type: "smart_turn" },
       },
     });
+  }
+
+  /** 当前连接说的是哪家方言（地址为主，模型名为辅）。 */
+  private dialect(): RealtimeDialect {
+    return realtimeDialectFor({ baseUrl: this.cfg.baseUrl, model: this.cfg.model });
   }
 
   /** 会话就绪后回放历史消息作为上下文（失败不影响主流程，仅记录）。 */
@@ -379,8 +407,13 @@ export class RealtimeVoiceClient {
   /**
    * 用户一句话结束的显式信号：告诉服务端输入缓冲可以落定了。
    * 配合服务端 smart_turn 使用，可让断句更跟手（无副作用，重复提交安全）。
+   *
+   * **阶跃不发这个**：它只有 server_vad 一种断句（已经在 session.update 里开了），
+   * 服务端自己 commit；再补一个手工 commit 会去提交一个已经交过、此刻为空的缓冲，
+   * 上游直接回 error（"音频内容不完整"），而我们的错误分支会把它显示给用户。
    */
   commit(): void {
+    if (this.dialect() === "stepfun") return;
     this.send({ type: "input_audio_buffer.commit" });
   }
 
@@ -414,13 +447,15 @@ export class RealtimeVoiceClient {
         this.injectHistory();
         break;
       case "conversation.item.input_audio_transcription.delta": {
-        const text = String(ev.text ?? "");
+        // 文本字段两家叫法不同：百炼 `text`，OpenAI 系（含阶跃）用 `delta`。
+        const text = String(ev.text ?? ev.delta ?? "");
         if (text) this.emit({ type: "userPartial", text });
         break;
       }
       case "conversation.item.input_audio_transcription.text":
       case "conversation.item.input_audio_transcription.completed": {
-        const text = String(ev.text ?? "");
+        // 文本字段两家叫法不同：百炼 `text`，阶跃 `transcript`。
+        const text = String(ev.text ?? ev.transcript ?? "");
         if (text) this.emit({ type: "userText", text });
         break;
       }
@@ -489,7 +524,7 @@ export type RealtimeTestResult = {
 
 /**
  * 用给定（或已保存的）配置开一条真实 WebSocket 连接，验证 API Key / 地址 / 模型
- * 是否可用。能收到 onopen 即代表鉴权通过（DashScope 在升级阶段校验 token，
+ * 是否可用。能收到 onopen 即代表鉴权通过（两家都在升级阶段校验 token，
  * key 无效时直接回非 101 状态码、进 onclose）。测试完立即关闭连接。
  */
 export function testRealtimeConnection(
@@ -501,7 +536,8 @@ export function testRealtimeConnection(
     const baseUrl = (cfg?.baseUrl ?? current.baseUrl).trim() || DEFAULT_REALTIME_BASE_URL;
     const model = (cfg?.model ?? current.model).trim() || DEFAULT_REALTIME_MODEL;
     if (!apiKey) {
-      resolve({ ok: false, error: "请先填写 DashScope API Key" });
+      // 密钥来自选中的厂商行，不再要求手填：提示指向厂商而不是 DashScope。
+      resolve({ ok: false, error: "请先在「设置 → 模型云服务」里为所选厂商填写 API Key" });
       return;
     }
     const url = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}model=${encodeURIComponent(model)}`;

@@ -7,9 +7,11 @@ import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import { TTS_REFERENCE_AUDIO_FIELD } from "../shared/tts-reference-audio";
+import { audioVendorFor, resolveTtsVoice } from "../shared/tts-voices";
 import { edgeSynthesize } from "./edge-tts";
 import { synthesizeCallLocal } from "./tts-local";
 import * as CloudProviders from "./cloud-providers";
+import { normalizeApiBase } from "../shared/cloud-providers";
 
 export type VoiceRecordKind = "tts" | "asr" | "clone";
 
@@ -193,11 +195,15 @@ export function getTTSProviderConfig(): TTSProviderConfig {
 /**
  * 保存三方 TTS 配置：语音页只选「厂商 + 模型」，地址 / 密钥属于服务商
  * （在「设置 → 模型云服务」里维护并启用），这里不再接收 base / apiKey。
+ *
+ * 返回本次生效的音色：换厂商后原先那个"别家的占位音色"（alloy 之类）会被落成新厂商的
+ * 默认值，页面得显示这个值 —— 否则界面上写着 alloy、实际发出去的是厂商默认音色，
+ * 用户按界面上的名字去查为什么音色不对，永远查不到。
  */
 export function saveTTSProviderConfig(cfg: {
   providerId?: string;
   model?: string;
-}): void {
+}): { voice: string } {
   const settings: Record<string, string> = {};
   if (cfg.providerId !== undefined) settings.TTS_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.model !== undefined) settings.TTS_PROVIDER_MODEL = cfg.model.trim();
@@ -210,13 +216,11 @@ export function saveTTSProviderConfig(cfg: {
       type: "tts",
     });
   }
-}
-
-/** 把用户填的地址规整成带 /v1 后缀的形式（兼容填不填 /v1 两种写法）。 */
-function normalizeApiBase(base: string): string {
-  let b = base.trim().replace(/\/+$/, "");
-  if (b && !/\/v1$/i.test(b)) b = `${b}/v1`;
-  return b;
+  const effective = ttsVoiceFor({});
+  if (effective !== (getSetting("TTS_VOICE") || "").trim()) {
+    updateSettings({ TTS_VOICE: effective });
+  }
+  return { voice: effective };
 }
 
 /**
@@ -239,7 +243,29 @@ export async function listProviderModels(
 // TTS
 // ---------------------------------------------------------------------------
 
-/** OpenAI 兼容 /v1/audio/speech，返回 mp3 字节（不入库）。 */
+/**
+ * 本次合成实际用的音色：请求体与入库记录共用一份解析结果。
+ *
+ * 分开算的话，「没配过音色 → 按厂商兜底」这条只会作用在请求上，语音历史里仍写着
+ * `alloy`，复盘时看到的音色与真正听到的对不上。
+ */
+function ttsVoiceFor(input: { voice?: string; referenceAudioRef?: string }): string {
+  // 有参考音频时，参考音频即音色来源，不再回退到默认音色。
+  if (input.referenceAudioRef) return (input.voice ?? "").trim();
+  const provider = getTTSProviderConfig();
+  return resolveTtsVoice({
+    requested: input.voice,
+    configured: getSetting("TTS_VOICE"),
+    vendor: audioVendorFor({ providerId: provider.providerId, baseUrl: provider.base || getBaseUrl() }),
+  });
+}
+
+/**
+ * OpenAI 兼容 /v1/audio/speech，返回 mp3 字节（不入库）。
+ *
+ * 请求体本身是标准形状，各家的差别只有音色名（`voice` 是必填，而每家的 id 完全
+ * 不通用）：这里按厂商解析出一个能用的音色，见 `resolveTtsVoice`。
+ */
 async function synthesizeOpenAiAudio(input: {
   text: string;
   voice?: string;
@@ -253,14 +279,12 @@ async function synthesizeOpenAiAudio(input: {
   if (!base) throw new Error("No inference server configured");
 
   const model = input.model?.trim() || provider.model || getSetting("TTS_MODEL") || undefined;
-  const hasRef = !!input.referenceAudioRef;
-  // 有参考音频时，参考音频即音色来源，不再回退到默认 alloy 音色。
-  const voice = input.voice?.trim() || (hasRef ? "" : getSetting("TTS_VOICE") || "alloy");
+  const voice = ttsVoiceFor(input);
   const apiKey = provider.apiKey || getSetting("VLLM_API_KEY");
 
   let referenceAudioB64: string | undefined;
-  if (hasRef) {
-    const abs = resolveAudioPath(input.referenceAudioRef!);
+  if (input.referenceAudioRef) {
+    const abs = resolveAudioPath(input.referenceAudioRef);
     if (!abs || !existsSync(abs)) throw new Error("Reference audio not found");
     referenceAudioB64 = readFileSync(abs).toString("base64");
   }
@@ -317,12 +341,12 @@ export async function runTTS(input: {
   await Bun.write(path.join(dir, name), buf);
 
   const ref = `audio/${name}`;
-  const hasRef = !!input.referenceAudioRef;
   const record = insertVoiceRecord({
     kind: "tts",
     source: input.source,
     model: input.model?.trim() || getSetting("TTS_MODEL") || null,
-    voice: input.voice?.trim() || (hasRef ? "" : getSetting("TTS_VOICE") || "alloy"),
+    // 记实际用的那个音色（可能是按厂商兜底出来的），不要写回原始设置值。
+    voice: ttsVoiceFor(input),
     text: input.text,
     audioPath: ref,
     refAudioPath: input.referenceAudioRef ?? null,

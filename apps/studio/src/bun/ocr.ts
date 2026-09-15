@@ -7,7 +7,7 @@ import { logEvent } from "./app-log";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
 import { getDataDir } from "./paths";
-import { getImagesBaseDir } from "./image-server";
+import { getImagesBaseDir, resolveImageRef } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import { ocrLangEntry, OCR_LANG_CATALOG, OCR_TESSDATA_BRANCH, OCR_TESSDATA_REPO } from "../shared/ocr";
 import { fetchAssetFromSources, githubRawUrls } from "./mirror-download";
@@ -437,10 +437,7 @@ export async function stageOcrImage(paths: string[]): Promise<{ ref: string; url
 
 /** 把 OCR 暂存图片 ref（ocr/in/...）解析为绝对路径（限 images 目录内）。 */
 export function resolveOcrImage(ref: string): string | null {
-  const base = getImagesBaseDir();
-  const resolved = path.resolve(base, ref);
-  if (!resolved.startsWith(base + path.sep)) return null;
-  return existsSync(resolved) ? resolved : null;
+  return resolveImageRef(ref);
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   CopyIcon,
   LanguagesIcon,
   Loader2Icon,
+  NotebookPenIcon,
   RotateCcwIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -35,6 +36,7 @@ import {
   formatDuration,
   useTokenStatsView,
 } from "@components/token-stats";
+import { noteDraftFromMessage } from "@/mainview/lib/note-draft";
 import { persistedErrorMessage, serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 import { chatImageUrl } from "../../../shared/server-info";
@@ -71,6 +73,7 @@ function useMessageActions({
   const queryClient = useQueryClient();
   const streaming = useChatStore((s) => s.streaming);
   const [copied, setCopied] = useState(false);
+  const [noteSaved, setNoteSaved] = useState(false);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -135,6 +138,39 @@ function useMessageActions({
     }
   };
 
+  /**
+   * 一键存进「笔记」小应用：草稿规则在 `lib/note-draft.ts`（与 Agent 页共用）。
+   * 只提示"已保存"，不跳走 —— 用户多半正在读这段回答，把他甩到别的应用是帮倒忙。
+   */
+  const handleSaveToNote = async () => {
+    const draft = noteDraftFromMessage(message.content, t("notes.tagChat"));
+    if (!draft) return;
+    try {
+      const saved = await rpcClient.miniappNotesSave({
+        title: draft.title,
+        body: draft.body,
+        tags: draft.tags,
+        day: draft.day,
+      });
+      setNoteSaved(true);
+      window.setTimeout(() => setNoteSaved(false), 1500);
+      void rpcClient.miniappLog({
+        appId: "chat",
+        event: "note.saved",
+        message: saved?.note ? `note #${saved.note.id}` : "saved",
+        detail: { chars: draft.body.length, tag: draft.tags[0] },
+      });
+    } catch (e) {
+      // 失败不打断阅读（按钮不亮即已说明问题），但必须留下线索：
+      // 这是"点了没反应"里最难查的一类 —— 用户以为存进去了，其实没有。
+      void rpcClient.miniappLog({
+        appId: "chat",
+        event: "note.save_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
   const busy = streaming || isStreamingMessage;
   const actions: MessageActionItem[] = [
     {
@@ -150,6 +186,17 @@ function useMessageActions({
     },
     ...(message.role === "assistant"
       ? [
+          {
+            key: "save-to-note",
+            label: noteSaved ? t("chat.savedToNote") : t("chat.saveToNote"),
+            icon: noteSaved ? (
+              <CheckIcon className="size-3.5 text-emerald-500" />
+            ) : (
+              <NotebookPenIcon className="size-3.5" />
+            ),
+            onSelect: handleSaveToNote,
+            disabled: busy || !message.content,
+          },
           {
             key: "regenerate",
             label: t("chat.regenerate"),

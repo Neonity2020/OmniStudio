@@ -12,6 +12,7 @@ import {
   BoxIcon,
   Link2Icon,
   WaypointsIcon,
+  CloudIcon,
   GithubIcon,
   PlugIcon,
   ShieldIcon,
@@ -43,6 +44,7 @@ import { DashboardScreen } from "../dashboard-screen";
 import { UsageScreen } from "../usage-screen";
 import { ConsoleScreen } from "./console-screen";
 import { ModelDetailScreen } from "../model-detail";
+import { TunnelScreen } from "../tunnel-screen";
 import { ModelsScreen } from "../models-screen";
 import { LocalModelsScreen } from "../local-models";
 import { MarketScreen } from "../market-screen";
@@ -59,6 +61,7 @@ type SettingsTab =
   | "store"
   | "market"
   | "gateway"
+  | "tunnel"
   | "integrations"
   | "logs"
   | "usage"
@@ -80,6 +83,7 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   store: { icon: <BoxIcon className="size-4" />, labelKey: "settings.store" },
   market: { icon: <Link2Icon className="size-4" />, labelKey: "settings.market" },
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
+  tunnel: { icon: <CloudIcon className="size-4" />, labelKey: "settings.tunnel" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
   logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "console.title" },
   usage: { icon: <ChartColumnIcon className="size-4" />, labelKey: "settings.usage.title" },
@@ -104,7 +108,7 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   },
   {
     labelKey: "settings.group.services",
-    tabs: ["gateway", "integrations"],
+    tabs: ["gateway", "tunnel", "integrations"],
   },
   { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "agentcaps", "cli"] },
   { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
@@ -124,6 +128,7 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "backup",
   "general",
   "appearance",
+  "tunnel",
 ];
 
 /** 设置页：一级页面，每个标签页的内容宽度统一由 `PageShell` 决定。 */
@@ -224,6 +229,10 @@ export function SettingsScreen() {
       ) : activeTab === "gateway" ? (
         <div className="min-w-0 flex-1">
           <GatewayScreen />
+        </div>
+      ) : activeTab === "tunnel" ? (
+        <div className="min-w-0 flex-1">
+          <TunnelScreen />
         </div>
       ) : activeTab === "stats" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">

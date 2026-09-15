@@ -45,6 +45,7 @@ const PROVIDER: CloudProviderInfo = {
   models: [],
   enabled: true,
   videoApi: "minimax",
+  musicApi: "",
   createdAt: 0,
   updatedAt: 0,
 };

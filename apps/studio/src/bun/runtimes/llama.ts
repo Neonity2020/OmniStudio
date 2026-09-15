@@ -2,6 +2,7 @@ import type { Subprocess } from "bun";
 import { existsSync } from "fs";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
+import { llamaCppBinaryPath } from "../engine-paths";
 import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
@@ -114,6 +115,10 @@ export class LlamaRuntime implements Runtime {
   }
 
   async checkBinary(): Promise<BinaryCheckResult> {
+    // 托管安装优先（引导页 / 设置里「一键安装」下到 <dataDir>/engines/llama.cpp/current）：
+    // 官方构建、版本可查；用户自己装过的（Homebrew / PATH）仍然照用，不重复下载。
+    const managed = llamaCppBinaryPath();
+    if (existsSync(managed)) return { found: true, path: managed, mode: "managed" };
     for (const p of COMMON_BINARY_PATHS) {
       try {
         const f = Bun.file(p);
@@ -180,7 +185,8 @@ export class LlamaRuntime implements Runtime {
       model = this.resolveModel();
     }
     // 用户终端直接跑原生命令，不带 macOS PTY 包装。
-    const bin = COMMON_BINARY_PATHS.find((p) => existsSync(p)) ?? "llama-server";
+    const bin =
+      [llamaCppBinaryPath(), ...COMMON_BINARY_PATHS].find((p) => existsSync(p)) ?? "llama-server";
     return [bin, ...this.buildArgs(model, this.getProfileServerArgs())].join(" ");
   }
 

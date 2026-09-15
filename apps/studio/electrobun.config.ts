@@ -140,6 +140,13 @@ const copy: Record<string, string> = {
   // 同目录相对路径现编它（首次使用时 cc 一次，产物缓存在数据目录）。
   // 漏了它 → Linux 上永远"没有编译器"降级，Landlock 后端形同不存在。
   "src/bun/omni-landlock.c": "bun/omni-landlock.c",
+  // ONNX Runtime 的 WASM 运行时（本地抠图引擎，见 src/bun/bg-remove.ts）。
+  // 两个文件都要落在 `bun/`：主进程被合成单个 bun/index.js 后 import.meta.dir 就是
+  // 那里，而打包环境里没有 node_modules。glue .mjs 是 ort 在 Node 分支下唯一认的加载
+  // 入口（必须显式喂给 env.wasm.wasmPaths.mjs），.wasm 是 bg-remove 自己读字节传进去的。
+  // 漏掉任一个 → 抠图一打开就报「缺少 ONNX 运行时文件」。
+  "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs": "bun/ort-wasm-simd-threaded.mjs",
+  "node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm": "bun/ort-wasm-simd-threaded.wasm",
   // 提示词库内置素材（scripts/bundle-prompt-library-assets.ts 生成）：
   // 有则打进 webview，作为远程封面加载失败时的离线兜底。
   ...(existsSync("dist/prompt-library")

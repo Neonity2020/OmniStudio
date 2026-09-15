@@ -133,6 +133,7 @@ const CLOUD_PROVIDER = {
   ],
   enabled: true,
   videoApi: "",
+  musicApi: "",
   createdAt: 0,
   updatedAt: 0,
 };

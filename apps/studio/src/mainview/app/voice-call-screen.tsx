@@ -32,7 +32,17 @@ import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 // 只从 shared 取值：bun/realtime-voice.ts 会被主进程的 db / paths 拖进来，
 // 而 webview 里没有 os / fs，值导入它等于整页白屏（常量本身也不再重复一份）。
-import { DEFAULT_REALTIME_MODEL, REALTIME_MODELS, isRealtimeModelId, realtimeBaseUrlForProvider } from "../../shared/realtime-voice";
+import {
+  isRealtimeModelId,
+  realtimeBaseUrl,
+  realtimeBaseUrlForProvider,
+  realtimeDefaultModel,
+  realtimeDefaultVoice,
+  realtimeDialectFor,
+  realtimeModelsFor,
+} from "../../shared/realtime-voice";
+import { audioVendorFor } from "../../shared/tts-voices";
+import { VendorVoiceField } from "@components/vendor-voice-select";
 
 /**
  * 实时语音通话（电话式协作）：
@@ -274,6 +284,12 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
   const saving = saveMutation.isPending;
   const busy = saving || testing;
   const editing = !configured || showForm;
+  /**
+   * 当前方言：地址 + 模型名一起判（用户可能手填了中转地址，模型名仍是 `stepaudio-*`）。
+   * 模型候选与音色默认值都跟着它走 —— 两家的模型名和音色名完全不通用。
+   */
+  const dialect = realtimeDialectFor({ baseUrl, model });
+  const callVendor = audioVendorFor({ providerId, baseUrl });
 
   return (
     <div className="w-full space-y-2.5 rounded-xl border bg-card p-3 text-xs">
@@ -313,81 +329,98 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
             <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudProvider")}</Label>
             {/* 只列已启动的厂商：密钥从它取（启动时校验过），页面不再手填 API Key */}
             <Select
-              value={providerId || undefined}
+              // 始终传字符串（没有厂商时是空串）：`|| undefined` 会让控件在配置到位的那一刻
+              // 从非受控切到受控，React 只会在控制台留一句警告。
+              value={providerId}
               onValueChange={(v) => {
                 setProviderId(v);
                 const p = providerList.find((x) => x.id === v);
-                // 地址跟着厂商走：认得出的厂商（百炼）直接推出实时端点，不再让用户手填
-                // 一个换厂商不会跟着换的 wss 地址。认不出的（自建中转）保持现值。
+                // 地址跟着厂商走：认得出的厂商（百炼 / 阶跃）直接推出实时端点，不再让用户
+                // 手填一个换厂商不会跟着换的 wss 地址。认不出的（自建中转）保持现值。
                 const derived = realtimeBaseUrlForProvider(p?.baseUrl);
                 if (derived) setBaseUrl(derived);
-                // 顺手把该厂商的实时对话模型填上（有的话），省一步选择。
-                const realtime = p?.models.find((m) => m.id === DEFAULT_REALTIME_MODEL);
-                if (realtime) setModel(realtime.id);
+                // 模型与音色也一起跟着换：实时模型与音色名两家完全不通用，留着上一个厂商的
+                // 值只会在连接时报一句上游看不懂的错（`invalid voice` / `model not found`）。
+                const nextDialect = realtimeDialectFor({ baseUrl: derived ?? baseUrl, model: null });
+                // 厂商清单里有实时族的模型就用它，否则用该方言的默认模型。
+                const fromModels = p?.models.map((m) => m.id).find((id) => isRealtimeModelId(id));
+                setModel(fromModels ?? realtimeDefaultModel(nextDialect));
+                setVoice(realtimeDefaultVoice(nextDialect));
               }}
             >
-              <SelectTrigger size="sm" className="h-8 text-xs">
+              <SelectTrigger size="sm" className="h-8 w-full min-w-0 text-xs">
                 <SelectValue placeholder={t("cloud.pick.vendor")} />
               </SelectTrigger>
-              <SelectContent position="popper" align="start" sideOffset={4}>
-                {/* 实时接口是 DashScope 专有的：百炼厂商排前面，其它厂商排在后面
-                    （自建中转同样可用，只是需要用户自己确认是百炼的 Key）。 */}
+              <SelectContent
+                position="popper"
+                sideOffset={6}
+                className="w-[18rem] max-w-[min(18rem,90vw)]"
+              >
+                {/* 认得出的实时厂商（百炼 / 阶跃）排前面，其它厂商排在后面
+                    （自建中转同样可用，只是需要用户自己确认是这两家的 Key）。 */}
                 {providerList
                   .filter((p) => p.enabled)
                   .sort(
                     (a, b) =>
-                      Number(!/dashscope|aliyuncs/i.test(a.baseUrl)) -
-                      Number(!/dashscope|aliyuncs/i.test(b.baseUrl)),
+                      Number(!/dashscope|aliyuncs|stepfun/i.test(a.baseUrl)) -
+                      Number(!/dashscope|aliyuncs|stepfun/i.test(b.baseUrl)),
                   )
                   .map((p) => (
                     <SelectItem key={p.id} value={p.id}>
-                      <span className="truncate">{p.name}</span>
+                      <span className="min-w-0 flex-1 truncate">{p.name}</span>
                     </SelectItem>
                   ))}
               </SelectContent>
             </Select>
             <p className="text-[10px] text-muted-foreground">{t("cloud.where")}</p>
           </div>
-          <div className="grid grid-cols-2 gap-2">
-            <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudModel")}</Label>
-              <Select value={model} onValueChange={setModel}>
-                <SelectTrigger size="sm" className="h-8 text-xs">
-                  <SelectValue placeholder={t("voicecall.cloudModel")} />
-                </SelectTrigger>
-                <SelectContent position="popper" align="start" sideOffset={4}>
-                  {[
-                    ...new Set([
-                      // 厂商清单里只挑实时族 —— 以前把对话 / 生图模型一起列出来，
-                      // 选中后只会在连接时报一句看不懂的错。
-                      ...(selectedProvider?.models.map((m) => m.id).filter(isRealtimeModelId) ?? []),
-                      ...REALTIME_MODELS,
-                    ]),
-                  ].map((m) => (
-                    <SelectItem key={m} value={m}>
-                      <span className="truncate">{m}</span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1">
-              <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudVoice")}</Label>
-              <Input
-                value={voice}
-                onChange={(e) => setVoice(e.target.value)}
-                className="h-8 text-xs"
-                placeholder="longanqian"
-              />
-            </div>
+          {/* 模型 / 音色 / 地址各占一行。
+              这块面板只有 250px 宽，模型 id（`stepaudio-2.5-realtime`）比半栏还长：
+              并排放时 Select 触发器是 w-fit 的，会直接撑破单元格压到隔壁列上 ——
+              与 CloudModelSelect 里记过的是同一条（窄面板里的选择器一律上下排）。 */}
+          <div className="space-y-1">
+            <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudModel")}</Label>
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger size="sm" className="h-8 w-full min-w-0 text-xs">
+                <SelectValue placeholder={t("voicecall.cloudModel")} />
+              </SelectTrigger>
+              <SelectContent
+                position="popper"
+                sideOffset={6}
+                className="w-[22rem] max-w-[min(22rem,90vw)]"
+              >
+                {[
+                  ...new Set([
+                    // 厂商清单里只挑实时族 —— 以前把对话 / 生图模型一起列出来，
+                    // 选中后只会在连接时报一句看不懂的错。
+                    ...(selectedProvider?.models.map((m) => m.id).filter(isRealtimeModelId) ?? []),
+                    // 当前厂商一条实时模型都没有时，给该方言的默认候选（阶跃的
+                    // `stepaudio-3-realtime-preview` 就在这里面），不要混进别家的模型名。
+                    ...realtimeModelsFor(dialect),
+                  ]),
+                ].map((m) => (
+                  <SelectItem key={m} value={m}>
+                    <span className="min-w-0 flex-1 truncate">{m}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
+          <VendorVoiceField
+            vendor={callVendor}
+            value={voice}
+            onChange={setVoice}
+            label={t("voicecall.cloudVoice")}
+            placeholder={realtimeDefaultVoice(dialect)}
+          />
           <div className="space-y-1">
             <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudBaseUrl")}</Label>
             <Input
               value={baseUrl}
               onChange={(e) => setBaseUrl(e.target.value)}
               className="h-8 text-xs"
-              placeholder="wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+              // 占位符跟着厂商走：百炼与阶跃的实时端点不同，写死一个只会误导。
+              placeholder={realtimeBaseUrl(dialect)}
             />
           </div>
           <div className="flex flex-wrap items-center gap-2 pt-1">

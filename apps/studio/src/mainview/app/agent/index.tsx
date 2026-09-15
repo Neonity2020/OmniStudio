@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { rpcClient } from "@lib/rpc";
+import { isRemoteClient } from "@lib/remote";
 import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { AgentSessionSidebar } from "./session-sidebar";
@@ -17,6 +18,12 @@ import { AgentConversation, EmptyAgent } from "./conversation";
 import type { AgentMode } from "../../../bun/agent";
 
 const MODES: AgentMode[] = ["agent", "plan", "goal"];
+
+/**
+ * 网页端（/agent）：同一套界面，但右侧工作面板与"自动化 / 插件"子视图不渲染 ——
+ * 那几个 Tab 是宿主机上的开发工具（终端、内置浏览器、评审），远程既用不上也不该开放。
+ */
+const remote = isRemoteClient();
 
 export function AgentWindow() {
   const activeConversationId = useChatStore((s) => s.activeConversationId);
@@ -134,11 +141,11 @@ export function AgentWindow() {
           onNewTask={createNewTask}
           onOpenSearch={() => useAgentStore.getState().setSearchOpen(true)}
         />
-        <WorkPanelToggle />
+        {!remote && <WorkPanelToggle />}
 
-        {subView === "automations" ? (
+        {!remote && subView === "automations" ? (
           <AgentAutomationsView />
-        ) : subView === "plugins" ? (
+        ) : !remote && subView === "plugins" ? (
           <AgentPluginsView />
         ) : activeConversationId != null ? (
           <AgentConversation
@@ -151,7 +158,9 @@ export function AgentWindow() {
         )}
       </section>
 
-      {activeConversationId != null ? <AgentRightPanel conversationId={activeConversationId} /> : null}
+      {!remote && activeConversationId != null ? (
+        <AgentRightPanel conversationId={activeConversationId} />
+      ) : null}
 
       <AgentSearchDialog
         open={searchOpen}

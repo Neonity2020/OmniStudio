@@ -10,6 +10,10 @@ import type { ImageRecordRow } from "../../../bun/image-gen";
 import type { UILang } from "../../../shared/i18n";
 import { cn } from "@/mainview/lib/utils";
 
+// MLX_FALLBACKS 与 isForeignModel 住在 lib/image-model（纯逻辑 + 有测试）；
+// 这里再导出一次，页面继续从 "./parts" 拿也不会有第二份定义。
+export { MLX_FALLBACKS, isForeignModel } from "@lib/image-model";
+
 export const RATIOS: { label: string; w: number; h: number }[] = [
   { label: "16:9", w: 1024, h: 576 },
   { label: "3:2", w: 1152, h: 768 },
@@ -40,14 +44,6 @@ export const RANDOM_PROMPTS: Record<UILang, string[]> = {
     "minimalist product photography: frosted glass perfume bottle on a marble surface, soft rim light",
   ],
 };
-
-/** MLX 内置模型的默认步数（恢复配置时同步 steps 用；完整目录来自 listMlxGenModels）。 */
-export const MLX_FALLBACKS: { id: string; defaultSteps: number }[] = [
-  { id: "z-image-turbo", defaultSteps: 9 },
-  { id: "flux-schnell", defaultSteps: 4 },
-  { id: "flux2-klein-9b", defaultSteps: 4 },
-  { id: "flux-dev", defaultSteps: 50 },
-];
 
 export function formatTime(ts: number): string {
   return new Date(ts).toLocaleString([], {

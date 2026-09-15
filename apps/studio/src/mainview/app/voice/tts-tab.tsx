@@ -6,7 +6,6 @@ import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError, ResultEmpty } from "@components/media-result";
 import { SegmentedControl } from "@components/segmented-control";
 import { Button } from "@ui/button";
-import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Textarea } from "@ui/textarea";
 import { Badge } from "@ui/badge";
@@ -15,6 +14,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useT } from "@stores/ui-lang";
 import { AUDIOCPP_REPO, AUDIOCPP_LANG_LABELS } from "@/shared/audiocpp";
 import { detectReferenceAudioSupport } from "@/shared/tts-reference-audio";
+import { audioVendorFor } from "@/shared/tts-voices";
+import { VendorVoiceField } from "@components/vendor-voice-select";
 import type { TtsLocalModelInfo } from "../../../bun/tts-local";
 import type { VoiceRecordRow } from "../../../bun/voice";
 import { DEFAULT_VOICE_BASE_URL } from "../voice-provider-presets";
@@ -208,8 +209,11 @@ export function TtsTab() {
         providerId: (choice?.providerId ?? pProviderId).trim(),
         model: (choice?.model ?? model).trim(),
       }),
-    onSuccess: () => {
+    onSuccess: (res) => {
       setPError(undefined);
+      // 换厂商后主进程可能把音色落成新厂商的默认值（alloy → cixingnansheng）：跟着显示，
+      // 否则音色栏写的还是别家的名字。
+      if (res.voice) setVoice(res.voice);
       queryClient.invalidateQueries({ queryKey: ["tts-provider"] });
       queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
@@ -222,6 +226,8 @@ export function TtsTab() {
   // 参考音频能力：跟随自动检测，可被手动开关覆盖。base 用厂商地址（空则回退线上默认）。
   const compatBase = provider?.base || DEFAULT_VOICE_BASE_URL;
   const supportsRef = refOverride ?? detectReferenceAudioSupport(model, compatBase);
+  // 当前厂商：决定音色栏给不给官方音色清单（阶跃等已收录的厂商才有）。
+  const compatVendor = audioVendorFor({ providerId: pProviderId || provider?.providerId, baseUrl: compatBase });
 
   // 换模型 / 换地址时重置手动覆盖，重新跟随自动检测。
   useEffect(() => {
@@ -618,20 +624,15 @@ export function TtsTab() {
                 </div>
               </div>
 
-              {/* 音色（自由输入，适配任意云端模型的音色名） */}
-              <div>
-                <Label htmlFor="tts-voice" className="mb-1 block text-xs">
-                  {t("voice.tts.voice")}
-                </Label>
-                <Input
-                  id="tts-voice"
-                  value={voice}
-                  onChange={(e) => setVoice(e.target.value)}
-                  placeholder={t("voice.tts.voiceNamePlaceholder")}
-                  className="h-8 text-xs"
-                />
-              </div>
-
+              {/* 音色：认得出的厂商给官方音色下拉，认不出的保持自由输入（见 VendorVoiceField） */}
+              <VendorVoiceField
+                vendor={compatVendor}
+                value={voice}
+                onChange={setVoice}
+                label={t("voice.tts.voice")}
+                labelClassName="text-xs"
+                placeholder={t("voice.tts.voiceNamePlaceholder")}
+              />
               {generate.isError && <ResultError error={String(generate.error)} />}
             </>
           )}

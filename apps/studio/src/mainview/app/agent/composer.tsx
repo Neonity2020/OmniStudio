@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { isRemoteClient } from "@lib/remote";
 import { parseWorkspaceRecents, withRecentWorkspace, workspaceLabel } from "@lib/workspace";
 import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
@@ -212,14 +213,17 @@ export function WorkspacePicker({ conversationId }: { conversationId: number }) 
               ) : null}
             </div>
             <div className="pi-menu-sep" />
-            <button type="button" className="pi-menu-item" disabled={browsing} onClick={() => void openFolder()}>
-              {browsing ? (
-                <Loader2Icon size={14} className="animate-spin" aria-hidden style={{ flex: "none" }} />
-              ) : (
-                <FolderOpenIcon size={14} aria-hidden style={{ flex: "none" }} />
-              )}
-              {t("agent.openFolder")}
-            </button>
+            {/* 「浏览…」要开宿主机的目录选择框：网页端没有这条通道，只留上面那份工作区列表。 */}
+            {!isRemoteClient() && (
+              <button type="button" className="pi-menu-item" disabled={browsing} onClick={() => void openFolder()}>
+                {browsing ? (
+                  <Loader2Icon size={14} className="animate-spin" aria-hidden style={{ flex: "none" }} />
+                ) : (
+                  <FolderOpenIcon size={14} aria-hidden style={{ flex: "none" }} />
+                )}
+                {t("agent.openFolder")}
+              </button>
+            )}
             {/* 换目录 = 开新会话，这条不写出来就会被当成"把当前会话搬过去" */}
             <p className="pi-menu-heading">{t("agent.workspaceSwitchHint")}</p>
           </div>
