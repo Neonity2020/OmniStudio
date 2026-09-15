@@ -160,7 +160,7 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 | OPS-01 | 日志查看器：多文件切换 | ❌ | 现为单流视图（`main-layout/server-logs.tsx`，197 行：自动滚动 / 复制 / 清空 / 行数）；server.log 未按天或大小分片 |
 | OPS-02 | 日志查看器：最近 N 条筛选 | ❌ | 显式条数筛选 |
 | OPS-03 | 基准测试：batch × ctx 扫描矩阵 | ❌ | 当前一趟固定 batch，改矩阵扫描 |
-| OPS-04 | 基准测试：准确度 / 质量基准 | ❌ | 除吞吐外的质量维度 |
+| OPS-04 | 基准测试：准确度 / 质量基准 | ✅ | 已实现「能力评测」模式（`bun/eval.ts`，8 套件：mmlu / cmmlu / gsm8k / mmlu_pro / humaneval / mbpp / ifeval / longctx，支持抽样、并发跑题与按类别得分），结果落 `benchmark_records` |
 | OPS-05 | 服务统计：逐模型显存 / VRAM | ❌ | `/slots` 已能拿实际加载模型，但仅 llama-server 支持；其他引擎靠"最近使用即视作 loaded"兜底 |
 | OPS-06 | 服务统计：GPU 温度与显存锁定量 | ❌ | |
 

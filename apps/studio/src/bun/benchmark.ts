@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { benchmarkRecords } from "./db/schema";
 import {
@@ -176,7 +176,7 @@ export type BenchmarkRecordRow = {
   serverMode: string | null;
   engine: string | null;
   params: Record<string, unknown> | null;
-  rows: SpeedBenchRow[] | EvalCategoryRow[];
+  rows: SpeedBenchRow[] | EvalCategoryRow[] | null;
   summary: BenchmarkSummary | null;
   status: "done" | "cancelled" | "error";
   durationMs: number | null;
@@ -1168,6 +1168,29 @@ function parseRecord(r: typeof benchmarkRecords.$inferSelect): BenchmarkRecordRo
   };
 }
 
+/** 列表用的轻量元数据：不带 rows / summary（它们是大 JSON），只用于侧栏与选择器。 */
+function parseRecordMeta(r: typeof benchmarkRecords.$inferSelect): BenchmarkRecordRow {
+  return {
+    id: r.id,
+    kind: r.kind,
+    model: r.model,
+    serverMode: r.serverMode,
+    engine: r.engine,
+    params: null,
+    rows: null,
+    summary: null,
+    status: r.status,
+    durationMs: r.durationMs,
+    error: r.error,
+    createdAt: r.createdAt ?? 0,
+  };
+}
+
+/**
+ * 历史列表（完整正文）。供 CLI / 控制通道使用：它们一次只取前 20 条展示摘要。
+ * 界面侧请用 `listBenchmarkRecordSummaries()` + `getBenchmarkRecord(id)`，
+ * 避免把每条记录的 rows / summary 大 JSON 全量拉进 webview。
+ */
 export function listBenchmarkRecords(): BenchmarkRecordRow[] {
   return db
     .select()
@@ -1175,6 +1198,35 @@ export function listBenchmarkRecords(): BenchmarkRecordRow[] {
     .orderBy(desc(benchmarkRecords.createdAt))
     .all()
     .map(parseRecord);
+}
+
+/**
+ * 历史列表。
+ *
+ * 此前每次打开侧栏都全量取回所有记录（每条都带 rows / summary 两段大 JSON）。
+ * 基准是长跑任务、历史会累积，这里只返回轻量元数据并带上上限与总数，
+ * 选中某条时再用 `getBenchmarkRecord(id)` 取完整正文。
+ */
+export function listBenchmarkRecordSummaries(): { records: BenchmarkRecordRow[]; total: number } {
+  const total =
+    db.select({ n: sql<number>`count(*)` }).from(benchmarkRecords).get()?.n ?? 0;
+  const records = db
+    .select()
+    .from(benchmarkRecords)
+    .orderBy(desc(benchmarkRecords.createdAt))
+    .limit(BENCHMARK_RECORD_LIST_MAX)
+    .all()
+    .map(parseRecordMeta);
+  return { records, total: Number(total) };
+}
+
+/** 历史列表返回的上限（轻量元数据，上限可以放得比完整记录大）。 */
+export const BENCHMARK_RECORD_LIST_MAX = 500;
+
+/** 单条记录的完整内容（含 rows / summary），供结果页回放。 */
+export function getBenchmarkRecord(id: number): BenchmarkRecordRow | null {
+  const row = db.select().from(benchmarkRecords).where(eq(benchmarkRecords.id, id)).get();
+  return row ? parseRecord(row) : null;
 }
 
 export function deleteBenchmarkRecord(id: number): { ok: boolean } {

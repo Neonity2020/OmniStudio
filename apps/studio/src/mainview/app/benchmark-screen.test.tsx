@@ -178,23 +178,11 @@ mock.module("@lib/rpc", () => ({
     }),
     cloudProviderList: async () => ({ providers: [CLOUD_PROVIDER], activeId: null }),
     listBenchmarkRecords: async () => ({
-      records: [
-        {
-          id: 7,
-          kind: "speed",
-          model: MODEL_PATH,
-          serverMode: "local",
-          engine: "mlx",
-          params: null,
-          rows: recordRows,
-          summary: recordSummary,
-          status: "done",
-          durationMs: 1000,
-          error: null,
-          createdAt: Date.now(),
-        },
-      ],
+      total: 1,
+      // 列表只回元数据（rows/summary 为空），正文本着 getBenchmarkRecord 单条拉取。
+      records: [{ ...mockRecord(), rows: null, summary: null }],
     }),
+    getBenchmarkRecord: async () => ({ record: mockRecord() }),
     getEvalSuites: async () => ({ suites: [] }),
     startBenchmark: async (params: unknown) => {
       startCalls.push(params as { contexts?: number[]; cacheModes?: string[]; genLength?: number; batchSize?: number });
@@ -204,6 +192,23 @@ mock.module("@lib/rpc", () => ({
     cancelBenchmark: async () => ({ ok: true }),
   },
 }));
+
+function mockRecord() {
+  return {
+    id: 7,
+    kind: "speed" as const,
+    model: MODEL_PATH,
+    serverMode: "local" as const,
+    engine: "mlx" as const,
+    params: null,
+    rows: recordRows,
+    summary: recordSummary,
+    status: "done" as const,
+    durationMs: 1000,
+    error: null,
+    createdAt: Date.now(),
+  };
+}
 
 const { act, createElement } = await import("react");
 const { createRoot } = await import("react-dom/client");
@@ -227,6 +232,10 @@ async function renderScreen() {
       createElement(QueryClientProvider, { client }, createElement(BenchmarkScreen)),
     );
   });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  // 历史记录现在是「先取元数据、再按需取正文」两跳：多刷一轮让详情查询落地。
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });

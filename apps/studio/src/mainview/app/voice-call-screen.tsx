@@ -237,7 +237,7 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
     // 把用户正在编辑的表单意外收起。是否展开只由用户操作决定。
   }, [cfg]);
   const saveMutation = useMutation({
-    mutationFn: (c: { providerId?: string; apiKey?: string; baseUrl?: string; model?: string; voice?: string }) =>
+    mutationFn: (c: { providerId?: string; baseUrl?: string; model?: string; voice?: string }) =>
       rpcClient.voicecallSaveProviderConfig({ provider: "cloud", ...c }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["voicecall-provider-config"] });

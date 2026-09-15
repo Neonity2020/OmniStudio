@@ -8,6 +8,8 @@ import type { BuiltTool } from "./agent-tools";
 import { getSetting } from "./db/settings";
 import { callEmbeddings, cosine, decodeEmbedding, encodeEmbedding, type EmbeddingConfig } from "./embeddings";
 import { bm25Rank, buildBm25Index, normalizeText, tokenContainment, tokenSet, type Bm25Index } from "./text-search";
+import { containsLikePattern } from "../shared/sql-like";
+import { logEvent } from "./app-log";
 import {
   MEMORY_LIMITS,
   type MemoryCategory,
@@ -428,8 +430,16 @@ async function findDuplicate(content: string, scope: string | null): Promise<Dup
           }
         }
       }
-    } catch {
-      // 嵌入服务不可用：退化为前两级判重
+    } catch (e) {
+      // 嵌入服务不可用：退化为前两级判重。这是“明明存了两条几乎一样的记忆”的根因之一，
+      // 统一日志里要能看见（此前完全静默）。
+      logEvent({
+        level: "warn",
+        source: "memory",
+        event: "memory.dedupe.embed_failed",
+        message: e instanceof Error ? e.message : String(e),
+        detail: { model: cfg.embeddingModel },
+      });
     }
   }
 
@@ -728,6 +738,8 @@ export interface ListOptions {
   status?: MemoryStatus | "all" | "open";
   scope?: string | null | "all";
   limit?: number;
+  /** 只看置顶：服务端过滤，不再依赖「前 N 条里恰好包含置顶」这个脆弱契约。 */
+  pinned?: boolean;
 }
 
 /** 界面 / CLI 列表：同步轻量查询（关键词 LIKE + 排序），不做打分与热度累计。 */
@@ -735,13 +747,15 @@ export function listMemories(opts: ListOptions = {}): MemoryEntry[] {
   const filters = [];
   // 默认口径是 open：已被取代的旧事实不该出现在任何默认视图里，要看得显式要 all。
   const status = opts.status ?? "open";
+  if (opts.pinned) filters.push(eq(memories.pinned, 1));
   if (opts.category) filters.push(eq(memories.category, opts.category));
   if (status !== "all" && status !== "open") filters.push(eq(memories.status, status));
   else if (status === "open") filters.push(ne(memories.status, "superseded"));
   if (opts.scope !== "all" && typeof opts.scope === "string") filters.push(eq(memories.scope, opts.scope));
   if (opts.query?.trim()) {
-    const q = `%${opts.query.trim()}%`;
-    filters.push(or(sql`${memories.content} like ${q}`, sql`${memories.tags} like ${q}`));
+    // 转义 LIKE 通配符：搜「100%」不再命中全库（同提示词广场 / 我的提示词）。
+    const q = containsLikePattern(opts.query.trim());
+    filters.push(or(sql`${memories.content} like ${q} escape '\\'`, sql`${memories.tags} like ${q} escape '\\'`));
   }
   const rows = db
     .select()
@@ -1025,8 +1039,14 @@ export async function runMemoryMaintenance(): Promise<MaintenanceResult> {
   // 6. 补向量（配置了嵌入模型才有意义）
   try {
     result.embedded = await embedMissingMemories();
-  } catch {
-    // 嵌入服务不可用：下次维护再补
+  } catch (e) {
+    // 嵌入服务不可用：下次维护再补。用户只看到统计里 embedded 不涨，日志里要留线索。
+    logEvent({
+      level: "warn",
+      source: "memory",
+      event: "memory.maintain.embed_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
   }
 
   if (result.archived + result.expired > 0) bumpMetric("archived", result.archived + result.expired);

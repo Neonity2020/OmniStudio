@@ -32,6 +32,7 @@ import { splitIntoChunks, splitIntoChunksWithMeta } from "./kb-chunk";
 import { tokenJaccard, tokenSet, tokenize } from "./text-search";
 import { getDataDir } from "./paths";
 import { getSetting } from "./db/settings";
+import { logEvent } from "./app-log";
 import type {
   KbCitation,
   KbDocKind,
@@ -514,19 +515,42 @@ export function deleteDoc(id: number): void {
   notifyKb(doc.kbId, id);
 }
 
-export function listDocs(kbId: number): KbDocView[] {
+export function listDocs(kbId: number): { docs: KbDocView[]; total: number } {
   const jobs = docJobs(kbId);
-  return db
+  const total =
+    db
+      .select({ n: sql<number>`count(*)` })
+      .from(knowledgeDocs)
+      .where(eq(knowledgeDocs.kbId, kbId))
+      .get()?.n ?? 0;
+  const docs = db
     .select()
     .from(knowledgeDocs)
     .where(eq(knowledgeDocs.kbId, kbId))
     .orderBy(desc(knowledgeDocs.updatedAt))
+    .limit(KB_DOC_LIST_MAX)
     .all()
     .map((row) => toDocView(row, jobs.get(row.id) ?? null));
+  return { docs, total: Number(total) };
 }
 
-export function listChunks(docId: number): KbChunkView[] {
-  return db
+/**
+ * 文档列表单次返回上限。
+ *
+ * 目录导入一次可入库 300 文件、多轮可累积到几千条，此前 `listDocs` 全量返回并
+ * 在每次状态推送后重取，条目越多越拖。这里给一个上限并把总数一并返回，
+ * 界面在超过上限时明确提示（不是静默截断）。
+ */
+export const KB_DOC_LIST_MAX = 1000;
+
+export function listChunks(docId: number): { chunks: KbChunkView[]; total: number } {
+  const total =
+    db
+      .select({ n: sql<number>`count(*)` })
+      .from(knowledgeChunks)
+      .where(eq(knowledgeChunks.docId, docId))
+      .get()?.n ?? 0;
+  const chunks = db
     .select({
       id: knowledgeChunks.id,
       seq: knowledgeChunks.seq,
@@ -539,6 +563,7 @@ export function listChunks(docId: number): KbChunkView[] {
     })
     .from(knowledgeChunks)
     .where(eq(knowledgeChunks.docId, docId))
+    .limit(KB_CHUNK_LIST_MAX)
     .all()
     .map((r) => ({
       id: r.id,
@@ -550,7 +575,11 @@ export function listChunks(docId: number): KbChunkView[] {
       charStart: r.charStart,
       charEnd: r.charEnd,
     }));
+  return { chunks, total: Number(total) };
 }
+
+/** 单个文档分块列表的返回上限（与文档列表同理，避免一屏拉回上万条）。 */
+export const KB_CHUNK_LIST_MAX = 2000;
 
 // ---------------------------------------------------------------------------
 // 向量化：补齐缺失向量（走同一个作业队列，避免与自动摄取并发抢同一文档）
@@ -929,7 +958,16 @@ async function recallKb(
       const [queryVec] = await callEmbeddings(cfg, [query]);
       if (queryVec) vectorRank = index.vectorRank(queryVec, CANDIDATE_POOL);
     } catch (e) {
-      notes.push(`向量检索失败（${e instanceof Error ? e.message : String(e)}），已退化为关键词检索`);
+      const message = e instanceof Error ? e.message : String(e);
+      notes.push(`向量检索失败（${message}），已退化为关键词检索`);
+      // 检索会默默退化成关键词：界面上的 notes 会显示，但统计/排障需要统一日志。
+      logEvent({
+        level: "warn",
+        source: "kb",
+        event: "kb.retrieve.vector_failed",
+        message,
+        detail: { kbId: kb.id, model: kb.embeddingModel },
+      });
     }
   }
 
@@ -963,7 +1001,15 @@ async function recallKb(
         notes.push("重排服务未返回有效结果，已沿用融合排序");
       }
     } catch (e) {
-      notes.push(`重排失败（${e instanceof Error ? e.message : String(e)}），已沿用融合排序`);
+      const message = e instanceof Error ? e.message : String(e);
+      notes.push(`重排失败（${message}），已沿用融合排序`);
+      logEvent({
+        level: "warn",
+        source: "kb",
+        event: "kb.rerank.failed",
+        message,
+        detail: { kbId: kb.id, model: kb.rerankModel },
+      });
     }
   }
   if (rerankApplied && finalOrder.length === 0) return { hits: [], notes };

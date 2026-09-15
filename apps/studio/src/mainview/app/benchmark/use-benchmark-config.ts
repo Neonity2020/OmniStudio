@@ -73,6 +73,16 @@ export function useBenchmarkConfig() {
   }, [runStatus]);
 
   const records = recordsQuery.data?.records ?? [];
+
+  // 历史列表只带轻量元数据（id / model / status…），结果页要回放 rows + summary，
+  // 因此只针对「当前要展示的那一条」取完整正文，而不是把全部记录的大 JSON 拉一遍。
+  const detailId = run ? null : (selectedRecordId ?? records[0]?.id ?? null);
+  const recordDetailQuery = useQuery({
+    queryKey: ["benchmark-record", detailId],
+    queryFn: () => rpcClient.getBenchmarkRecord({ id: detailId! }),
+    enabled: detailId != null,
+  });
+  const recordDetail = recordDetailQuery.data?.record ?? null;
   // 测速 / 评测跑的是 LLM：本机模型的嵌入 / 语音 / 生图条目不进候选。
   const modelOptions = useMemo(
     () =>
@@ -162,7 +172,8 @@ export function useBenchmarkConfig() {
 
   const display: DisplayResult | null = useMemo(() => {
     if (selectedRecordId != null) {
-      const rec = records.find((r) => r.id === selectedRecordId);
+      // 元数据来自轻量列表，正文（rows/summary/params）来自按需拉取的完整记录。
+      const rec = recordDetail?.id === selectedRecordId ? recordDetail : records.find((r) => r.id === selectedRecordId);
       if (rec) {
         return {
           source: "record",
@@ -172,8 +183,8 @@ export function useBenchmarkConfig() {
           engine: rec.engine,
           serverMode: rec.serverMode ?? "local",
           status: rec.status,
-          rows: rec.kind === "speed" ? (rec.rows as SpeedBenchRow[]) : [],
-          evalRows: rec.kind === "eval" ? (rec.rows as EvalCategoryRow[]) : undefined,
+          rows: rec.kind === "speed" ? ((rec.rows ?? []) as SpeedBenchRow[]) : [],
+          evalRows: rec.kind === "eval" ? ((rec.rows ?? []) as EvalCategoryRow[]) : undefined,
           summary: rec.summary,
           params: rec.params,
           createdAt: rec.createdAt,
@@ -201,7 +212,8 @@ export function useBenchmarkConfig() {
         progress: run.progress,
       };
     }
-    const latest = records[0];
+    const latestMeta = records[0];
+    const latest = recordDetail?.id === latestMeta?.id ? recordDetail : latestMeta;
     if (latest) {
       return {
         source: "record",
@@ -210,8 +222,8 @@ export function useBenchmarkConfig() {
         engine: latest.engine,
         serverMode: latest.serverMode ?? "local",
         status: latest.status,
-        rows: latest.kind === "speed" ? (latest.rows as SpeedBenchRow[]) : [],
-        evalRows: latest.kind === "eval" ? (latest.rows as EvalCategoryRow[]) : undefined,
+        rows: latest.kind === "speed" ? ((latest.rows ?? []) as SpeedBenchRow[]) : [],
+        evalRows: latest.kind === "eval" ? ((latest.rows ?? []) as EvalCategoryRow[]) : undefined,
         summary: latest.summary,
         params: latest.params,
         createdAt: latest.createdAt,
@@ -220,7 +232,7 @@ export function useBenchmarkConfig() {
       };
     }
     return null;
-  }, [records, run, selectedRecordId]);
+  }, [records, recordDetail, run, selectedRecordId]);
 
   const isRunning = run?.status === "running";
   const maxTps = Math.max(...(display?.rows ?? []).map((r) => r.tps), 0.0001);

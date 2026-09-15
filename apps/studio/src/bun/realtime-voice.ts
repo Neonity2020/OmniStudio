@@ -87,7 +87,6 @@ export function getRealtimeProviderConfig(): RealtimeProviderConfig {
 export function saveRealtimeProviderConfig(cfg: {
   provider?: VoiceCallProvider;
   providerId?: string;
-  apiKey?: string;
   baseUrl?: string;
   model?: string;
   voice?: string;
@@ -95,7 +94,6 @@ export function saveRealtimeProviderConfig(cfg: {
   const settings: Record<string, string> = {};
   if (cfg.provider !== undefined) settings.VOICE_CALL_PROVIDER = cfg.provider;
   if (cfg.providerId !== undefined) settings.VOICE_CALL_REALTIME_PROVIDER_ID = cfg.providerId.trim();
-  if (cfg.apiKey !== undefined) settings.VOICE_CALL_REALTIME_API_KEY = cfg.apiKey.trim();
   if (cfg.baseUrl !== undefined) settings.VOICE_CALL_REALTIME_BASE_URL = cfg.baseUrl.trim();
   if (cfg.model !== undefined) settings.VOICE_CALL_REALTIME_MODEL = cfg.model.trim();
   if (cfg.voice !== undefined) settings.VOICE_CALL_REALTIME_VOICE = cfg.voice.trim();
@@ -495,11 +493,11 @@ export type RealtimeTestResult = {
  * key 无效时直接回非 101 状态码、进 onclose）。测试完立即关闭连接。
  */
 export function testRealtimeConnection(
-  cfg?: Partial<Pick<RealtimeProviderConfig, "apiKey" | "baseUrl" | "model">>,
+  cfg?: Partial<Pick<RealtimeProviderConfig, "baseUrl" | "model">>,
 ): Promise<RealtimeTestResult> {
   return new Promise((resolve) => {
     const current = getRealtimeProviderConfig();
-    const apiKey = (cfg?.apiKey ?? current.apiKey).trim();
+    const apiKey = current.apiKey.trim();
     const baseUrl = (cfg?.baseUrl ?? current.baseUrl).trim() || DEFAULT_REALTIME_BASE_URL;
     const model = (cfg?.model ?? current.model).trim() || DEFAULT_REALTIME_MODEL;
     if (!apiKey) {

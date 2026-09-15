@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { BrainIcon, PlusIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
@@ -23,17 +23,25 @@ export function MemoryListCard() {
   const [editing, setEditing] = useState<MemoryEntry | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
 
+  // 输入防抖：命中路径是排序检索（RPC memoryList），每次按键都发一遍会把
+  // 本地模型/检索压满（同提示词 300ms、技能市场 450ms）。
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [query]);
+
   const { data } = useQuery({
-    queryKey: ["memories", query, category, status],
+    queryKey: ["memories", debouncedQuery, category, status],
     queryFn: () =>
       rpcClient.memoryList({
-        query: query.trim() || undefined,
+        query: debouncedQuery || undefined,
         category: category === "all" || category === "pinned" ? undefined : (category as MemoryCategory),
         status: status as MemoryStatus | "open" | "all",
+        pinned: category === "pinned" || undefined,
       }),
   });
-  let memories = data?.memories ?? [];
-  if (category === "pinned") memories = memories.filter((m) => m.pinned);
+  const memories = data?.memories ?? [];
 
   return (
     <>

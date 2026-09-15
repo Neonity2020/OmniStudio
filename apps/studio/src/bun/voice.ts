@@ -244,19 +244,19 @@ async function synthesizeOpenAiAudio(input: {
   text: string;
   voice?: string;
   model?: string;
-  base?: string;
-  apiKey?: string;
   referenceAudioRef?: string;
 }): Promise<Buffer> {
   const provider = getTTSProviderConfig();
-  const base = input.base?.trim() || provider.base || getBaseUrl();
+  // 地址 / 密钥只从服务商行（或全局设置）解析：不接受调用方覆盖，
+  // 否则 webview 传一个 base 就能把音频发到任意地址。
+  const base = provider.base || getBaseUrl();
   if (!base) throw new Error("No inference server configured");
 
   const model = input.model?.trim() || provider.model || getSetting("TTS_MODEL") || undefined;
   const hasRef = !!input.referenceAudioRef;
   // 有参考音频时，参考音频即音色来源，不再回退到默认 alloy 音色。
   const voice = input.voice?.trim() || (hasRef ? "" : getSetting("TTS_VOICE") || "alloy");
-  const apiKey = input.apiKey?.trim() || provider.apiKey || getSetting("VLLM_API_KEY");
+  const apiKey = provider.apiKey || getSetting("VLLM_API_KEY");
 
   let referenceAudioB64: string | undefined;
   if (hasRef) {
@@ -307,8 +307,6 @@ export async function runTTS(input: {
   text: string;
   voice?: string;
   model?: string;
-  base?: string;
-  apiKey?: string;
   referenceAudioRef?: string;
   source?: MediaSource;
 }): Promise<VoiceRecordRow> {

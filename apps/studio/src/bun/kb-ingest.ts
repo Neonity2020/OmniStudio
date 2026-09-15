@@ -29,6 +29,7 @@ import { callEmbeddings, decodeEmbedding, encodeEmbedding, type EmbeddingConfig 
 import { chunkContentHash, contextText, splitIntoChunksWithMeta } from "./kb-chunk";
 import { peekKbIndex } from "./kb-index";
 import { recordKbEvent } from "./kb-events";
+import { logEvent } from "./app-log";
 import { getSetting, getActiveServerPort } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
 import { convertFileToImages, generate, type ModelEndpoint } from "./vllm";
@@ -526,11 +527,27 @@ async function runJob(job: typeof kbIngestJobs.$inferSelect): Promise<void> {
         action: "doc_failed",
         detail: { attempts: job.attempts, error: message },
       });
+      // kb_events 只在知识库自己的治理页可见；统一日志里也要有一条，
+      // 否则「文档一直 processing / 最终 failed」在 `omi logs` 里查不到原因。
+      logEvent({
+        level: "error",
+        source: "kb",
+        event: "kb.ingest.failed",
+        message,
+        detail: { kbId: job.kbId, docId: job.docId, kind: job.kind, attempts: job.attempts },
+      });
     } else {
       db.update(kbIngestJobs)
         .set({ state: "queued", lastError: message, nextRunAt: Date.now() + backoffMs(job.attempts), lockedAt: null })
         .where(eq(kbIngestJobs.id, job.id))
         .run();
+      logEvent({
+        level: "warn",
+        source: "kb",
+        event: "kb.ingest.retry",
+        message,
+        detail: { kbId: job.kbId, docId: job.docId, kind: job.kind, attempts: job.attempts, maxAttempts: job.maxAttempts },
+      });
     }
   }
 }

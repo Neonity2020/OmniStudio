@@ -100,6 +100,15 @@ AGENTS.md 的原话是「A failure path without a `logEvent` call is a bug: the 
 > 注：这些子系统各自有降级记录（`kb_events` 表、`memory_events` 表、`skill_audit_log` 表），
 > 但它们不在统一日志视图里，排障时不会出现在同一条时间线上。
 
+**本轮后的状态**：`kb` / `memory` / `skills`（本轮补齐）、`chat` / `translate` / `benchmark`（此前各菜单轮次）均已接线；
+仅剩 `mcp` / `backup` / `automation` / `update` / `cli` 等低频通道待核。
+
+**C 的收口进度**：`voicecallSaveProviderConfig` / `voicecallTestRealtime` 已从契约与实现里删除 `apiKey`
+（密钥只在主进程按 `providerId` 解析）；生图 / 视频 / TTS / ASR / 翻译各页此前已走厂商行。
+仍待处理：KB 嵌入 / 重排模型改用 `CloudModelSelect`（需把 KB 表的 base/key 迁成 `providerId`）、
+通话页的 WebSocket 地址手填与模型下拉未按 `CloudModelEntry.type` 过滤（通话模型是固定实时清单，
+与通用 type 不完全对应，暂留）。
+
 ### B. 推送节流只覆盖了一半
 
 AGENTS.md 规定「chat 40ms、download progress 400ms、logs 80ms」，理由是每个事件都会重渲染 webview。
@@ -113,7 +122,8 @@ AGENTS.md 规定「chat 40ms、download progress 400ms、logs 80ms」，理由�
 | Tesseract 安装日志 | `rpc/index.ts:5421-5428` ← `ocr.ts:201-207` | 每条 stdout 直推 |
 | MLX 生图权重下载进度 | `rpc/index.ts:5382-5385` ← `mlx-gen.ts:563-603` | 每个 tqdm 行直推 |
 | MLX 安装日志 | `rpc/index.ts:5373-5377` | 每条 stdout 直推 |
-| 通话音频 / 字幕增量 | `rpc/index.ts:5300-5318` | 每个事件直推 |
+| 通话字幕增量 | `rpc/index.ts:5486` 起 | ✅ 本轮按 60ms `throttleLatest` 合并，终态前 flush |
+| 通话音频分片 | 同上 | 保留直推：追加到播放队列，合并会丢音频（与进度条语义相反） |
 
 ### C. `CloudModelSelect + providersForType` 这套约定没落地完整
 
@@ -485,17 +495,24 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 
 ### 问题清单
 
-- [ ] **[P1] 广场图片绕过统一代理** — `prompt-library.ts:28-34/52-98` 产出第三方 CDN 直链，
+- [x] **[P1] 广场图片绕过统一代理** — `prompt-library.ts:28-34/52-98` 产出第三方 CDN 直链，
   webview 直接 `<img src>` 加载（`prompt-screen.tsx:142-171`），不经过 `bun/proxy.ts` 包装的
   `globalThis.fetch`。只有兜底的 `ensurePromptMedia`（`:358-377`）走主进程。
   代理模式下广场图必然先失败再走兜底，首屏延迟被放大。
-- [ ] **[P1] 失败路径无 logEvent** — 整个 prompt-library/user-prompt 无 app-log 引用；
+- [x] **[P1] 失败路径无 logEvent** — 整个 prompt-library/user-prompt 无 app-log 引用；
   seed 失败仅 `console.warn`（`:203-205`）、下载失败静默 `return false`（`:375`）。
-- [ ] **[P2] i18n 缺口** — 来源筛选标签（`prompt-screen.tsx:59-74`）与三段分类简介（`:76-80`）直接渲染中文。
-- [ ] **[P2] 搜索 LIKE 未转义** — `prompt-library.ts:286-289`、`user-prompt.ts:124-127`：输入 `%` 命中全库。
-- [ ] **[P2] 前后端分页常量不一致** — 前端 `PAGE_SIZE=40`（`prompt-screen.tsx:82`），后端默认 60
+- [x] **[P2] i18n 缺口** — 来源筛选标签（`prompt-screen.tsx:59-74`）与三段分类简介（`:76-80`）直接渲染中文。
+- [x] **[P2] 搜索 LIKE 未转义** — `prompt-library.ts:286-289`、`user-prompt.ts:124-127`：输入 `%` 命中全库。
+- [x] **[P2] 前后端分页常量不一致** — 前端 `PAGE_SIZE=40`（`prompt-screen.tsx:82`），后端默认 60
   （`prompt-library.ts:257`）。仅因前端每次显式传 limit 才不出错。
-- [ ] **[P2] `deleteMyPrompt` 恒返回成功且不校验 id** — `user-prompt.ts:239-242`。
+- [x] **[P2] `deleteMyPrompt` 恒返回成功且不校验 id** — `user-prompt.ts:239-242`。
+
+---
+
+**本轮核对（工作区已修，无需改动）**：`prompt-library.ts` 已用 `mediaUrl()` 把广场图收敛到本地媒体代理；
+种子/媒体下载失败接 `logEvent`；`app/prompt/constants.tsx` 的来源与分类已带 `labelKey`；
+`shared/sql-like.ts` 的 `containsLikePattern` 应用于提示词广场与我的提示词；分页常量统一为 `PROMPT_PAGE_SIZE=40`；
+`deleteMyPrompt` 校验 id 并在不存在时返回 `{ok:false}`。
 
 ---
 
@@ -508,21 +525,28 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 
 ### 问题清单
 
-- [ ] **[P1] 用户可写任意路径进入「删除目标」链路** — `setCustomToolPath`/`addCustomTool` 原样存绝对路径
+- [x] **[P1] 用户可写任意路径进入「删除目标」链路** — `setCustomToolPath`/`addCustomTool` 原样存绝对路径
   （`store.ts:70-86`），`resolveAdapters` 直接 resolve（`:94-120`），UI 是纯文本框（`tools-tab.tsx:189-194`）；
   同步/覆盖时 `deploySkillDir` 会对 `join(adapterSkillsPath(adapter), skillId)` 执行 `rmSync(recursive)`
   （`sync-engine.ts:90-97/146-163`）。对照 AGENTS.md「anything that resolves a user-supplied path must validate it
   against the data directory」。`isOmniDataPath` 目前只被 agent-sandbox/agent-tools 使用。
-- [ ] **[P1] 整个 Skills 子系统几乎零 logEvent** — `skills/` 目录下仅 `builtin-skills.ts` 有（5 处）；
+- [x] **[P1] 整个 Skills 子系统几乎零 logEvent** — `skills/` 目录下仅 `builtin-skills.ts` 有（5 处）；
   `installer.ts:285-288` 市场 clone 失败只回字符串、`skillssh.ts:93/96/109` HTTP 失败直接 throw、
   `central-repo.ts:81-83/158/220-222` 全是空 catch、`git-backup.ts:161-203` 只回 `{ok:false,error}`。
-- [ ] **[P2] `skillsOpenFolder` 非 central 分支直接打开任意路径** — `rpc/index.ts:4879-4894`。
-- [ ] **[P2] 死 RPC + 误导性 UI** — `skillsGetCentralInfo`/`skillsSetCentralPath`/`skillsReindex`
+- [x] **[P2] `skillsOpenFolder` 非 central 分支直接打开任意路径** — `rpc/index.ts:4879-4894`。
+- [x] **[P2] 死 RPC + 误导性 UI** — `skillsGetCentralInfo`/`skillsSetCentralPath`/`skillsReindex`
   有契约与实现（`rpc/index.ts:2017-2030/4682-4691`）但前端无调用；侧栏 tooltip 写「中央技能库路径」
   而内容是「N 技能 · M 工具」（`skills/sidebar.tsx:52-59`）。
 - [ ] **[P2] zip/.skill 导入未逐条目校验路径** — 注释声称防 Zip-Slip（`installer.ts:418-441`），
   实际解包后只 `findSkillRoot`，依赖系统 `unzip` 的行为。
 - [ ] **[P2] 市场搜索固定 60 条无分页** — `market-tab.tsx:128`；我的技能是客户端全量过滤（`:111-127`）。
+
+---
+
+**本轮修复**：删掉前端零调用的 `skillsGetCentralInfo` / `skillsSetCentralPath` / `skillsReindex`（契约 + 实现）；
+`skillsOpenFolder` 去掉任意 `path` 参数，只允许打开中央库里的技能目录；侧栏 tooltip 由误导性的「中央技能库路径」改为描述数量的 `skills.centralSummary`。
+`installLocal` 的 zip/.skill 路径已在解压前用 `isSafeArchiveEntry` 逐条目校验（`bun/skills/installer.ts`）。
+市场搜索的固定上限来自上游 skills.sh API（只支持 limit、无游标），属上游限制，保留。
 
 ---
 
@@ -535,14 +559,21 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 
 ### 问题清单
 
-- [ ] **[P1] 摄取/向量失败不进 app.log** — `kb-ingest.ts:510-528` 只写 `kb_ingest_jobs.lastError` +
+- [x] **[P1] 摄取/向量失败不进 app.log** — `kb-ingest.ts:510-528` 只写 `kb_ingest_jobs.lastError` +
   `kb_events.doc_failed`，`pump()` 外层还 `catch(() => {})`（`:557`）；`knowledge.ts` 全目录无 logEvent。
-- [ ] **[P2] 文档/分块列表无上限无分页** — `listDocs`（`knowledge.ts:517-526`）、`listChunks`（`:528-553`）
+- [x] **[P2] 文档/分块列表无上限无分页** — `listDocs`（`knowledge.ts:517-526`）、`listChunks`（`:528-553`）
   全量返回，docs-tab 直接 `docs.map`。KB 是唯一完全没有上限的文档列表（目录导入单次 300 文件、可累积）。
-- [ ] **[P2] 导入操作无结果反馈** — `kbAddFiles` 对不存在路径直接 `continue`（`knowledge.ts:356`）；
+- [x] **[P2] 导入操作无结果反馈** — `kbAddFiles` 对不存在路径直接 `continue`（`knowledge.ts:356`）；
   `kbAddFolder` 的 `skipped` 前端丢弃（`docs-tab.tsx:339`）；四个 mutation 都无 `onError`（`:318-361`）。
 - [ ] **[P2] KB 云模型选择绕开 cloud_providers** — 候选来自扁平设置 `CLOUD_MODELS`
   （`knowledge.ts:641-657`），页面手填 base/key（`kb/settings-tab.tsx:391-404`）。见跨菜单 C。
+
+---
+
+**本轮修复**：摄取 `runJob` 失败/重试接 `kb.ingest.failed` / `kb.ingest.retry`；向量检索退化接
+`kb.retrieve.vector_failed`、重排失败接 `kb.rerank.failed`；文档导入四个 mutation 补齐 `onError` 与
+「已添加 / 跳过 / 未匹配到文件」反馈（新增 4 条 i18n）；`listDocs`/`listChunks` 加上限并回传 `total`，
+界面在截断时明确提示（新增 2 条 i18n）。剩 KB 云模型选择归跨菜单 C。
 
 ---
 
@@ -555,13 +586,25 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 
 ### 问题清单
 
-- [ ] **[P1] 向量化失败静默无日志** — 判重嵌入 `catch {}`（`memory.ts:431-433`）、维护补向量 `catch {}`
+- [x] **[P1] 向量化失败静默无日志** — 判重嵌入 `catch {}`（`memory.ts:431-433`）、维护补向量 `catch {}`
   （`:1026-1030`）、事件/指标写入 `catch {}`（`:198-209/212-221`）；`memory.ts` 无 logEvent。
   用户只看到统计里 embedded 不涨，`omi logs` 无线索。
-- [ ] **[P2] 搜索无防抖** — `memory-tab.tsx:684-692` 每次按键发一次 `memoryList`，命中路径是排序检索
+- [x] **[P2] 搜索无防抖** — `memory-tab.tsx:684-692` 每次按键发一次 `memoryList`，命中路径是排序检索
   （`rpc/index.ts:3697-3712`）。对照 prompt 300ms、skills 市场 450ms。
-- [ ] **[P2] 「置顶」过滤在客户端做** — `memory-tab.tsx:694`，叠加默认 limit 500（`memory.ts:751`）时
+- [x] **[P2] 「置顶」过滤在客户端做** — `memory-tab.tsx:694`，叠加默认 limit 500（`memory.ts:751`）时
   语义是「前 500 条里的置顶」；当前排序恰好置顶优先所以不误伤，但契约脆弱。
+
+---
+
+**本轮修复**：判重嵌入与维护补向量的空 catch 接 `memory.dedupe.embed_failed` / `memory.maintain.embed_failed`（warn）；
+搜索框 300ms 防抖（同提示词）；`memoryList` 新增 `pinned` 参数并在服务端过滤，关键词改为 `containsLikePattern` 转义。
+
+---
+
+**本轮修复**：`listBenchmarkRecords()` 恢复完整正文（CLI / 控制通道一次只取前 20 条展示摘要），
+新增 `listBenchmarkRecordSummaries()`（轻量元数据 + `total`，上限 500）与 `getBenchmarkRecord(id)`；
+界面侧列表只取元数据、结果页按需单条拉正文；`readJsonl` 逐行容错并接 `eval.dataset.bad_lines`；
+`ROADMAP.md` OPS-04 修正为 ✅。评测数据集仍整文件读入（各套件 < 10MB，抽样需要全量做按类别采样），记为已知取舍。
 
 ---
 
@@ -581,11 +624,11 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
   `benchmark.run.finished` / `benchmark.run.failed` / `benchmark.bucket.failed`(warn)，detail 里带
   档位、缓存场景、超窗早停原因；omni-doctor 的 `reference/logs.md` 来源表同步。
   `eval.ts` 的题库下载失败仍只在 run 级事件里体现，没有单独一条。
-- [ ] **[P2] 历史记录无上限** — `listBenchmarkRecords()` 全量返回且每条带 `rows`/`summary` JSON
+- [x] **[P2] 历史记录无上限** — `listBenchmarkRecords()` 全量返回且每条带 `rows`/`summary` JSON
   （`benchmark.ts:842-849`），侧栏每次打开全量拉取（`app-sidebar.tsx:347-351` 与 `benchmark-screen.tsx:101-104`
   各一个 query）。
-- [ ] **[P2] 评测数据集整文件读入内存** — `eval.ts:148-158`。
-- [ ] **[P2] ROADMAP 漂移** — `ROADMAP.md:163` 记 OPS-04「准确度/质量基准 ❌」，实际已有 eval 模式与 8 个套件。
+- [x] **[P2] 评测数据集整文件读入内存** — `eval.ts:148-158`。
+- [x] **[P2] ROADMAP 漂移** — `ROADMAP.md:163` 记 OPS-04「准确度/质量基准 ❌」，实际已有 eval 模式与 8 个套件。
 
 ---
 
@@ -613,10 +656,15 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 | 第 0 项 验证层 | ✅ | 全量 1213 用例 / 0 失败；两道新护栏（helper 契约 + mock 卫生扫描） |
 | 1 Chat | ✅ | `chat.test.ts` 15 条、`use-server-message-sync.test.tsx` 3 条、`stores/chat.test.ts` 18 条 |
 | 2 Agent | ✅ | `agent-history.test.ts` 18 条（含 planRegenerate 5 条）、`chunk-flusher.test.ts` 6 条；typecheck + lint + 全量绿 |
-| 3 Voice Call | 🟡 | 5/6 项完成；剩「音频/字幕推送无节流」一条（见跨菜单 B） |
-| 4 Voice | 🟡 | 4/6 项完成；剩两条属跨菜单 C 的凭据收口 |
+| 3 Voice Call | ✅ | 增量字幕按 60ms 合并（定稿/阶段/打断/报错前 flush）；TTS 音频分片刻意不节流（追加队列，合并会丢音频），已在代码注释说明 |
+| 4 Voice | ✅ | `getTTS/ASRProviderConfig` 不再回传 apiKey；`runTTS` 去掉页面传 `base`/`apiKey` 的覆盖口（地址密钥只从服务商行解析） |
 | 5 Image | ✅ | `image-gen.test.ts` 新增 1 条（密钥来源）、`install-log.test.ts` 3 条（终态行判定，含"重试行不算终态"）；typecheck + lint + 全量 1255 / 0 失败 |
 | 6 Video | ✅ | `video-gen.test.ts` 新增 2 条（ComfyUI 地址绑定 / 旧记录回落）、`use-video-polling.test.tsx` 2 条；迁移 0032；全量 1270 / 0 失败（连跑两遍） |
 | 7 OCR | ✅ | `dialog-paths.test.ts` 4 条；typecheck + lint + 全量 1274 / 0 失败（连跑 4 遍） |
 | 8 Translate | ✅ | `live-translate-queue.test.ts` 6 条；typecheck + lint + 全量 1280 / 0 失败（剩一条自建选择器归跨菜单 C） |
-| 9-13 + 设置页 | ⏳ | 逐菜单推进中 |
+| 9 Prompt | ✅ | 广场图走统一代理、失败路径 logEvent、i18n、LIKE 转义、分页常量共享、删除校验（工作区已完成，本轮核对确认） |
+| 10 Skills | ✅ | path-safety 收口、5 个文件接 logEvent、删掉 3 个死 RPC、`skillsOpenFolder` 只允许中央库路径；市场搜索受上游 skills.sh API 限制（无游标）保留固定上限 |
+| 11 KB | ✅ | 摄取/检索/重排失败接 logEvent、导入结果与错误有界面反馈、docs/chunks 列表加上限并回传总数（截断有提示）。剩「KB 云模型选择走 cloud_providers」归跨菜单 C（需改 KB 表结构） |
+| 12 Memory | ✅ | 判重/维护补向量失败接 logEvent、搜索 300ms 防抖、置顶改服务端过滤 + LIKE 转义 |
+| 13 Benchmark | ✅ | 历史列表改轻量元数据 + 单条 `getBenchmarkRecord` 取正文、eval 逐行解析并容忍坏行、ROADMAP OPS-04 状态修正 |
+| 设置页 19 标签 | ⏳ | 最后处理 |

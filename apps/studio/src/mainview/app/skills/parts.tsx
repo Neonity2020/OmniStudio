@@ -341,7 +341,7 @@ export function SkillCard({
           <button
             type="button"
             title={t("skills.openFolder")}
-            onClick={() => rpcClient.skillsOpenFolder({ path: "central", skillId: skill.id })}
+            onClick={() => rpcClient.skillsOpenFolder({ skillId: skill.id })}
             className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           >
             <FolderOpenIcon className="size-3.5" />

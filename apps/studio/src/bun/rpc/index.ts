@@ -173,7 +173,8 @@ import {
   startBenchmark,
   getBenchmarkRun,
   cancelBenchmark,
-  listBenchmarkRecords,
+  listBenchmarkRecordSummaries,
+  getBenchmarkRecord,
   deleteBenchmarkRecord,
   clearBenchmarkRecords,
   type BenchmarkParams,
@@ -233,7 +234,6 @@ import type {
 } from "../../shared/skills";
 import type { BackupStatus as SkillsBackupStatus } from "../skills/git-backup";
 import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/installer";
-import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
 import * as Knowledge from "../knowledge";
 import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
 import * as Backup from "../backup";
@@ -1387,6 +1387,7 @@ export type AppRPC = {
               category?: MemoryCategory;
               status?: MemoryStatus | "all" | "open";
               limit?: number;
+              pinned?: boolean;
             }
           | undefined;
         response: { memories: MemoryEntry[] };
@@ -1496,7 +1497,6 @@ export type AppRPC = {
           provider?: "local" | "cloud";
           /** 选中的云厂商：API Key 从厂商行取（页面不再手填）。 */
           providerId?: string;
-          apiKey?: string;
           baseUrl?: string;
           model?: string;
           voice?: string;
@@ -1509,7 +1509,6 @@ export type AppRPC = {
       };
       voicecallTestRealtime: {
         params: {
-          apiKey?: string;
           baseUrl?: string;
           model?: string;
           voice?: string;
@@ -1646,7 +1645,11 @@ export type AppRPC = {
       };
       listBenchmarkRecords: {
         params: undefined;
-        response: { records: BenchmarkRecordRow[] };
+        response: { records: BenchmarkRecordRow[]; total: number };
+      };
+      getBenchmarkRecord: {
+        params: { id: number };
+        response: { record: BenchmarkRecordRow | null };
       };
       deleteBenchmarkRecord: {
         params: { id: number };
@@ -1679,7 +1682,6 @@ export type AppRPC = {
           text: string;
           voice?: string;
           model?: string;
-          base?: string;
           referenceAudioRef?: string;
         };
         response: { record: VoiceRecordRow };
@@ -1723,8 +1725,9 @@ export type AppRPC = {
       };
       getTTSProviderConfig: {
         params: undefined;
+        // 不回 apiKey：页面只需要厂商 id / 地址 / 模型，密钥留在主进程（由服务商行解析）。
         response: {
-          config: { providerId: string; base: string; apiKey: string; model: string };
+          config: { providerId: string; base: string; model: string };
         };
       };
       /** 语音页只写「厂商 + 模型」：地址 / 密钥由服务商行提供。 */
@@ -1773,8 +1776,9 @@ export type AppRPC = {
       };
       getASRProviderConfig: {
         params: undefined;
+        // 不回 apiKey：同 TTS，页面不需要看到密钥。
         response: {
-          config: { providerId: string; base: string; apiKey: string; model: string };
+          config: { providerId: string; base: string; model: string };
         };
       };
       saveASRProviderConfig: {
@@ -2112,20 +2116,6 @@ export type AppRPC = {
         params: { key: string };
         response: { ok: boolean };
       };
-      /** 中央库信息（路径 / 技能数 / 体积 / 警告）。 */
-      skillsGetCentralInfo: {
-        params: undefined;
-        response: SkillsCentralInfo;
-      };
-      skillsSetCentralPath: {
-        params: { path: string };
-        response: { ok: boolean; info: SkillsCentralInfo };
-      };
-      /** 重建索引（磁盘 → DB 收编，git pull 恢复后调用）。 */
-      skillsReindex: {
-        params: undefined;
-        response: { added: string[]; removed: string[] };
-      };
       /** 我的技能列表（含 target 实时同步状态）。 */
       skillsList: {
         params: undefined;
@@ -2369,7 +2359,7 @@ export type AppRPC = {
       };
       /** 在系统文件管理器中打开目录（path="central" 时打开中央库内 skillId 子目录）。 */
       skillsOpenFolder: {
-        params: { path: string; skillId?: string };
+        params: { skillId?: string };
         response: { ok: boolean };
       };
       // ---- 知识库（本地 RAG） ----
@@ -2391,7 +2381,7 @@ export type AppRPC = {
       };
       kbDocList: {
         params: { kbId: number };
-        response: { docs: Knowledge.KbDocView[] };
+        response: { docs: Knowledge.KbDocView[]; total: number };
       };
       kbAddFiles: {
         params: { kbId: number; paths: string[] };
@@ -2419,7 +2409,7 @@ export type AppRPC = {
       };
       kbChunks: {
         params: { docId: number };
-        response: { chunks: Knowledge.KbChunkView[] };
+        response: { chunks: Knowledge.KbChunkView[]; total: number };
       };
       kbEmbedMissing: {
         params: { kbId: number };
@@ -3866,7 +3856,9 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           const filtered = params.status && params.status !== "all" && params.status !== "archived"
             ? hits.filter((h) => h.status === params.status)
             : hits;
-          return { memories: filtered };
+          // 置顶筛选放到服务端：此前是「先取 limit 条再在客户端过滤置顶」，
+          // 置顶条目一旦落在截断区间之外就会漏。
+          return { memories: params.pinned ? filtered.filter((h) => h.pinned) : filtered };
         }
         return { memories: Memory.listMemories(params ?? undefined) };
       },
@@ -4123,7 +4115,11 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return cancelBenchmark(runId);
       },
       listBenchmarkRecords: async () => {
-        return { records: listBenchmarkRecords() };
+        // 只回轻量元数据；结果页需要正文时用 getBenchmarkRecord 单条拉取。
+        return listBenchmarkRecordSummaries();
+      },
+      getBenchmarkRecord: async ({ id }) => {
+        return { record: getBenchmarkRecord(id) };
       },
       deleteBenchmarkRecord: async ({ id }) => {
         return deleteBenchmarkRecord(id);
@@ -4216,7 +4212,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getTTSProviderConfig: async () => {
-        return { config: Voice.getTTSProviderConfig() };
+        const { providerId, base, model } = Voice.getTTSProviderConfig();
+        return { config: { providerId, base, model } };
       },
 
       saveTTSProviderConfig: async ({ providerId, model }) => {
@@ -4272,7 +4269,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getASRProviderConfig: async () => {
-        return { config: Asr.getASRProviderConfig() };
+        const { providerId, base, model } = Asr.getASRProviderConfig();
+        return { config: { providerId, base, model } };
       },
 
       saveASRProviderConfig: async ({ providerId, model }) => {
@@ -4890,16 +4888,6 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         Skills.removeCustomTool(key);
         return { ok: true };
       },
-      skillsGetCentralInfo: async () => {
-        return Skills.getCentralInfoForRpc();
-      },
-      skillsSetCentralPath: async ({ path }) => {
-        Skills.setCentralRepoPath(path);
-        return { ok: true, info: Skills.getCentralInfoForRpc() };
-      },
-      skillsReindex: async () => {
-        return Skills.reindexCentralRepo();
-      },
       skillsList: async () => {
         return { skills: Skills.listSkills() };
       },
@@ -5090,16 +5078,13 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Skills.projectSkillDocForRpc(projectId, relDir);
       },
       skillsOpenFolder: async (params) => {
-        let target = params.path;
-        if (params.path === "central") {
-          // skillId 来自 webview：不许拿 `../..` 去打开中央库外面的目录。
-          const dir = params.skillId ? Skills.centralSkillDir(params.skillId) : Skills.getCentralRepoDir();
-          if (!dir) return { ok: false };
-          target = dir;
-        }
+        // 只允许打开中央库里的技能目录：skillId 来自 webview，不许拿 `../..`
+        // 去打开中央库外面的目录；也不再接受任意绝对路径（前端只有这一个入口）。
+        const dir = params.skillId ? Skills.centralSkillDir(params.skillId) : Skills.getCentralRepoDir();
+        if (!dir) return { ok: false };
         try {
           const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
-          Bun.spawn([opener, target]);
+          Bun.spawn([opener, dir]);
           return { ok: true };
         } catch {
           return { ok: false };
@@ -5128,7 +5113,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
       kbDocList: async ({ kbId }) => {
-        return { docs: Knowledge.listDocs(kbId) };
+        return Knowledge.listDocs(kbId);
       },
       kbAddFiles: async ({ kbId, paths }) => {
         return { docs: Knowledge.addFileDocs(kbId, paths ?? []) };
@@ -5151,7 +5136,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
       kbChunks: async ({ docId }) => {
-        return { chunks: Knowledge.listChunks(docId) };
+        return Knowledge.listChunks(docId);
       },
       kbEmbedMissing: async ({ kbId }) => {
         return Knowledge.embedMissing(kbId);
@@ -5501,13 +5486,21 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
     } catch {}
   });
   // 实时语音通话：把后端会话事件按类型路由到对应的一元消息通道。
+  // 增量字幕（partial）在说话时会高频触发，每个事件都重渲染 webview，按 60ms 合并；
+  // 定稿 / 阶段切换 / 打断 / 报错这些终态事件前必须 flush，否则最后一段字幕会丢。
+  const throttlePartial = throttleLatest<[number, string]>((conversationId, text) => {
+    win.webview.rpc?.send.voicecallPartial({ conversationId, text });
+  }, 60);
+  // TTS 音频分片（audio）刻意不节流：它是**追加**到播放队列的，不是可覆盖的中间态，
+  // 合并会直接丢音频导致断句（这与进度条的"只保留最后一个值"语义相反）。
   VoiceCall.onVoiceCallEvent((msg: VoiceCallOutgoing) => {
     try {
       switch (msg.type) {
         case "partial":
-          win.webview.rpc?.send.voicecallPartial({ conversationId: msg.conversationId, text: msg.text });
+          throttlePartial.push(msg.conversationId, msg.text);
           break;
         case "utterance":
+          throttlePartial.flush();
           win.webview.rpc?.send.voicecallUtterance({
             conversationId: msg.conversationId,
             messageId: msg.messageId,
@@ -5515,6 +5508,7 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
           });
           break;
         case "state":
+          throttlePartial.flush();
           win.webview.rpc?.send.voicecallState({ conversationId: msg.conversationId, phase: msg.phase });
           break;
         case "audio":
@@ -5525,6 +5519,7 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
           });
           break;
         case "audioStop":
+          throttlePartial.flush();
           win.webview.rpc?.send.voicecallAudioStop({ conversationId: msg.conversationId });
           break;
         case "assistantPartial":
@@ -5544,6 +5539,7 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
           });
           break;
         case "error":
+          throttlePartial.flush();
           win.webview.rpc?.send.voicecallError({
             conversationId: msg.conversationId,
             message: msg.message,
