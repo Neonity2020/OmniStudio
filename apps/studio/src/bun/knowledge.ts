@@ -16,11 +16,13 @@ import { db } from "./db";
 import { kbIngestJobs, knowledgeBases, knowledgeChunks, knowledgeDocs } from "./db/schema";
 import type { KnowledgeBaseRow, KnowledgeDocRow } from "./db/schema";
 import { callEmbeddings, embeddingHeaders, resolveEmbeddingBase, type EmbeddingConfig } from "./embeddings";
+import { resolveCloudProvider } from "./cloud-providers";
 import { getKbIndex, invalidateKbIndex, kbIndexStats, peekKbIndex, type KbSearchIndex } from "./kb-index";
 import {
   awaitKbIdle,
   docJobs,
   dropDocJob,
+  embeddingConfigOf,
   enqueueDoc,
   ingestQueueStats,
   onKbDataChanged,
@@ -61,10 +63,13 @@ export type KbView = {
   embeddingModel: string;
   embeddingBase: string;
   embeddingApiKey: string;
+  /** 云服务商 id（非空时地址/密钥取自 cloud_providers）。 */
+  embeddingProviderId: string;
   embeddingDim: number | null;
   rerankModel: string;
   rerankBase: string;
   rerankApiKey: string;
+  rerankProviderId: string;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
@@ -118,9 +123,11 @@ export type KbUpdatePatch = Partial<{
   embeddingModel: string;
   embeddingBase: string;
   embeddingApiKey: string;
+  embeddingProviderId: string;
   rerankModel: string;
   rerankBase: string;
   rerankApiKey: string;
+  rerankProviderId: string;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
@@ -243,6 +250,9 @@ export function createKb(input: {
   embeddingModel?: string;
   /** 重排模型（空 = 不重排）。 */
   rerankModel?: string;
+  /** 嵌入/重排云服务商 id（可选，选了就不再需要手填地址与密钥）。 */
+  embeddingProviderId?: string;
+  rerankProviderId?: string;
   actor?: string;
 }): KbView {
   const name = input.name.trim() || "未命名知识库";
@@ -253,6 +263,8 @@ export function createKb(input: {
       description: input.description?.trim() || null,
       embeddingModel: input.embeddingModel?.trim() ?? "",
       rerankModel: input.rerankModel?.trim() ?? "",
+      embeddingProviderId: input.embeddingProviderId?.trim() ?? "",
+      rerankProviderId: input.rerankProviderId?.trim() ?? "",
     })
     .returning()
     .get();
@@ -274,9 +286,11 @@ export function updateKb(id: number, patch: KbUpdatePatch): { kb: KbView; embedd
   if (patch.embeddingModel !== undefined) set.embeddingModel = patch.embeddingModel.trim();
   if (patch.embeddingBase !== undefined) set.embeddingBase = patch.embeddingBase.trim();
   if (patch.embeddingApiKey !== undefined) set.embeddingApiKey = patch.embeddingApiKey.trim();
+  if (patch.embeddingProviderId !== undefined) set.embeddingProviderId = patch.embeddingProviderId.trim();
   if (patch.rerankModel !== undefined) set.rerankModel = patch.rerankModel.trim();
   if (patch.rerankBase !== undefined) set.rerankBase = patch.rerankBase.trim();
   if (patch.rerankApiKey !== undefined) set.rerankApiKey = patch.rerankApiKey.trim();
+  if (patch.rerankProviderId !== undefined) set.rerankProviderId = patch.rerankProviderId.trim();
   if (patch.chunkSize !== undefined) set.chunkSize = clampInt(patch.chunkSize, 200, 4000, 800);
   if (patch.chunkOverlap !== undefined) set.chunkOverlap = clampInt(patch.chunkOverlap, 0, 1000, 120);
   if (patch.topK !== undefined) set.topK = clampInt(patch.topK, 1, 30, 6);
@@ -286,7 +300,9 @@ export function updateKb(id: number, patch: KbUpdatePatch): { kb: KbView; embedd
 
   const embeddingChanged =
     (patch.embeddingModel !== undefined && patch.embeddingModel.trim() !== kb.embeddingModel) ||
-    (patch.embeddingBase !== undefined && patch.embeddingBase.trim() !== kb.embeddingBase);
+    (patch.embeddingBase !== undefined && patch.embeddingBase.trim() !== kb.embeddingBase) ||
+    (patch.embeddingProviderId !== undefined &&
+      patch.embeddingProviderId.trim() !== kb.embeddingProviderId);
   if (embeddingChanged) set.embeddingDim = null;
 
   db.update(knowledgeBases).set(set).where(eq(knowledgeBases.id, id)).run();
@@ -631,17 +647,19 @@ export async function embedMissing(kbId: number): Promise<{
   return { ok: true, embedded: before - remaining };
 }
 
-/** 测试嵌入配置可用性：嵌入 "ping" 并返回维度。 */
+/** 测试嵌入配置可用性：嵌入 "ping" 并返回维度。传 providerId 时地址/密钥取自云服务商行。 */
 export async function testEmbedding(input: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
   model: string;
 }): Promise<{ ok: boolean; dim?: number; error?: string }> {
   try {
+    const provider = resolveCloudProvider(input.providerId);
     const cfg: EmbeddingConfig = {
       embeddingModel: input.model,
-      embeddingBase: input.base ?? "",
-      embeddingApiKey: input.apiKey ?? "",
+      embeddingBase: provider?.baseUrl ?? input.base ?? "",
+      embeddingApiKey: provider?.apiKey ?? input.apiKey ?? "",
       embeddingDim: null,
     };
     const [vec] = await callEmbeddings(cfg, ["ping"]);
@@ -708,21 +726,33 @@ async function fetchServedModels(base: string, apiKey: string): Promise<string[]
 
 /** 嵌入 / 重排共用的模型候选收集（地址解析规则与真实请求一致）。 */
 export async function suggestModelCandidates(
-  input?: { base?: string; apiKey?: string },
+  input?: { base?: string; apiKey?: string; providerId?: string },
   /** 该选择器要哪几类模型：嵌入选择器只给嵌入、重排选择器只给重排。 */
   want: readonly ModelCategory[] = ["embedding"],
 ): Promise<KbModelCandidates> {
-  const custom = Boolean(input?.base?.trim());
-  const base = resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
-  const kind: KbModelCandidates["service"]["kind"] = custom
-    ? "custom"
-    : getSetting("SERVER_MODE") === "remote"
-      ? "remote"
-      : "local";
-  const served = await fetchServedModels(base, input?.apiKey ?? "");
-  const cloud = cloudModelIds();
+  // 云服务商槽位优先：地址/密钥/模型都从 cloud_providers 行取，页面不落盘密钥。
+  const provider = resolveCloudProvider(input?.providerId);
+  const custom = !provider && Boolean(input?.base?.trim());
+  const base = provider?.baseUrl ?? resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
+  const kind: KbModelCandidates["service"]["kind"] = provider
+    ? "remote"
+    : custom
+      ? "custom"
+      : getSetting("SERVER_MODE") === "remote"
+        ? "remote"
+        : "local";
+  const served = await fetchServedModels(base, provider?.apiKey ?? input?.apiKey ?? "");
+  // 云服务商槽位：优先用 /v1/models 实时结果；拉不到就退回本地记录的模型清单，离线也能选。
+  const cloud = provider ? provider.models.map((m) => m.id) : cloudModelIds();
   const localRaw = kind === "local" ? served : [];
-  const remoteRaw = kind === "local" ? cloud : [...new Set([...served, ...cloud])].sort();
+  const remoteRaw =
+    kind === "local"
+      ? cloud
+      : provider
+        ? served.length > 0
+          ? served
+          : cloud
+        : [...new Set([...served, ...cloud])].sort();
   // 一个服务商的 /v1/models 会把对话 / 语音 / 生图模型一起返回：按分类挑干净，
   // 挑不出任何一类（服务端命名认不出来）就保留全量并标记 relaxed，由界面说明。
   const local = filterModelIds(localRaw, want, { relax: true });
@@ -739,6 +769,7 @@ export async function suggestModelCandidates(
 export async function suggestEmbeddingModels(input?: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
 }): Promise<KbModelCandidates> {
   return suggestModelCandidates(input, MODEL_CATEGORY_SETS.embedding);
 }
@@ -747,13 +778,37 @@ export async function suggestEmbeddingModels(input?: {
 // 重排：Jina / SiliconFlow / Cohere 兼容的 /v1/rerank 二次排序
 // ---------------------------------------------------------------------------
 
-type RerankConfig = Pick<KnowledgeBaseRow, "rerankModel" | "rerankBase" | "rerankApiKey" | "embeddingBase">;
+type RerankConfig = Pick<
+  KnowledgeBaseRow,
+  | "rerankModel"
+  | "rerankBase"
+  | "rerankApiKey"
+  | "rerankProviderId"
+  | "embeddingBase"
+  | "embeddingProviderId"
+>;
 
-/** 重排服务 base：显式配置 > 嵌入服务地址（常见同厂商）> 云服务商槽位 / 本地推理。 */
+/**
+ * 重排服务 base：重排云服务商 > 显式配置 > 嵌入云服务商 > 嵌入服务地址（常见同厂商）
+ * > 云服务商槽位 / 本地推理。
+ */
 function resolveRerankBase(cfg: RerankConfig): string {
   const trimBase = (v: string) => v.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+  const provider = resolveCloudProvider(cfg.rerankProviderId);
+  if (provider?.baseUrl) return trimBase(provider.baseUrl);
   if (cfg.rerankBase.trim()) return trimBase(cfg.rerankBase);
+  const embedProvider = resolveCloudProvider(cfg.embeddingProviderId);
+  if (embedProvider?.baseUrl) return trimBase(embedProvider.baseUrl);
   return resolveEmbeddingBase({ embeddingBase: cfg.embeddingBase });
+}
+
+/** 重排请求密钥：重排服务商 > 嵌入服务商 > 手填（留空则由 embeddingHeaders 回落到全局密钥）。 */
+function resolveRerankKey(cfg: RerankConfig): string {
+  return (
+    resolveCloudProvider(cfg.rerankProviderId)?.apiKey ||
+    resolveCloudProvider(cfg.embeddingProviderId)?.apiKey ||
+    cfg.rerankApiKey
+  );
 }
 
 /**
@@ -773,7 +828,7 @@ async function callRerank(
 
   const res = await fetch(`${base}/v1/rerank`, {
     method: "POST",
-    headers: embeddingHeaders(cfg.rerankApiKey),
+    headers: embeddingHeaders(resolveRerankKey(cfg)),
     body: JSON.stringify({
       model,
       query,
@@ -808,6 +863,7 @@ async function callRerank(
 export async function testRerank(input: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
   model: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
@@ -815,7 +871,9 @@ export async function testRerank(input: {
       rerankModel: input.model,
       rerankBase: input.base ?? "",
       rerankApiKey: input.apiKey ?? "",
+      rerankProviderId: input.providerId ?? "",
       embeddingBase: "",
+      embeddingProviderId: "",
     };
     const scores = await callRerank(
       cfg,
@@ -841,6 +899,7 @@ export async function testRerank(input: {
 export async function suggestRerankModels(input?: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
 }): Promise<KbModelCandidates> {
   return suggestModelCandidates(input, MODEL_CATEGORY_SETS.rerank);
 }
@@ -949,12 +1008,8 @@ async function recallKb(
 
   if (kb.embeddingModel && index.vectorCount > 0) {
     try {
-      const cfg: EmbeddingConfig = {
-        embeddingModel: kb.embeddingModel,
-        embeddingBase: kb.embeddingBase,
-        embeddingApiKey: kb.embeddingApiKey,
-        embeddingDim: kb.embeddingDim,
-      };
+      // 地址/密钥：云服务商槽位优先，否则手填 base/key，最后跟随本地推理服务。
+      const cfg = embeddingConfigOf(kb);
       const [queryVec] = await callEmbeddings(cfg, [query]);
       if (queryVec) vectorRank = index.vectorRank(queryVec, CANDIDATE_POOL);
     } catch (e) {

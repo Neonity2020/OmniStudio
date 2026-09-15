@@ -141,11 +141,16 @@ export function textContentHash(text: string): string {
   return new Bun.CryptoHasher("sha256").update(text).digest("hex");
 }
 
-function embeddingConfigOf(kb: KnowledgeBaseRow): EmbeddingConfig {
+/**
+ * 嵌入配置：云服务商槽位优先（地址/密钥从 cloud_providers 行解析，页面不落盘密钥），
+ * 其次用 per-KB 手填的 base/key，最后跟随本地推理服务。
+ */
+export function embeddingConfigOf(kb: KnowledgeBaseRow): EmbeddingConfig {
+  const provider = CloudProviders.resolveCloudProvider(kb.embeddingProviderId);
   return {
     embeddingModel: kb.embeddingModel,
-    embeddingBase: kb.embeddingBase,
-    embeddingApiKey: kb.embeddingApiKey,
+    embeddingBase: provider?.baseUrl ?? kb.embeddingBase,
+    embeddingApiKey: provider?.apiKey ?? kb.embeddingApiKey,
     embeddingDim: kb.embeddingDim,
   };
 }

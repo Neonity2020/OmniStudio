@@ -232,6 +232,13 @@
       "when": 1790095000006,
       "tag": "0032_pale_thundra",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1790095000007,
+      "tag": "0033_warm_sabretooth",
+      "breakpoints": true
     }
   ]
 }

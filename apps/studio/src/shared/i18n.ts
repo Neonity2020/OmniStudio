@@ -1350,6 +1350,10 @@ const zh: Record<string, string> = {
   "kb.settings.noCandidates": "暂无候选模型：本地推理服务未运行，也未配置云端模型",
   "kb.settings.noCandidatesRemote": "该服务未返回模型列表：检查地址与密钥，或在设置里配置云端模型",
   "kb.settings.apiKey": "API Key",
+  "kb.settings.provider": "云服务商",
+  "kb.settings.providerNone": "不使用（本地 / 自定义）",
+  "kb.settings.providerHint":
+    "选了云服务商就不用再填地址与密钥：连接信息在「设置 → 模型云服务」里维护，密钥只存主进程。",
   "kb.settings.embeddingBase": "接口地址",
   "kb.settings.embeddingBasePlaceholder": "https://api.example.com/v1",
   "kb.settings.embeddingBaseHint": "留空跟随当前模型服务商（云服务商或本地推理服务），填了则固定用该地址。",
@@ -4061,6 +4065,10 @@ const en: Record<string, string> = {
   "kb.settings.noCandidatesRemote":
     "This endpoint returned no model list: check the URL and key, or configure a cloud model in Settings",
   "kb.settings.apiKey": "API Key",
+  "kb.settings.provider": "Provider",
+  "kb.settings.providerNone": "None (local / custom)",
+  "kb.settings.providerHint":
+    "Pick a provider and you no longer need to fill in the URL / key: connection info lives in Settings → Cloud model providers, and the key stays in the main process.",
   "kb.settings.embeddingBase": "Base URL",
   "kb.settings.embeddingBasePlaceholder": "https://api.example.com/v1",
   "kb.settings.embeddingBaseHint":

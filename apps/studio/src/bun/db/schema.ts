@@ -467,6 +467,8 @@ export const knowledgeBases = sqliteTable("knowledge_bases", {
   /** OpenAI 兼容 base（不带 /v1）；空 = 跟随 VLLM_API_BASE / 本地推理服务。 */
   embeddingBase: text("embedding_base").notNull().default(""),
   embeddingApiKey: text("embedding_api_key").notNull().default(""),
+  /** 云服务商 id（非空时地址/密钥取自 cloud_providers 行，密钥不再按库落盘）。 */
+  embeddingProviderId: text("embedding_provider_id").notNull().default(""),
   /** 首次嵌入成功后记录维度，之后校验模型是否换了。 */
   embeddingDim: int("embedding_dim"),
   /** 重排模型 id；空 = 不重排（RRF 融合序即最终序）。 */
@@ -474,6 +476,8 @@ export const knowledgeBases = sqliteTable("knowledge_bases", {
   /** 重排服务 base（不带 /v1）；空 = 跟随嵌入配置/当前服务商。 */
   rerankBase: text("rerank_base").notNull().default(""),
   rerankApiKey: text("rerank_api_key").notNull().default(""),
+  /** 云服务商 id（非空时地址/密钥取自 cloud_providers 行）。 */
+  rerankProviderId: text("rerank_provider_id").notNull().default(""),
   chunkSize: int("chunk_size").notNull().default(800),
   chunkOverlap: int("chunk_overlap").notNull().default(120),
   /** 单库召回条数（聊天里多库合并后再截断）。 */

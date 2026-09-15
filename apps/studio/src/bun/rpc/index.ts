@@ -2381,7 +2381,14 @@ export type AppRPC = {
         response: { kbs: Knowledge.KbView[] };
       };
       kbCreate: {
-        params: { name: string; description?: string; embeddingModel?: string; rerankModel?: string };
+        params: {
+          name: string;
+          description?: string;
+          embeddingModel?: string;
+          rerankModel?: string;
+          embeddingProviderId?: string;
+          rerankProviderId?: string;
+        };
         response: { kb: Knowledge.KbView };
       };
       kbUpdate: {
@@ -2433,19 +2440,19 @@ export type AppRPC = {
         response: { hits: KbHit[]; notes: string[] };
       };
       kbTestEmbedding: {
-        params: { base?: string; apiKey?: string; model: string };
+        params: { base?: string; apiKey?: string; providerId?: string; model: string };
         response: { ok: boolean; dim?: number; error?: string };
       };
       kbEmbeddingModels: {
-        params: { base?: string; apiKey?: string } | undefined;
+        params: { base?: string; apiKey?: string; providerId?: string } | undefined;
         response: Knowledge.KbModelCandidates;
       };
       kbTestRerank: {
-        params: { base?: string; apiKey?: string; model: string };
+        params: { base?: string; apiKey?: string; providerId?: string; model: string };
         response: { ok: boolean; error?: string };
       };
       kbRerankModels: {
-        params: { base?: string; apiKey?: string } | undefined;
+        params: { base?: string; apiKey?: string; providerId?: string } | undefined;
         response: Knowledge.KbModelCandidates;
       };
       /** 审计流水（谁在什么时候导入/删除/检索了什么）+ 各动作计数。 */
@@ -5139,6 +5146,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             description: params.description,
             embeddingModel: params.embeddingModel,
             rerankModel: params.rerankModel,
+            embeddingProviderId: params.embeddingProviderId,
+            rerankProviderId: params.rerankProviderId,
           }),
         };
       },
@@ -5181,14 +5190,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       kbRecall: async ({ kbIds, query, topK }) => {
         return Knowledge.recall(kbIds ?? [], query ?? "", topK);
       },
-      kbTestEmbedding: async ({ base, apiKey, model }) => {
-        return Knowledge.testEmbedding({ base, apiKey, model });
+      kbTestEmbedding: async ({ base, apiKey, providerId, model }) => {
+        return Knowledge.testEmbedding({ base, apiKey, providerId, model });
       },
       kbEmbeddingModels: async (params) => {
         return Knowledge.suggestEmbeddingModels(params ?? undefined);
       },
-      kbTestRerank: async ({ base, apiKey, model }) => {
-        return Knowledge.testRerank({ base, apiKey, model });
+      kbTestRerank: async ({ base, apiKey, providerId, model }) => {
+        return Knowledge.testRerank({ base, apiKey, providerId, model });
       },
       kbRerankModels: async (params) => {
         return Knowledge.suggestRerankModels(params ?? undefined);

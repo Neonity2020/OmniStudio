@@ -565,15 +565,20 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
   全量返回，docs-tab 直接 `docs.map`。KB 是唯一完全没有上限的文档列表（目录导入单次 300 文件、可累积）。
 - [x] **[P2] 导入操作无结果反馈** — `kbAddFiles` 对不存在路径直接 `continue`（`knowledge.ts:356`）；
   `kbAddFolder` 的 `skipped` 前端丢弃（`docs-tab.tsx:339`）；四个 mutation 都无 `onError`（`:318-361`）。
-- [ ] **[P2] KB 云模型选择绕开 cloud_providers** — 明确保留为债：需把 KB 表的 per-KB `embeddingBase/ApiKey`、`rerankBase/ApiKey` 迁成 `providerId`（含 DB 迁移 + 候选解析 + 界面），影响面大，单列后续。
-  （`knowledge.ts:641-657`），页面手填 base/key（`kb/settings-tab.tsx:391-404`）。见跨菜单 C。
+- [x] **[P2] KB 云模型选择绕开 cloud_providers** — 已收口：KB 表新增 `embeddingProviderId` /
+  `rerankProviderId`（迁移 0033，仅新增列、不破坏旧数据），选了云服务商后地址/密钥由主进程从
+  `cloud_providers` 行解析（`resolveCloudProvider`，`kb-ingest.ts:embeddingConfigOf` /
+  `knowledge.ts:resolveRerankBase/resolveRerankKey`），旧的手填 `embeddingBase/ApiKey`、
+  `rerankBase/ApiKey` 仍作为「本地 / 自定义」路径保留；设置页新增「云服务商」选择器（只列已启用且
+  该用途下有模型的厂商），选了就不再显示地址/密钥输入。见跨菜单 C。
 
 ---
 
 **本轮修复**：摄取 `runJob` 失败/重试接 `kb.ingest.failed` / `kb.ingest.retry`；向量检索退化接
 `kb.retrieve.vector_failed`、重排失败接 `kb.rerank.failed`；文档导入四个 mutation 补齐 `onError` 与
 「已添加 / 跳过 / 未匹配到文件」反馈（新增 4 条 i18n）；`listDocs`/`listChunks` 加上限并回传 `total`，
-界面在截断时明确提示（新增 2 条 i18n）。剩 KB 云模型选择归跨菜单 C。
+界面在截断时明确提示（新增 2 条 i18n）。**KB 云模型已收口**：新增 `embeddingProviderId` /
+`rerankProviderId`（迁移 0033），云服务商优先解析地址/密钥，设置页加「云服务商」选择器。
 
 ---
 
@@ -678,7 +683,7 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 | 8 Translate | ✅ | `live-translate-queue.test.ts` 6 条；typecheck + lint + 全量 1280 / 0 失败（剩一条自建选择器归跨菜单 C） |
 | 9 Prompt | ✅ | 广场图走统一代理、失败路径 logEvent、i18n、LIKE 转义、分页常量共享、删除校验（工作区已完成，本轮核对确认） |
 | 10 Skills | ✅ | path-safety 收口、5 个文件接 logEvent、删掉 3 个死 RPC、`skillsOpenFolder` 只允许中央库路径；市场搜索受上游 skills.sh API 限制（无游标）保留固定上限 |
-| 11 KB | ✅ | 摄取/检索/重排失败接 logEvent、导入结果与错误有界面反馈、docs/chunks 列表加上限并回传总数（截断有提示）。剩「KB 云模型选择走 cloud_providers」归跨菜单 C（需改 KB 表结构） |
+| 11 KB | ✅ | 摄取/检索/重排失败接 logEvent、导入结果与错误有界面反馈、docs/chunks 列表加上限并回传总数（截断有提示）、云模型走 cloud_providers（迁移 0033 + 设置页服务商选择器） |
 | 12 Memory | ✅ | 判重/维护补向量失败接 logEvent、搜索 300ms 防抖、置顶改服务端过滤 + LIKE 转义 |
 | 13 Benchmark | ✅ | 历史列表改轻量元数据 + 单条 `getBenchmarkRecord` 取正文、eval 逐行解析并容忍坏行、ROADMAP OPS-04 状态修正 |
 | 设置页 19 标签 | ✅ | 引擎选择器去掉硬编码 mlx（改走 `engineOptions`）；权限名清单收敛到 `HUMAN_PERMISSION_LABELS` + RPC `permissionNames`（新增 2 条单测）；云厂商面板模型类型标注本已具备 |
