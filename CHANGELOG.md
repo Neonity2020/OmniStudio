@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+### Fixed / 修复
+
+- **CI 从 0.0.9 起一直是红的（本地却全绿）：runner 装的 bun 是 1.3.9，而 `--parallel` 是 1.4 才有的开关**。1.3.x 上 `bun test --parallel` **不报未知参数、直接忽略**，于是回到"共享 worker + `mock.module` 跨文件泄漏"的老症状（`bunfig.toml` 里记过的那一类：safeJoin / 备份 / 密钥加密 / 笔记 / 内置技能…全在毫不相干的文件里红），CI 80 红、本地 0 红，差别只在运行时版本 —— 版本来自 `package.json` 的 `packageManager`，而 runner 按它装 1.3.9。修法是把版本钉到 1.4.2（开发机实际在用的），并在 `bunfig.toml` 写明"升级运行时时先确认 `bun test --help` 里还有 `--parallel`"。同一提交在 1.3.9 下 80 红 / 1.4.2 下全绿，已双向验证。
+
 ## [0.1.0] - 2026-09-15
 
 ### Added / 新增

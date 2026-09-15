@@ -14,5 +14,10 @@
 # worker 里共享 —— 实测同一批用例 `--isolate` 会红 23 条（safeJoin / 备份 / 密钥加密 /
 # 厂商列表…全在毫不相干的文件里），换成 `--parallel`（每个文件一个独立进程）立刻全绿，
 # 而且更快（9.7s vs 25.9s，119 个文件）。所以这里用 --parallel。
+#
+# **需要 bun ≥ 1.4**：`--parallel` 是 1.4 才有的开关，1.3.x 上它会**被静默忽略**（不报
+# 未知参数），于是又回到"共享 worker + mock 泄漏"的老样子 —— CI 曾因此从绿变红：同一个
+# 提交本地 0 红、CI 80 红（runner 装的 1.3.9，来自 package.json 的 packageManager）。
+# 版本因此钉在 1.4.x；升级运行时时先确认 `bun test --help` 里还有 --parallel。
 [test]
 preload = ["./test-preload.ts"]
