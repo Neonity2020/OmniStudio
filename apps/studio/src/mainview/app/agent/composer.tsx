@@ -372,13 +372,15 @@ export function AgentComposer({
       queryClient.invalidateQueries({ queryKey: ["conversation", conversationId] });
       // 本轮的开工快照是刚建的：取回来，「撤销本轮」才会出现在这条消息上。
       queryClient.invalidateQueries({ queryKey: ["agent-snapshots", conversationId] });
-      // 后端直接返回失败（没模型 / 服务器没起来…）时不会走 chatDone，需要自己收尾。
+      // 后端直接返回失败（没模型 / 服务器没起来…）：这些路径后端也会推一条带 error 的
+      // chatDone，所以这里用**幂等**的兜底 —— 已经有落点就不再补，否则界面上会出现
+      // 两个内容相同的 ⚠️ 气泡。
       if (data && !data.ok) {
         useChatStore.getState().setStreaming(false);
         useAgentStore.getState().setRunning(false);
         useChatStore
           .getState()
-          .finalizeMessage(conversationId, Date.now(), `⚠️ ${data.error ?? t("agent.failed")}`);
+          .finalizeTurnIfPending(conversationId, `⚠️ ${data.error ?? t("agent.failed")}`);
       }
     },
     onError: (error: unknown) => {
@@ -386,9 +388,8 @@ export function AgentComposer({
       useAgentStore.getState().setRunning(false);
       useChatStore
         .getState()
-        .finalizeMessage(
+        .finalizeTurnIfPending(
           conversationId,
-          Date.now(),
           `⚠️ ${error instanceof Error ? error.message : String(error)}`,
         );
     },

@@ -36,6 +36,7 @@ import {
   type AppLogQuery,
   type AppLogSource,
 } from "../app-log";
+import { LOG_THROTTLE_MS, PROGRESS_THROTTLE_MS, throttleBatch, throttleLatest } from "../throttle";
 import * as ServerManager from "../server-manager";
 import type { ServerStatus } from "../server-manager";
 import * as Served from "../model-servers";
@@ -236,6 +237,8 @@ import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
 import * as Knowledge from "../knowledge";
 import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
 import * as Backup from "../backup";
+import { isDialogPickedPath, rememberDialogPickedPaths } from "../dialog-paths";
+import { MAX_UPLOAD_BYTES, formatUploadLimit } from "../../shared/uploads";
 import type {
   BackupCreateRequest,
   BackupDownloadRequest,
@@ -250,6 +253,105 @@ import type {
 } from "../../shared/backup";
 
 export type GitPreviewItem = { relPath: string; name: string; description: string | null };
+
+/**
+ * 引擎生命周期类 RPC 的统一失败上报。
+ *
+ * 这一组接口（装引擎 / 起服务 / 停服务 / 删模型）按仓库约定返回 `{ ok:false, error }`
+ * 而**不抛错**，所以 RPC 层那个 try/catch 记日志的写法在这里不成立 —— 结果就是
+ * 「本地引擎装了没反应 / 起不来」在 `logs/app.log` 里一点痕迹都没有，`omi logs` 只能
+ * 看到前端已经弹过又消失的 toast。包一层之后，每个入口只写自己的 event 名。
+ */
+async function loggedEngineCall<T extends { ok: boolean; error?: string }>(
+  source: AppLogSource,
+  event: string,
+  detail: Record<string, unknown>,
+  run: () => Promise<T> | T,
+): Promise<T> {
+  try {
+    const result = await run();
+    if (result && result.ok === false) {
+      logEvent({
+        level: "error",
+        source,
+        event,
+        message: result.error ?? "未知原因",
+        detail,
+      });
+    }
+    return result;
+  } catch (e) {
+    logEvent({
+      level: "error",
+      source,
+      event,
+      message: e instanceof Error ? e.message : String(e),
+      detail: { ...detail, error: e },
+    });
+    throw e;
+  }
+}
+
+/**
+ * 只放行"用户刚在系统对话框里选过"的路径，其余丢掉并记一条日志。
+ *
+ * 这些接口收的是绝对路径（OCR 暂存图片 / 文档导入 / 修图参考图），合法输入本来就
+ * 可以是磁盘上任意位置 —— 所以不能用"必须落在数据目录内"来限位，那是把这些功能改坏。
+ * 真正的判据是路径的来源：对话框是主进程弹的，用户看得见自己选了什么；
+ * 从 webview 直接收下的路径则可能被注入的页面伪造成 `~/.ssh/id_rsa`。
+ * 详见 `bun/dialog-paths.ts`。
+ */
+function acceptedDialogPaths(
+  source: AppLogSource,
+  event: string,
+  paths: readonly string[],
+): string[] {
+  const accepted = paths.filter((p) => isDialogPickedPath(p));
+  const rejected = paths.filter((p) => !isDialogPickedPath(p));
+  if (rejected.length > 0) {
+    logEvent({
+      level: "warn",
+      source,
+      event,
+      message: "拒绝了不是用户从文件对话框选出来的路径",
+      detail: { rejected: rejected.slice(0, 10), acceptedCount: accepted.length },
+    });
+  }
+  return accepted;
+}
+
+/** 路径被拒时回给界面的说明（改走词条没必要：这句只在异常路径上出现）。 */
+function pathNotPickedMessage(): string {
+  return "只能处理你在文件对话框里选中的文件，请重新选择。";
+}
+
+/**
+ * 只在**抛错**时记日志的包装。
+ *
+ * 与 `loggedEngineCall` 的区别：那一组接口自己已经把 `{ok:false}` 的失败记进 app.log
+ * （见 `bun/ppocr.ts` 的 install / download / start 三处），RPC 再记一遍就是重复条目。
+ * 但"抛错"是另一回事 —— 它意味着模块里没预料到的路径，此前会被 catch 折叠成
+ * 一句 `{ok:false,error}`，日志里什么都没有。
+ */
+async function loggedThrow<T>(
+  source: AppLogSource,
+  event: string,
+  detail: Record<string, unknown>,
+  run: () => Promise<T> | T,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    logEvent({
+      level: "error",
+      source,
+      event,
+      message: e instanceof Error ? e.message : String(e),
+      detail: { ...detail, error: e },
+    });
+    throw e;
+  }
+}
 
 /** 聊天附件允许的文本文件类型与大小上限（超限直接跳过）。 */
 const CHAT_TEXT_FILE_RE =
@@ -523,11 +625,13 @@ export type AppRPC = {
       };
       addDocument: {
         params: { filePath: string };
-        response: { id: number };
+        /** 路径不是从文件对话框选出来的 → `id: -1` + error（见 acceptedDialogPaths）。 */
+        response: { id: number; error?: string };
       };
       addDocumentByUpload: {
         params: { data: string; name: string; type: string };
-        response: { id: number };
+        /** 超限 / base64 非法 → `id: -1` + error（见 `shared/uploads.ts` 的体积上限）。 */
+        response: { id: number; error?: string };
       };
       processDocument: {
         params: { id: number };
@@ -626,6 +730,11 @@ export type AppRPC = {
         params: { conversationId: number; messageId: number; targetLang?: string };
         response: { ok: boolean; error?: string };
       };
+      /** 停止对话页正在进行的生成（保留已生成的部分）。 */
+      stopChatGeneration: {
+        params: { conversationId: number };
+        response: { ok: boolean };
+      };
       runTranslation: {
         params: {
           text: string;
@@ -692,7 +801,7 @@ export type AppRPC = {
       };
       deleteMyPrompt: {
         params: { id: number };
-        response: { ok: boolean };
+        response: { ok: boolean; error?: string };
       };
       listChatModels: {
         params: undefined;
@@ -1575,10 +1684,6 @@ export type AppRPC = {
         };
         response: { record: VoiceRecordRow };
       };
-      runASR: {
-        params: { audioRef: string; model?: string };
-        response: { record: VoiceRecordRow };
-      };
       listVoiceClones: {
         params: undefined;
         response: { clones: VoiceClone[] };
@@ -1626,11 +1731,6 @@ export type AppRPC = {
       saveTTSProviderConfig: {
         params: { providerId?: string; model?: string };
         response: { ok: boolean };
-      };
-      listProviderModels: {
-        /**: `kind` = 这个场景要的模型分类（tts / asr / image / chat）：只列该类模型。 */
-        params: { base?: string; apiKey?: string; kind?: ModelCategory } | undefined;
-        response: { models: string[]; relaxed?: boolean; error?: string };
       };
       // Local ASR (whisper.cpp engine + remote fallback)
       listAsrModels: {
@@ -1781,10 +1881,6 @@ export type AppRPC = {
         params: { providerId?: string; model?: string };
         response: { ok: boolean };
       };
-      listOcrProviderModels: {
-        params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; relaxed?: boolean; error?: string };
-      };
       // PaddleOCR（本地 PP-OCRv6 引擎）
       getPpOcrStatus: {
         params: undefined;
@@ -1849,17 +1945,18 @@ export type AppRPC = {
           quantize?: number;
           /** AI 修图：参考图 ref（images 目录内）。 */
           referenceImageRef?: string;
-          config?: Partial<ImageGenConfig>;
+          /** 页面能改的只有这四项：地址与密钥属于厂商行（`providerId` 现取），不从页面传。 */
+          config?: Partial<Pick<ImageGenConfig, "backend" | "providerId" | "model" | "comfyBase">>;
         };
         response: { records: ImageRecordRow[]; error?: string };
       };
       listImageRecords: {
         params: { limit?: number } | undefined;
-        response: { records: ImageRecordRow[] };
+        response: { records: ImageRecordRow[]; error?: string };
       };
       deleteImageRecord: {
         params: { id: number };
-        response: { ok: boolean };
+        response: { ok: boolean; error?: string };
       };
       getImageGenConfig: {
         params: undefined;
@@ -1869,8 +1966,9 @@ export type AppRPC = {
         params: Partial<ImageGenConfig>;
         response: { ok: boolean };
       };
+      /** 模型清单：地址与密钥一律按 `providerId`（或已保存配置）现取，页面不传凭据。 */
       listImageGenModels: {
-        params: { backend?: ImageGenBackend; base?: string; apiKey?: string } | undefined;
+        params: { backend?: ImageGenBackend; base?: string } | undefined;
         response: { models: string[]; relaxed?: boolean; error?: string };
       };
       /** Agent 生图弹窗：用户点了确认 / 取消后回传，主进程继续那次工具调用。 */
@@ -1886,10 +1984,10 @@ export type AppRPC = {
         };
         response: { ok: boolean };
       };
-      /** Agent 生图弹窗里的「扫描模型」：用表单当前值探测，不落盘配置。 */
+      /** Agent 生图弹窗里的「扫描模型」：用表单当前值探测，不落盘配置；凭据按 `providerId` 取。 */
       scanMediaSetupCandidates: {
         params:
-          | { kind?: string; backend?: string; base?: string; apiKey?: string; providerId?: string }
+          | { kind?: string; backend?: string; base?: string; providerId?: string }
           | undefined;
         response: { candidates: MediaSetupCandidate[]; error?: string };
       };
@@ -1914,15 +2012,15 @@ export type AppRPC = {
       };
       pollVideoRecords: {
         params: { ids: number[] };
-        response: { records: VideoRecordRow[] };
+        response: { records: VideoRecordRow[]; error?: string };
       };
       listVideoRecords: {
         params: { limit?: number } | undefined;
-        response: { records: VideoRecordRow[] };
+        response: { records: VideoRecordRow[]; error?: string };
       };
       deleteVideoRecord: {
         params: { id: number };
-        response: { ok: boolean };
+        response: { ok: boolean; error?: string };
       };
       getVideoGenConfig: {
         params: undefined;
@@ -2003,7 +2101,8 @@ export type AppRPC = {
       };
       skillsSetCustomToolPath: {
         params: { tool: string; path: string | null };
-        response: { ok: boolean };
+        /** 非法路径（家目录 / 根目录 / 应用数据目录内）→ ok:false + error。 */
+        response: { ok: boolean; error?: string };
       };
       skillsAddCustomTool: {
         params: { key: string; name: string; skillsDir: string; projectSkillsDir?: string; category: "coding" | "lobster" };
@@ -2563,18 +2662,19 @@ export type AppRPC = {
         status: GatewayStatus;
       };
       mlxInstallLog: {
-        text: string;
+        /** 一批日志行（主进程按 80ms 窗口合批，见 bun/throttle.ts）。 */
+        lines: string[];
       };
       mlxModelDownloadProgress: MlxModelDownloadProgress;
       /** 生图阶段事件：启动/加载/生成 n/N/完成。 */
       mlxGenPhase: MlxGenPhase;
       /** PaddleOCR 引擎安装日志 / 阶段（下载模型 / 加载 / 就绪 / 错误），实时推送。 */
-      ppOcrInstallLog: { text: string };
+      ppOcrInstallLog: { lines: string[] };
       ppOcrPhase: { phase: PpOcr.PpOcrPhase; message: string };
       /** PaddleOCR 模型文件下载进度（字节 + 估算速度），模型卡实时进度条。 */
       ppOcrModelProgress: PpOcr.PpOcrModelProgress;
       /** Tesseract 引擎一键安装（brew install）日志，实时推送。 */
-      tesseractInstallLog: { text: string };
+      tesseractInstallLog: { lines: string[] };
       /** Skills 安装进度（市场/Git/更新），实时推送。 */
       skillsInstallProgress: SkillsInstallProgress;
       /** Skills 中央库发生变化（外部编辑/git pull/安装同步完成），前端刷新列表。 */
@@ -2947,11 +3047,17 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           canChooseDirectory,
           allowsMultipleSelection: params?.allowsMultipleSelection ?? true,
         });
-        return { paths: (paths ?? []).filter((p) => p && p.length > 0) };
+        const picked = (paths ?? []).filter((p) => p && p.length > 0);
+        // 记下"用户亲手选的"：收绝对路径的接口（OCR 暂存 / 文档导入 / 修图参考图）
+        // 只认这份白名单，见 `bun/dialog-paths.ts`。
+        rememberDialogPickedPaths(picked);
+        return { paths: picked };
       },
 
       addDocument: async ({ filePath }) => {
-        const file = Bun.file(filePath);
+        const accepted = acceptedDialogPaths("ocr", "ocr.document.add", [filePath]);
+        if (accepted.length === 0) return { id: -1, error: pathNotPickedMessage() };
+        const file = Bun.file(accepted[0]!);
         const result = db
           .insert(documents)
           .values({
@@ -2966,6 +3072,21 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       addDocumentByUpload: async ({ data, name, type }) => {
+        // 体积先于解码判断：`Buffer.from(data, "base64")` 会把整份数据实体化，
+        // 先解再判等于白付一次内存峰值。base64 的 4/3 膨胀在这里显式算进去。
+        if (typeof data !== "string" || data.length === 0) {
+          return { id: -1, error: "上传内容为空" };
+        }
+        if (data.length > Math.ceil((MAX_UPLOAD_BYTES * 4) / 3) + 1024) {
+          logEvent({
+            level: "warn",
+            source: "ocr",
+            event: "ocr.upload.rejected",
+            message: `上传文件超过 ${formatUploadLimit()}`,
+            detail: { name, base64Length: data.length },
+          });
+          return { id: -1, error: `文件太大（超过 ${formatUploadLimit()}），请改用「选择文件」按路径导入` };
+        }
         const uploadsDir = getUploadsBaseDir();
         if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
 
@@ -3021,13 +3142,40 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           // 源路径（URL 里可能带 %2f..%2f）与目标文件名都来自调用方，双向都要限位。
           const ref = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
           const filePath = safeJoin(getImagesBaseDir(), ref);
-          if (!filePath || !existsSync(filePath)) return { ok: false };
+          if (!filePath || !existsSync(filePath)) {
+            // 「保存到下载目录」点了没反应时，用户只能反复点 —— 三种原因（限位拒绝 /
+            // 文件已不在 / 文件名非法）此前都折叠成一个静默的 {ok:false}。
+            logEvent({
+              level: "warn",
+              source: "image",
+              event: "image.save_to_downloads.failed",
+              message: !filePath ? "路径不在图片目录内，已拒绝" : "源文件不存在",
+              detail: { url: url.slice(0, 300), ref, filename },
+            });
+            return { ok: false };
+          }
           const name = safeBaseName(filename);
-          if (!name) return { ok: false };
+          if (!name) {
+            logEvent({
+              level: "warn",
+              source: "image",
+              event: "image.save_to_downloads.failed",
+              message: "文件名非法（净化后为空）",
+              detail: { url: url.slice(0, 300), filename },
+            });
+            return { ok: false };
+          }
           const dest = path.join(Utils.paths.downloads, name);
           copyFileSync(filePath, dest);
           return { ok: true };
-        } catch {
+        } catch (e) {
+          logEvent({
+            level: "error",
+            source: "image",
+            event: "image.save_to_downloads.failed",
+            message: e instanceof Error ? e.message : String(e),
+            detail: { url: url.slice(0, 300), filename, error: e },
+          });
           return { ok: false };
         }
       },
@@ -3154,6 +3302,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       translateMessage: async ({ conversationId, messageId, targetLang }) => {
         return Chat.translateMessage(conversationId, messageId, targetLang);
+      },
+
+      stopChatGeneration: async ({ conversationId }) => {
+        const result = Chat.stopChatGeneration(conversationId);
+        logEvent({
+          level: "info",
+          source: "chat",
+          event: "chat.stop.requested",
+          message: result.ok ? "已请求停止本轮生成" : "当前没有正在进行的生成",
+          detail: { conversationId },
+        });
+        return result;
       },
 
       runTranslation: async (params) => {
@@ -4004,21 +4164,6 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
-      runASR: async (params) => {
-        try {
-          return { record: await Voice.runASR(params) };
-        } catch (e) {
-          logEvent({
-            level: "error",
-            source: "asr",
-            event: "asr.run.failed",
-            message: e instanceof Error ? e.message : String(e),
-            detail: { entry: "runASR", error: e },
-          });
-          throw e;
-        }
-      },
-
       listVoiceClones: async () => {
         return { clones: Voice.listVoiceClones() };
       },
@@ -4056,7 +4201,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       runTTSEdge: async (params) => {
-        return { record: await Voice.runTTSEdge(params) };
+        try {
+          return { record: await Voice.runTTSEdge(params) };
+        } catch (e) {
+          logEvent({
+            level: "error",
+            source: "tts",
+            event: "tts.edge.failed",
+            message: e instanceof Error ? e.message : String(e),
+            detail: { entry: "runTTSEdge", voice: params?.voice, error: e },
+          });
+          throw e;
+        }
       },
 
       getTTSProviderConfig: async () => {
@@ -4068,24 +4224,6 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
 
-      listProviderModels: async (params) => {
-        try {
-          const cfg = Voice.getTTSProviderConfig();
-          const models = await Voice.listProviderModels(
-            params?.base ?? cfg.base,
-            params?.apiKey ?? cfg.apiKey,
-          );
-          // 服务商返回的是一整份模型清单（对话/语音/嵌入…），按调用场景要的分类挑，
-          // 挑不出来时回退全量并标记 relaxed，由界面提示"没能识别出该类模型"。
-          const kind = params?.kind;
-          if (!kind) return { models };
-          const picked = filterModelIds(models, [kind], { relax: true });
-          return { models: picked.ids, relaxed: picked.relaxed };
-        } catch (e) {
-          return { models: [], error: e instanceof Error ? e.message : String(e) };
-        }
-      },
-
       // Local ASR
       listAsrModels: async () => {
         return { models: Asr.listAsrModels() };
@@ -4095,30 +4233,21 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Asr.getAsrStatus();
       },
 
-      downloadWhisperEngine: async () => {
-        try {
-          return await WhisperEngine.downloadWhisperEngine();
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+      downloadWhisperEngine: async () =>
+        loggedEngineCall("asr", "asr.engine.download_failed", { engine: "whisper.cpp" }, () =>
+          WhisperEngine.downloadWhisperEngine(),
+        ),
 
-      startAsr: async (params) => {
-        try {
-          return await Asr.startAsr(params?.model);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+      startAsr: async (params) =>
+        loggedEngineCall("asr", "asr.server.start_failed", { model: params?.model ?? null }, () =>
+          Asr.startAsr(params?.model),
+        ),
 
-      stopAsr: async () => {
-        try {
+      stopAsr: async () =>
+        loggedEngineCall("asr", "asr.server.stop_failed", {}, async () => {
           await Asr.stopAsr();
           return { ok: true };
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+        }),
 
       transcribeAudio: async (params) => {
         try {
@@ -4174,32 +4303,23 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
-      startAsrAudioCpp: async ({ modelId }) => {
+      startAsrAudioCpp: async ({ modelId }) =>
         // 两个本地引擎互斥：切到 audio.cpp 前先停掉 whisper-server。
-        try {
+        loggedEngineCall("asr", "asr.audiocpp.start_failed", { modelId }, async () => {
           await Asr.stopAsr();
-          return await AsrAudioCpp.startAsrAudioCpp(modelId);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+          return AsrAudioCpp.startAsrAudioCpp(modelId);
+        }),
 
-      stopAsrAudioCpp: async () => {
-        try {
+      stopAsrAudioCpp: async () =>
+        loggedEngineCall("asr", "asr.audiocpp.stop_failed", {}, async () => {
           await AsrAudioCpp.stopAsrAudioCpp();
           return { ok: true };
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+        }),
 
-      deleteAsrAudioCppModel: async ({ modelId }) => {
-        try {
-          return AsrAudioCpp.deleteAsrAudioCppModel(modelId);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+      deleteAsrAudioCppModel: async ({ modelId }) =>
+        loggedEngineCall("asr", "asr.audiocpp.delete_failed", { modelId }, () =>
+          AsrAudioCpp.deleteAsrAudioCppModel(modelId),
+        ),
 
       // Local TTS (audio.cpp)
       listTtsLocalModels: async () => {
@@ -4210,13 +4330,24 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return TTSLocal.getTtsLocalStatus();
       },
 
-      downloadTtsLocalEngine: async () => {
-        return TTSLocal.downloadTtsLocalEngine();
-      },
+      downloadTtsLocalEngine: async () =>
+        loggedEngineCall("tts", "tts.local.engine_download_failed", {}, () =>
+          TTSLocal.downloadTtsLocalEngine(),
+        ),
 
       startTtsLocal: async (params) => {
-        if (!params?.modelId) return { ok: false, error: "缺少模型参数" };
-        return TTSLocal.startTtsLocal(params.modelId);
+        if (!params?.modelId) {
+          logEvent({
+            level: "warn",
+            source: "tts",
+            event: "tts.local.start_failed",
+            message: "缺少模型参数",
+          });
+          return { ok: false, error: "缺少模型参数" };
+        }
+        return loggedEngineCall("tts", "tts.local.start_failed", { modelId: params.modelId }, () =>
+          TTSLocal.startTtsLocal(params.modelId),
+        );
       },
 
       stopTtsLocal: async () => {
@@ -4297,9 +4428,27 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       installTesseractEngine: async () => {
         try {
-          return await Ocr.installTesseractEngine();
+          const r = await Ocr.installTesseractEngine();
+          if (!r.ok) {
+            logEvent({
+              level: "error",
+              source: "ocr",
+              event: "ocr.tesseract.install_failed",
+              message: r.error ?? "tesseract 安装失败",
+              detail: {},
+            });
+          }
+          return r;
         } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "error",
+            source: "ocr",
+            event: "ocr.tesseract.install_failed",
+            message,
+            detail: { error: e },
+          });
+          return { ok: false, error: message };
         }
       },
 
@@ -4308,7 +4457,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       stageOcrImage: async ({ paths }) => {
-        return { files: await Ocr.stageOcrImage(paths) };
+        return { files: await Ocr.stageOcrImage(acceptedDialogPaths("ocr", "ocr.stage", paths)) };
       },
 
       runOcr: async (params) => {
@@ -4352,24 +4501,6 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
 
-      listOcrProviderModels: async (params) => {
-        try {
-          const cfg = Ocr.getOcrProviderConfig();
-          const models = await Ocr.listOcrProviderModels(
-            params?.base ?? cfg.base,
-            params?.apiKey ?? cfg.apiKey,
-          );
-          // OCR 走的是 VLM（对话分类的视觉模型），服务商清单里的嵌入 / 语音 / 生图
-          // 模型剔掉；认不出来的保留，避免把可用的 VLM 藏掉。
-          const picked = filterModelIds(models, MODEL_CATEGORY_SETS.chat, {
-            keepOther: true,
-            relax: true,
-          });
-          return { models: picked.ids, relaxed: picked.relaxed };
-        } catch (e) {
-          return { models: [], error: e instanceof Error ? e.message : String(e) };
-        }
-      },
 
       getPpOcrStatus: async () => {
         try {
@@ -4397,21 +4528,23 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
-      downloadPpOcrEngine: async () => {
-        try {
-          return await PpOcr.downloadPpOcrEngine();
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+      downloadPpOcrEngine: async () =>
+        loggedThrow("ocr", "ocr.ppocr.unexpected", { op: "downloadPpOcrEngine" }, async () => {
+          try {
+            return await PpOcr.downloadPpOcrEngine();
+          } catch (e) {
+            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          }
+        }),
 
-      startPpOcr: async ({ modelSize }) => {
-        try {
-          return await PpOcr.startPpOcr(modelSize);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+      startPpOcr: async ({ modelSize }) =>
+        loggedThrow("ocr", "ocr.ppocr.unexpected", { op: "startPpOcr", modelSize }, async () => {
+          try {
+            return await PpOcr.startPpOcr(modelSize);
+          } catch (e) {
+            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          }
+        }),
 
       stopPpOcr: async () => {
         try {
@@ -4422,13 +4555,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
-      downloadPpOcrModels: async ({ modelSize }) => {
-        try {
-          return await PpOcr.downloadPpOcrModels(modelSize);
-        } catch (e) {
-          return { ok: false, error: e instanceof Error ? e.message : String(e) };
-        }
-      },
+      downloadPpOcrModels: async ({ modelSize }) =>
+        loggedThrow("ocr", "ocr.ppocr.unexpected", { op: "downloadPpOcrModels", modelSize }, async () => {
+          try {
+            return await PpOcr.downloadPpOcrModels(modelSize);
+          } catch (e) {
+            return { ok: false, error: e instanceof Error ? e.message : String(e) };
+          }
+        }),
 
       cancelPpOcrModelDownload: async ({ modelSize }) => {
         try {
@@ -4480,7 +4614,9 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       // AI 生图
       stageEditImage: async ({ paths }) => {
-        const files = await ImageGen.stageEditImage(paths);
+        const files = await ImageGen.stageEditImage(
+          acceptedDialogPaths("image", "image.edit.stage", paths),
+        );
         return { files };
       },
 
@@ -4491,13 +4627,34 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       listImageRecords: async (params) => {
         try {
           return { records: ImageGen.listImageRecords(params?.limit) };
-        } catch {
-          return { records: [] };
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          // 空列表 + 一句静默的 catch，界面看起来就是「一张图都没生过」——
+          // 必须留一条日志，否则「历史记录突然空了」无从查起。
+          logEvent({
+            level: "error",
+            source: "image",
+            event: "image.records.list_failed",
+            message,
+            detail: { limit: params?.limit ?? null, error: e },
+          });
+          return { records: [], error: message };
         }
       },
 
       deleteImageRecord: async ({ id }) => {
-        return ImageGen.deleteImageRecord(id);
+        const r = ImageGen.deleteImageRecord(id);
+        if (!r.ok) {
+          logEvent({
+            level: "warn",
+            source: "image",
+            event: "image.record.delete_failed",
+            message: `记录不存在：${id}`,
+            detail: { id },
+          });
+          return { ok: false, error: `记录不存在（id ${id}）` };
+        }
+        return { ok: true };
       },
 
       getImageGenConfig: async () => {
@@ -4511,23 +4668,23 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       listImageGenModels: async (params) => {
         try {
-          const cfg = ImageGen.getImageGenConfig();
-          const backend = params?.backend ?? cfg.backend;
-          const models =
-            backend === "comfyui"
-              ? await ImageGen.listComfyCheckpoints(params?.base ?? cfg.comfyBase)
-              : backend === "mlx"
-                ? MlxGen.MLX_MODELS.map((m) => m.id)
-                : await ImageGen.listImageApiModels(
-                    params?.base ?? cfg.apiBase,
-                    params?.apiKey ?? cfg.apiKey,
-                  );
+          // 凭据只从厂商行取（`listImageGenModelIds` 内部解析）：页面此前传 `apiKey: ""`
+          // 会把「未传」变成「空密钥」，需要鉴权的上游列模型必然 401。
+          const models = await ImageGen.listImageGenModelIds(params?.backend, params?.base);
           // 生图后端（尤其 OpenAI 兼容的聚合服务）会把对话 / 语音模型也列出来，
           // 只留生图模型；一个都认不出时保留全量并标记 relaxed。
           const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
           return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
-          return { models: [], error: e instanceof Error ? e.message : String(e) };
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "warn",
+            source: "image",
+            event: "image.models.list_failed",
+            message,
+            detail: { backend: params?.backend ?? null, error: e },
+          });
+          return { models: [], error: message };
         }
       },
 
@@ -4537,7 +4694,17 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       scanMediaSetupCandidates: async (params) => {
-        return MediaSetup.scanSetupCandidates(params ?? {});
+        const r = await MediaSetup.scanSetupCandidates(params ?? {});
+        if (r.error) {
+          logEvent({
+            level: "warn",
+            source: "image",
+            event: "image.setup.scan_failed",
+            message: r.error,
+            detail: { backend: params?.backend ?? null, kind: params?.kind ?? "image" },
+          });
+        }
+        return r;
       },
 
       // AI 视频生成
@@ -4548,21 +4715,49 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       pollVideoRecords: async ({ ids }) => {
         try {
           return { records: await VideoGen.pollVideoRecords(ids) };
-        } catch {
-          return { records: [] };
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "error",
+            source: "video",
+            event: "video.poll.records_failed",
+            message,
+            detail: { ids: ids.slice(0, 20), error: e },
+          });
+          return { records: [], error: message };
         }
       },
 
       listVideoRecords: async (params) => {
         try {
           return { records: VideoGen.listVideoRecords(params?.limit) };
-        } catch {
-          return { records: [] };
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          // 空列表 + 静默 catch = 界面显示"还没有生成记录"，而库里其实有 —— 必须留痕。
+          logEvent({
+            level: "error",
+            source: "video",
+            event: "video.records.list_failed",
+            message,
+            detail: { limit: params?.limit ?? null, error: e },
+          });
+          return { records: [], error: message };
         }
       },
 
       deleteVideoRecord: async ({ id }) => {
-        return VideoGen.deleteVideoRecord(id);
+        const r = VideoGen.deleteVideoRecord(id);
+        if (!r.ok) {
+          logEvent({
+            level: "warn",
+            source: "video",
+            event: "video.record.delete_failed",
+            message: `记录不存在：${id}`,
+            detail: { id },
+          });
+          return { ok: false, error: `记录不存在（id ${id}）` };
+        }
+        return { ok: true };
       },
 
       getVideoGenConfig: async () => {
@@ -4595,12 +4790,20 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             provider?.models.filter((m) => modelTypeOf(m) === "video").map((m) => m.id) ?? [];
           return { models, checkpoints: [], clips: [], vaes: [] };
         } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          logEvent({
+            level: "warn",
+            source: "video",
+            event: "video.models.list_failed",
+            message,
+            detail: { backend: params?.backend ?? null, error: e },
+          });
           return {
             models: [],
             checkpoints: [],
             clips: [],
             vaes: [],
-            error: e instanceof Error ? e.message : String(e),
+            error: message,
           };
         }
       },
@@ -4609,7 +4812,16 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getMlxGenStatus: async () => {
         try {
           return await MlxGen.getMlxGenStatus();
-        } catch {
+        } catch (e) {
+          // 探测失败按"未安装"渲染，但别把原因也吞掉 —— 否则界面只说一句"未安装"，
+          // 用户反复点「下载引擎」也修不好。
+          logEvent({
+            level: "warn",
+            source: "image",
+            event: "image.mlx.status_failed",
+            message: e instanceof Error ? e.message : String(e),
+            detail: { error: e },
+          });
           return {
             supported: process.platform === "darwin" && process.arch === "arm64",
             pythonFound: false,
@@ -4669,8 +4881,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { ok: true };
       },
       skillsSetCustomToolPath: async ({ tool, path }) => {
-        Skills.setCustomToolPath(tool, path);
-        return { ok: true };
+        return Skills.setCustomToolPath(tool, path);
       },
       skillsAddCustomTool: async (def) => {
         return Skills.addCustomTool(def);
@@ -4720,18 +4931,19 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       skillsMarketSearch: async ({ query, limit }) => {
         return { skills: await Skills.searchSkillssh(query, limit ?? 60) };
       },
-      skillsInstallFromMarket: async ({ source, skillId }) => {
-        return Skills.installFromSkillssh(source, skillId);
-      },
+      skillsInstallFromMarket: async ({ source, skillId }) =>
+        loggedEngineCall("skills", "skills.market.install_failed", { source, skillId }, () =>
+          Skills.installFromSkillssh(source, skillId),
+        ),
       skillsCancelInstall: async ({ ref }) => {
         return { ok: Skills.cancelInstall(ref) };
       },
-      skillsGitPreview: async ({ url }) => {
-        return Skills.gitPreview(url);
-      },
-      skillsGitConfirm: async ({ url, tempDir, items }) => {
-        return Skills.gitConfirm(url, tempDir, items);
-      },
+      skillsGitPreview: async ({ url }) =>
+        loggedThrow("skills", "skills.git.preview_failed", { url }, () => Skills.gitPreview(url)),
+      skillsGitConfirm: async ({ url, tempDir, items }) =>
+        loggedEngineCall("skills", "skills.git.confirm_failed", { url, count: items.length }, () =>
+          Skills.gitConfirm(url, tempDir, items),
+        ),
       skillsGitCancelPreview: async ({ tempDir }) => {
         Skills.gitCancelPreview(tempDir);
         return { ok: true };
@@ -4808,21 +5020,22 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       skillsBackupStatus: async () => {
         return { status: Skills.backupStatus() };
       },
-      skillsBackupInit: async () => {
-        return Skills.backupInit();
-      },
-      skillsBackupSetRemote: async ({ url, pat }) => {
-        return Skills.setBackupRemote(url, pat);
-      },
-      skillsBackupCommit: async ({ message }) => {
-        return Skills.backupCommit(message);
-      },
-      skillsBackupPush: async () => {
-        return Skills.backupPush();
-      },
-      skillsBackupPull: async () => {
-        return Skills.backupPull();
-      },
+      // 技能 Git 备份：这一组按约定返回 `{ok:false,error}` 而不抛错（见 loggedEngineCall），
+      // 所以"推送失败只弹一下就没了"的情况必须在这一层留痕。
+      skillsBackupInit: async () =>
+        loggedEngineCall("skills", "skills.backup.init_failed", {}, () => Skills.backupInit()),
+      skillsBackupSetRemote: async ({ url, pat }) =>
+        loggedEngineCall("skills", "skills.backup.remote_failed", { url }, () =>
+          Skills.setBackupRemote(url, pat),
+        ),
+      skillsBackupCommit: async ({ message }) =>
+        loggedEngineCall("skills", "skills.backup.commit_failed", { message }, () =>
+          Skills.backupCommit(message),
+        ),
+      skillsBackupPush: async () =>
+        loggedEngineCall("skills", "skills.backup.push_failed", {}, () => Skills.backupPush()),
+      skillsBackupPull: async () =>
+        loggedEngineCall("skills", "skills.backup.pull_failed", {}, () => Skills.backupPull()),
       skillsBackupSetAuto: async ({ enabled }) => {
         Skills.setAutoBackup(enabled);
         return { ok: true };
@@ -5211,12 +5424,6 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
       win.webview.rpc?.send.chatStats(payload);
     } catch {}
   });
-  // 同上：Agent 回合开跑时的"行已建好"也走同一条通道。
-  Agent.onAgentMessageStarted((payload) => {
-    try {
-      win.webview.rpc?.send.chatMessageStarted(payload);
-    } catch {}
-  });
   // Agent 交互：工具授权弹窗、ask_user 提问、待办清单、产出物登记。
   Agent.onAgentPermissionRequest((payload) => {
     try {
@@ -5368,22 +5575,29 @@ export function initGatewayBroadcast(win: BrowserWindowWithRPC) {
   });
 }
 
-/** MLX 引擎安装日志（mflux venv 安装过程），实时推送到前端展示。 */
+/**
+ * MLX 引擎安装日志（mflux venv 安装过程），推送到前端展示。
+ *
+ * 整批下发（80ms 窗口，AGENTS.md 的日志节流口径）：pip / uv 一次安装能打出几百行，
+ * 逐行 send 会让 webview 每行写一次 store、重渲染一次。
+ */
 export function initMlxInstallBroadcast(win: BrowserWindowWithRPC) {
-  MlxGen.onInstallLog((text) => {
+  const logs = throttleBatch((lines) => {
     try {
-      win.webview.rpc?.send.mlxInstallLog({ text });
+      win.webview.rpc?.send.mlxInstallLog({ lines });
     } catch {}
   });
+  MlxGen.onInstallLog((text) => logs.push(text));
 }
 
-/** MLX 模型权重下载进度，实时推送到前端。 */
+/** MLX 模型权重下载进度，实时推送到前端（合并到 400ms 一帧）。 */
 export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
-  MlxGen.onMlxModelProgress((p) => {
+  const send = throttleLatest<[Parameters<Parameters<typeof MlxGen.onMlxModelProgress>[0]>[0]]>((p) => {
     try {
       win.webview.rpc?.send.mlxModelDownloadProgress(p);
     } catch {}
   });
+  MlxGen.onMlxModelProgress((p) => send.push(p));
   // 生图阶段事件（启动/加载/生成 n/N）实时推送到前端。
   MlxGen.onMlxGenPhase((p) => {
     try {
@@ -5401,32 +5615,35 @@ export function initMediaSetupBroadcast(win: BrowserWindowWithRPC) {
   });
 }
 
-/** PaddleOCR 引擎安装日志 / 阶段 / 模型下载进度，实时推送到前端。 */
+/** PaddleOCR 引擎安装日志 / 阶段 / 模型下载进度，推送到前端（日志整批、进度合并）。 */
 export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
-  PpOcr.onPpOcrInstallLog((text) => {
+  const logs = throttleBatch((lines) => {
     try {
-      win.webview.rpc?.send.ppOcrInstallLog({ text });
+      win.webview.rpc?.send.ppOcrInstallLog({ lines });
     } catch {}
   });
+  PpOcr.onPpOcrInstallLog((text) => logs.push(text));
   PpOcr.onPpOcrPhase((phase, message) => {
     try {
       win.webview.rpc?.send.ppOcrPhase({ phase, message });
     } catch {}
   });
-  PpOcr.onPpOcrModelProgress((p) => {
+  const send = throttleLatest<[Parameters<Parameters<typeof PpOcr.onPpOcrModelProgress>[0]>[0]]>((p) => {
     try {
       win.webview.rpc?.send.ppOcrModelProgress(p);
     } catch {}
   });
+  PpOcr.onPpOcrModelProgress((p) => send.push(p));
 }
 
-/** Tesseract 引擎一键安装日志，实时推送到前端。 */
+/** Tesseract 引擎一键安装日志，推送到前端（整批，同 MLX）。 */
 export function initTessInstallBroadcast(win: BrowserWindowWithRPC) {
-  Ocr.onTesseractInstallLog((text) => {
+  const logs = throttleBatch((lines) => {
     try {
-      win.webview.rpc?.send.tesseractInstallLog({ text });
+      win.webview.rpc?.send.tesseractInstallLog({ lines });
     } catch {}
   });
+  Ocr.onTesseractInstallLog((text) => logs.push(text));
 }
 
 /** Skills 安装进度 + 中央库变更，实时推送到前端。 */

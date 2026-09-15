@@ -70,6 +70,8 @@ const REMOTE = [
 ];
 
 const updates: { id: string; models?: { id: string }[] }[] = [];
+/** 「设为默认模型」下发的参数：必须带 providerId，见对应用例。 */
+const selectCalls: { type: string; value: string; providerId?: string }[] = [];
 
 /** 让单个用例能改「拉取模型列表」的返回（成功 / 失败两种路径都要能跑到）。 */
 let remoteResult: { ok: boolean; models: string[]; error?: string } = { ok: true, models: REMOTE };
@@ -98,7 +100,10 @@ mock.module("@lib/rpc", () => ({
       return { ok: true };
     },
     checkConnection: async () => ({ connected: true }),
-    selectChatModel: async () => ({ ok: true }),
+    selectChatModel: async (params: { type: string; value: string; providerId?: string }) => {
+      selectCalls.push(params);
+      return { ok: true };
+    },
     openGatewayDocs: async () => ({ ok: true }),
   },
 }));
@@ -318,6 +323,26 @@ test("改完密钥重新拉取：上一行结论消失，弹框正常打开", as
   } finally {
     remoteResult = { ok: true, models: REMOTE };
   }
+});
+
+test("设为默认模型：把所属厂商一起带上", async () => {
+  // 网关只往**默认厂商**发云端请求。星标按钮不带 providerId 时，面板只是把模型名记下来，
+  // 地址与密钥还停在另一家 —— 用户看到的就是「应用里能选的模型，用起来说模型不存在」。
+  selectCalls.length = 0;
+  const view = await renderPanel();
+
+  const star = view.container.querySelector<HTMLButtonElement>('[data-set-default="Qwen/Qwen3-8B"]');
+  expect(star).not.toBeNull();
+  await act(async () => {
+    star!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(selectCalls).toEqual([
+    { type: "api", value: "Qwen/Qwen3-8B", providerId: "siliconflow" },
+  ]);
+
+  await view.unmount();
 });
 
 test("逐个添加：点「+」只把那个模型加进去，已有条目不丢", async () => {

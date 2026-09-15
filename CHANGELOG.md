@@ -8,6 +8,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+### Fixed / 修复
+
+- **云端的模型明明在列表里，`omi launch <工具> --model <id>` 却说「未找到模型」**：`--model` 只拿**默认（激活）厂商**这一家的模型清单来比对（旧 settings 槽位 `CLOUD_MODELS` 只镜像激活厂商），而界面上的模型选择器是按「**所有已启用**厂商」聚合的 —— 两边清单口径不同，"应用里能选、命令行说没有"于是成了必然。真实场景：`deepseek-v4.1` 属于已启用的「Omin」，默认厂商却是「OmniLabs」，`omi launch pi --model deepseek-v4.1` 直接报未找到，用户只能回去用 GUI。现在 CLI 按全部已启用厂商匹配（控制通道 `cloudProviders`，应用没跑或还是旧实例时直接读同一张表），模型属于别家时**自动把默认厂商切过去**并打印一行提示（网关只往默认厂商发云端请求，不切等于拿着这个模型去问另一家），厂商没启用时报出是哪一家而不是一句"未找到"；「读取设置」也挪到选模型之后，免得刚切过厂商仍用着上一家的 `VLLM_API_BASE` / `VLLM_API_KEY` 去配工具。`omi models` 的云端段同步改成按厂商分组、列出所有已启用厂商并标出默认那家。界面里同一处坑一并补上：「模型云服务」面板的星标（设为默认模型）与会话翻译页的选择器过去不带 providerId，只记下模型名却不切厂商。
+  - 回归测试：`cli/commands/models.test.ts`（清单扁平化 + 脏数据不炸）、`cli/commands/launch.test.ts`（挑厂商的决策表：默认厂商优先 / 别家已启用照样命中 / 同名多厂商 / 已停用把厂商名带出来）、`mainview/app/main-layout/cloud-provider-panel.test.tsx`（星标必须带 providerId）。
+
+- **生视频卡在「生成中」：上游早就拒了鉴权，应用却一直当成「还在生成」**：轮询对任何非 200 响应都是 `return { done: false }` —— 不报错、不记日志、界面上还是转圈。真实现场：MiniMax 回 `401 / 1004 login fail`（密钥被上游拒了），应用每 5 秒问一次、问满 30 分钟，才由兜底超时标成"生成超时"，`app.log` 里一个字都没有，排查只能靠猜。现在轮询把上游 HTTP 错误分成两类：**401/403 这类重试也不会好的**（鉴权被拒、接口地址不对、路由级 404）先把上游原话写进记录（含 `base_resp.status_code` —— `1004` 这种码正文里本来没有，而大家搜的正是它），并记一条 error 级 `video.poll.http`，记录保持「生成中」并显示原因，**宽限 3 分钟**后才标失败（云端任务已经提交计费，趁这会儿去设置里改对 Key / 地址，还能接着把成片取回来）；**5xx / 网络抖动这类可重试的**同样保留 `processing` 并把原因透到界面（`pollError`），日志按分钟节流（首次必然记，连刷约 2 分钟后从 warn 升为 error）。超时那条文案也会带上"最后一次查询失败：…"。记录里的厂商被删掉时直接失败，不再每 5 秒白问一次。回归测试 `bun/video-gen.test.ts`（401 宽限期内保活、过期判死、5xx 保活且有 warn 日志、路由 404 指向地址、厂商被删直接失败、成功下载落盘）。
+- **API 地址里多带一段版本路径，请求被拼成 `/v1/v2/video_generation`**：提交与轮询各自把厂商地址"规整"成自己需要的前缀，但只在地址已经是目标前缀时不动它 —— 用户按文档填 `https://api.minimax.chat/v1`（MiniMax 文档里到处是 `/v1`），就被拼成 `…/v1/v2/video_generation`，上游只回一句 `404 page not found`，页面照抄这句话，用户完全看不出是地址问题。现在统一先剥掉末尾误填的版本段（`/v1`、`/v2` …，Seedance 的 `/api/v3` 同理）再拼协议路径，并且 404 的报错会直接指出"上游没有这个接口路径（当前 API 地址 …），填根地址即可，不要带 /v1、/v2"。
+- **「模型云服务」的地址栏可以被填成 API Key，之后只回一句 `fetch() URL is invalid`**：新增与保存厂商时校验地址必须以 `http://` / `https://` 开头（空值仍放行，允许先建后补），当场提示"这里填服务地址，不是 API Key"。
+- **MiniMax 生视频打的一直是私有接口：路径、请求体、模型 id 全对不上官方 API**：客户端照搬的是 OmniLabs 那套约定 —— `POST /v2/video_generation` 配 `content: [{type:"text"}]` 数组、轮询 `/v2/query/video_generation/{id}`、成片再从 `/v2/files/{file_id}` 下载，模型写着 `MiniMax-H3`。对着官方接口逐条核过（`api.minimax.chat` / `api.minimaxi.com` 上 `/v2/files/{id}` 根本不存在，返回 `404 page not found`），现在改成官方公开的 v1：`POST /v1/video_generation`（`model` + **`prompt` 字符串** + 首帧图 `first_frame_image`）、`GET /v1/query/video_generation?task_id=…` 查状态、`GET /v1/files/retrieve?file_id=…` 换 `file.download_url` 再下载；模型清单换成真实 id（`MiniMax-Hailuo-2.3` / `MiniMax-Hailuo-02` / `T2V-01` / `T2V-01-Director` / `I2V-01` / `I2V-01-Director`），时长收敛到 Hailuo 认的 6 / 10 秒、分辨率档位改成 720P/768P/1080P（`duration` / `resolution` 只发给吃这两个参数的 Hailuo 系）。只实现了旧 v2 私约的自部署 / 兼容服务仍能兜底：v1 路由不存在（404）时自动退回 v2 形状，并记住这条任务用的是哪套。
+  - 顺带堵住三类"看起来成功、其实没调通"：MiniMax 的**业务错误走 HTTP 200 + `base_resp.status_code`**（1004 鉴权 / 1002 限流 / 2013 参数），过去只看 `res.ok`，于是失败被当成成功、最后报一句"未返回 task_id"；中转站 / 聚合站会把任意路径兜底成 **200 + HTML 首页**，现在会直说"上游返回的是网页而不是接口响应"；两套路径都不存在时明确说"这地址不是 MiniMax 视频服务"并给出官方地址。回归测试：`bun/video-gen.test.ts` 14 条（v1 请求形状与地址不重复、200+1004、200+HTML、v1→v2 兜底、两套都缺、`file_id` 换取下载地址并落盘、两条查询路径的落位与记忆），`scripts/video-gen-smoke.ts` 的 MiniMax mock 同步改成 v1 契约。
+- **生成中的任务卡看不出"在跑、跑了多久"**：卡片改成转圈图标 + 「视频生成中…」+ 右侧走秒的已用时长（一分钟内 `45s`，超过给 `m:ss`），上游不报进度（MiniMax 就不报）时明说"这一栏显示的是已等待时长"而不是画一条假的进度条；超过 3 分钟补一句"云端排队或生成较久是常态，可以继续等或取消"，轮询出错时照旧显示出错原因与「下轮自动重试」。参数面板里 MiniMax 的时长从滑块改成 6s / 10s 两个按钮（滑块停在 7、8、9 秒只会换来上游的参数错误），分辨率档位与协议对齐。
+
 ## [0.0.9-canary.0] - 2026-09-14
 
 ### Added / 新增

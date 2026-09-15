@@ -430,9 +430,12 @@ export function CloudProviderPanel() {
     onSuccess: invalidate,
   });
 
-  // 设为默认模型：selectChatModel("api", id) 同步 VLLM_MODEL_NAME + CHAT_MODEL + remote
+  // 设为默认模型：selectChatModel("api", id) 同步 VLLM_MODEL_NAME + CHAT_MODEL + remote。
+  // providerId 必须带上 —— 网关只往**默认厂商**发云端请求，不把默认厂商切到这台服务商，
+  // 记下的模型名就会拿到另一家的地址和密钥去问，回来的是一句莫名其妙的「模型不存在」。
   const setDefaultMutation = useMutation({
-    mutationFn: (modelId: string) => rpcClient.selectChatModel({ type: "api", value: modelId }),
+    mutationFn: (modelId: string) =>
+      rpcClient.selectChatModel({ type: "api", value: modelId, providerId: selected?.id }),
     onSuccess: invalidate,
   });
 
@@ -893,6 +896,7 @@ export function CloudProviderPanel() {
                                       size="icon-sm"
                                       className="h-6 w-6 text-muted-foreground"
                                       tooltip={t("cloud.setDefault")}
+                                      data-set-default={entry.id}
                                       disabled={setDefaultMutation.isPending}
                                       onClick={() => setDefaultMutation.mutate(entry.id)}
                                     >

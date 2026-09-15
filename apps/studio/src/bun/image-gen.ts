@@ -178,6 +178,25 @@ export async function listImageApiModels(
   return r.models;
 }
 
+/**
+ * 列出某个后端可用的模型 id（RPC 与 Agent 弹窗共用的入口）。
+ *
+ * 凭据只有一个来源：`IMG_PROVIDER_ID` 指向的服务商行。调用方**不能**传地址或密钥 ——
+ * 页面此前传的是 `apiKey: ""`，而空串不会被 `??` 拦下，需要鉴权的上游列模型必然 401。
+ * 唯一例外是 `comfyBaseOverride`：ComfyUI 地址是用户自己的服务地址（不是凭据），
+ * 且弹窗要用「还没落盘的表单值」探测。
+ */
+export async function listImageGenModelIds(
+  backend?: ImageGenBackend,
+  comfyBaseOverride?: string,
+): Promise<string[]> {
+  const cfg = getImageGenConfig();
+  const picked = backend ?? cfg.backend;
+  if (picked === "comfyui") return listComfyCheckpoints(comfyBaseOverride ?? cfg.comfyBase);
+  if (picked === "mlx") return MlxGen.MLX_MODELS.map((m) => m.id);
+  return listImageApiModels(cfg.apiBase, cfg.apiKey);
+}
+
 /** 从 ComfyUI /object_info 拉取可用 checkpoint 列表。 */
 export async function listComfyCheckpoints(base: string): Promise<string[]> {
   const cleanBase = normalizeComfyBase(base);

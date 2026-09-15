@@ -158,6 +158,8 @@ export const videoRecords = sqliteTable("video_records", {
   backend: text("backend").$type<"comfyui" | "cloud" | "minimax" | "seedance">(),
   /** 云端提交时使用的服务商 id：轮询按它去找上游，用户中途换厂商也不影响在途任务。 */
   providerId: text("provider_id"),
+  /** ComfyUI 提交时的服务地址：同 providerId 的道理 —— 用户改地址后在途任务仍要问对服务器。 */
+  comfyBase: text("comfy_base"),
   model: text("model"),
   prompt: text("prompt"),
   negativePrompt: text("negative_prompt"),

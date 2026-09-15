@@ -62,7 +62,7 @@ import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { usePromptStore } from "@stores/prompt";
 import { SkillsSidebar } from "../skills/sidebar";
-import { MemorySidebar } from "../memory-screen";
+import { MemorySidebar } from "../memory/sidebar";
 import { KbSidebar } from "../kb/sidebar";
 import type { PromptKind } from "@/bun/prompt-library";
 import type { TranslationRecordRow } from "@/bun/translate";

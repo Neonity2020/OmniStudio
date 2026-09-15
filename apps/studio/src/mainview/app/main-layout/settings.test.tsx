@@ -204,7 +204,7 @@ test("自启动开关落在概览页：默认开启，关掉后写入 AUTO_START
 });
 
 test("原「性能」页的参数在本地模型页都有入口（删页面不丢设置）", async () => {
-  const { PARAM_FIELDS, PIPELINE_FIELDS } = await import("../local-models-screen");
+  const { PARAM_FIELDS, PIPELINE_FIELDS } = await import("../local-models/params");
   const keys = new Set([
     ...Object.values(PARAM_FIELDS).flat().map((f) => f.key),
     ...PIPELINE_FIELDS.map((f) => f.key),

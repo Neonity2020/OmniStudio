@@ -5,6 +5,7 @@
 - 功能与用法见 [README.md](../README.md)
 - 迭代计划与未完成任务见 [ROADMAP.md](../ROADMAP.md)
 - 命令行手册见 [omi-cli.md](./omi-cli.md)
+- 基准测试的缓存场景（命中 / 不命中的判定与常见坑）见 [benchmark-caching.md](./benchmark-caching.md)
 - 给 AI 编码助手的精简版约定见 [AGENTS.md](../AGENTS.md)
 
 ---

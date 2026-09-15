@@ -307,6 +307,14 @@ function bindMediaServer(): void {
           const mediaSize = statSync(mediaPath).size;
           return fileResponse(mediaPath, mediaSize, req.headers.get("range"));
         }
+        // 本地没有：按需从上游取（图片经过的就是 `bun/proxy.ts` 包装过的 global fetch，
+        // 用户的代理设置对这条链路生效）。这就是广场图**唯一**的取图路径 ——
+        // 界面不再直接加载第三方 CDN，理由见 prompt-library.ts 的 mediaUrl 注释。
+        // 动态 import：prompt-library 静态依赖本模块（取缓存目录 / 本地 URL），
+        // 静态反向引用会成环；这里只在真正 miss 时才加载它。
+        const { fetchPromptMediaUpstream } = await import("./prompt-library");
+        const upstream = await fetchPromptMediaUpstream(rel);
+        if (upstream) return upstream;
         return new Response("Not found", { status: 404 });
       }
 

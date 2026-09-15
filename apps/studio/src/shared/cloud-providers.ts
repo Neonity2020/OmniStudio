@@ -51,8 +51,22 @@ export type CloudPreset = {
   videoApi?: CloudVideoApi;
 };
 
-/** MiniMax 生视频模型（video-gen 与预设共用，避免两处写死两份）。 */
-export const MINIMAX_VIDEO_MODELS = ["MiniMax-H3", "MiniMax-H3-Max"];
+/**
+ * MiniMax 生视频模型（video-gen 与预设共用，避免两处写死两份）。
+ *
+ * 用的是 MiniMax 公开接口里的真实模型 id：Hailuo 系（2.3 / 02）支持
+ * duration 6/10 秒与 resolution 档位；T2V-01 / I2V-01 那代没有这两个参数，
+ * 且 I2V-* 必须带首帧图（video-gen 里按模型名决定发不发这些字段）。
+ * 以前这里写的 "MiniMax-H3" 是 OmniLabs 那边自造的名字，MiniMax 侧不认。
+ */
+export const MINIMAX_VIDEO_MODELS = [
+  "MiniMax-Hailuo-2.3",
+  "MiniMax-Hailuo-02",
+  "T2V-01",
+  "T2V-01-Director",
+  "I2V-01",
+  "I2V-01-Director",
+];
 
 /** 火山方舟 Seedance 生视频模型。 */
 export const SEEDANCE_VIDEO_MODELS = [
@@ -148,7 +162,7 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     vendor: "MiniMax 稀宇科技",
     baseUrl: "https://api.minimax.chat/v1",
     models: ["MiniMax-M1", "MiniMax-Text-01", ...MINIMAX_VIDEO_MODELS],
-    note: "对话走 OpenAI 兼容接口；生视频用 MiniMax 自己的 /v2/video_generation",
+    note: "对话走 OpenAI 兼容接口；生视频走 MiniMax 自己的 /v1/video_generation 与 /v1/query/video_generation（海外站把地址换成 https://api.minimax.io/v1）",
     color: "#e11d48",
     videoApi: "minimax",
   },

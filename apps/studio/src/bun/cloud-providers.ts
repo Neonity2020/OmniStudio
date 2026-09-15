@@ -214,6 +214,15 @@ export function getCloudProviderInfo(id: string): CloudProviderInfo | null {
   return row ? rowToInfo(row) : null;
 }
 
+/**
+ * API 地址得像地址。真踩过：把 API Key 粘进「地址」栏（baseUrl = `sk-…`），
+ * 拉模型列表只回一句 `fetch() URL is invalid`，页面上完全看不出是地址填错了。
+ * 空值放行（地址允许后补），非空但不像 URL 的一律拒绝。
+ */
+function looksLikeUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value.trim());
+}
+
 export function createCloudProvider(input: {
   presetId?: string;
   name?: string;
@@ -243,13 +252,17 @@ export function createCloudProvider(input: {
   } else {
     const name = (input.name ?? "").trim();
     if (!name) return { ok: false, error: "缺少服务商名称" };
+    const baseUrl = (input.baseUrl ?? "").trim();
+    if (baseUrl && !looksLikeUrl(baseUrl)) {
+      return { ok: false, error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）" };
+    }
     let id = `custom-${now}`;
     while (getRow(id)) id = `custom-${Date.now()}`;
     row = {
       id,
       name,
       vendor: "自定义",
-      baseUrl: (input.baseUrl ?? "").trim(),
+      baseUrl,
       apiKey: "",
       models: "[]",
       createdAt: now,
@@ -274,9 +287,14 @@ export function updateCloudProvider(
   const row = getRow(id);
   if (!row) return { ok: false, error: "服务商不存在" };
 
+  const nextBaseUrl = patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl;
+  if (nextBaseUrl && !looksLikeUrl(nextBaseUrl)) {
+    return { ok: false, error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）" };
+  }
+
   const next = {
     name: patch.name?.trim() || row.name,
-    baseUrl: patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl,
+    baseUrl: nextBaseUrl,
     // 新 key 前端传来的是明文，落盘前加密；未提供时保持库里既有值（已是密文，不再动）。
     apiKey: patch.apiKey !== undefined ? encryptSecret(patch.apiKey.trim()) : row.apiKey,
     models: patch.models !== undefined ? JSON.stringify(patch.models) : row.models,

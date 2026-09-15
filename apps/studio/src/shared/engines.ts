@@ -107,6 +107,20 @@ export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, string> = Object.fr
 ) as Record<InferenceEngine, string>;
 
 /**
+ * 各引擎「上下文窗口」的设置键（基准测试页据此提示哪些档位会被服务端拒绝）。
+ *
+ * llama.cpp 的 `SERVER_CTX_SIZE` 是 KV 总量、会被 `--parallel` 的槽位均分，读的人要
+ * 自己换算成单请求的量（见 `shared/benchmark.ts` 的 `serverContextWindow`）；
+ * null = 窗口由模型自己决定，应用侧没有可读的键（MLX）。
+ */
+export const ENGINE_CTX_KEYS: Record<InferenceEngine, string | null> = {
+  "llama.cpp": "SERVER_CTX_SIZE",
+  vllm: "VLLM_MAX_MODEL_LEN",
+  sglang: "SGLANG_CONTEXT_LENGTH",
+  mlx: null,
+};
+
+/**
  * 引擎短名（品牌名，不翻译）。选择器里的徽标用这个，不要用 `settings.engine.*`：
  * 那几个是设置页的完整说明（「MLX（Apple Silicon，MLX 模型）」），放进一行模型
  * 条目里会把模型名挤到只剩省略号。

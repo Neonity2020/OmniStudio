@@ -22,6 +22,7 @@ import { useBackupStore } from "../stores/backup";
 import { useRouter } from "../stores/router";
 import { t } from "../stores/ui-lang";
 import { useAppStore, type AppId } from "../stores/app";
+import { isInstallTerminalLine } from "./install-log";
 
 const knownCompletedIds = new Set<string>();
 
@@ -228,13 +229,12 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 网关启停会改变 MCP 端点可用性，知识库接入页据此刷新。
         queryClient.invalidateQueries({ queryKey: ["gateway-status"] });
       },
-      mlxInstallLog: ({ text }) => {
-        useMlxInstallStore.getState().appendLog(text);
-        // 安装完成（成功或失败）后刷新引擎状态；失败的日志形如「mflux 安装失败」。
-        if (text.includes("安装成功") || text.includes("安装失败")) {
+      mlxInstallLog: ({ lines }) => {
+        useMlxInstallStore.getState().appendLines(lines);
+        // 安装完成（成功或失败）后刷新引擎状态；终态日志形如「mflux 安装成功 / 安装失败」。
+        if (lines.some(isInstallTerminalLine)) {
           queryClient.invalidateQueries({ queryKey: ["mlx-gen-status"] });
-        }
-      },
+        }      },
       mlxModelDownloadProgress: (p) => {
         useMlxModelDownloadStore.getState().setProgress(p);
         // 下载结束（成功/失败）后刷新「已下载模型」列表和「继续下载」状态，
@@ -251,17 +251,17 @@ const rpc = Electroview.defineRPC<AppRPC>({
           queryClient.invalidateQueries({ queryKey: ["mlx-active-model"] });
         }
       },
-      ppOcrInstallLog: ({ text }) => {
-        usePpOcrInstallStore.getState().appendLog(text);
+      ppOcrInstallLog: ({ lines }) => {
+        usePpOcrInstallStore.getState().appendLines(lines);
         // 安装完成（成功或失败）后刷新引擎状态。
-        if (text.includes("安装成功") || text.includes("安装失败")) {
+        if (lines.some(isInstallTerminalLine)) {
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
         }
       },
-      tesseractInstallLog: ({ text }) => {
-        useTessInstallStore.getState().appendLog(text);
+      tesseractInstallLog: ({ lines }) => {
+        useTessInstallStore.getState().appendLines(lines);
         // 安装完成（成功或失败）后刷新引擎状态。
-        if (text.includes("安装成功") || text.includes("安装失败")) {
+        if (lines.some(isInstallTerminalLine)) {
           queryClient.invalidateQueries({ queryKey: ["ocr-status"] });
         }
       },

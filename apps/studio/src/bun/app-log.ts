@@ -54,6 +54,7 @@ export type AppLogSource =
   | "backup" // 备份 / 恢复
   | "mcp" // MCP 服务
   | "automation" // 自动化
+  | "benchmark" // 基准测试（速度扫描 / 能力评测）
   | "update" // 版本更新
   | "notice" // 通知中心落下的条目
   | "usage" // 用量账本（记录失败这类不影响业务的告警）

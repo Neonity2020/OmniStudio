@@ -3,6 +3,7 @@ import path from "path";
 
 import { db } from "./db";
 import { documents, pages } from "./db/schema";
+import { logEvent } from "./app-log";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
 import { getDataDir } from "./paths";
@@ -402,8 +403,16 @@ export function saveOcrRecord(input: { imagePath: string; markdown: string; raw?
         completedAt: now,
       })
       .run();
-  } catch {
-    // ignore：识别结果已在界面上展示，记录保存失败不阻断流程
+  } catch (e) {
+    // 不阻断流程（识别结果已在界面上），但要留痕：记录存不下时用户只会觉得
+    // "历史里少了一条"，而这里原本是完全静默的。
+    logEvent({
+      level: "warn",
+      source: "ocr",
+      event: "ocr.record.save_failed",
+      message: e instanceof Error ? e.message : String(e),
+      detail: { error: e },
+    });
   }
 }
 
@@ -626,7 +635,9 @@ export async function runOcrVlm(input: {
     // 远程来源：使用 OCR 页自己的 OpenAI 兼容配置。
     const provider = getOcrProviderConfig();
     if (!provider.base) {
-      throw new Error("请先在 OCR 页配置远程 OpenAI 兼容服务的 Base URL");
+      // OCR 页早已没有地址输入框：地址与密钥来自「设置 → 模型云服务」里选中的厂商，
+      // 指向一个不存在的输入框只会让人白找。
+      throw new Error("还没有可用的云厂商：请到「设置 → 模型云服务」启用一个厂商，再回到 OCR 页选择模型");
     }
     endpoint = {
       base: provider.base,

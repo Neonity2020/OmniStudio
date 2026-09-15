@@ -7,7 +7,7 @@ import { Button } from "@ui/button";
 import { Spinner } from "@ui/spinner";
 import { useT, useUILang } from "@stores/ui-lang";
 import { cn } from "@lib/utils";
-import { SettingsSection } from "./main-layout/setting-ui";
+import { SettingsSection } from "@components/setting-ui";
 import {
   ACTIVITY_DAYS,
   USAGE_RANGES,

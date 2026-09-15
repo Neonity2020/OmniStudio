@@ -58,11 +58,6 @@ function getBaseUrl(): string {
   return (getSetting("VLLM_API_BASE") || "").replace(/\/+$/, "").replace(/\/v1$/, "");
 }
 
-function authHeaders(): Record<string, string> {
-  const apiKey = getSetting("VLLM_API_KEY");
-  if (apiKey && apiKey !== "EMPTY") return { Authorization: `Bearer ${apiKey}` };
-  return {};
-}
 
 export function resolveAudioPath(ref: string): string | null {
   const base = getImagesBaseDir();
@@ -365,48 +360,6 @@ export async function runTTSEdge(input: {
 // ---------------------------------------------------------------------------
 // ASR
 // ---------------------------------------------------------------------------
-
-export async function runASR(input: {
-  audioRef: string;
-  model?: string;
-}): Promise<VoiceRecordRow> {
-  const abs = resolveAudioPath(input.audioRef);
-  if (!abs || !existsSync(abs)) throw new Error("Audio file not found");
-  const base = getBaseUrl();
-  if (!base) throw new Error("No inference server configured");
-
-  const model = input.model?.trim() || undefined;
-  const mime = "audio/mpeg";
-  const form = new FormData();
-  form.append(
-    "file",
-    new Blob([await Bun.file(abs).arrayBuffer()], { type: mime }),
-    path.basename(abs),
-  );
-  if (model) form.append("model", model);
-
-  const res = await fetch(`${base}/v1/audio/transcriptions`, {
-    method: "POST",
-    body: form,
-    headers: authHeaders(),
-    signal: AbortSignal.timeout(300_000),
-  });
-  if (!res.ok) throw new Error(await errorMessage(res, "ASR request failed"));
-
-  const json = (await res.json().catch(() => null)) as
-    | { text?: string; data?: { text?: string } }
-    | null;
-  const text = json?.text ?? json?.data?.text ?? "";
-  if (!text) throw new Error("Transcription returned no text");
-
-  const record = insertVoiceRecord({
-    kind: "asr",
-    model: model ?? null,
-    text,
-    audioPath: input.audioRef,
-  });
-  return voiceRecordToRow(record);
-}
 
 // ---------------------------------------------------------------------------
 // Voice clones

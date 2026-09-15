@@ -407,3 +407,23 @@ test("生视频只列有视频接口协议的厂商", () => {
     "mm",
   ]);
 });
+
+test("保存厂商：地址栏粘成 API Key 时当场拒绝，而不是回一句 fetch() URL is invalid", () => {
+  const bad = CloudProviders.createCloudProvider({ name: "填错地址的", baseUrl: "sk-opc-abcdef" });
+  expect(bad.ok).toBe(false);
+  expect(bad.error).toContain("http://");
+
+  // 空地址仍然允许（可以先建厂商、后补地址）
+  const blank = CloudProviders.createCloudProvider({ name: "还没填地址的" });
+  expect(blank.ok).toBe(true);
+
+  const good = CloudProviders.createCloudProvider({
+    name: "地址正常的",
+    baseUrl: "https://open.cherryin.net",
+  });
+  expect(good.ok).toBe(true);
+
+  const update = CloudProviders.updateCloudProvider(good.id!, { baseUrl: "sk-opc-abcdef" });
+  expect(update.ok).toBe(false);
+  expect(update.error).toContain("API Key");
+});

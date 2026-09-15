@@ -29,6 +29,7 @@ import {
   DEFAULT_REALTIME_MODEL,
   DEFAULT_REALTIME_VOICE,
   REALTIME_MODELS,
+  realtimeBaseUrlForProvider,
 } from "../shared/realtime-voice";
 
 export {
@@ -62,11 +63,21 @@ export function getRealtimeProviderConfig(): RealtimeProviderConfig {
   const providerId = (getSetting("VOICE_CALL_REALTIME_PROVIDER_ID") || "").trim();
   const provider = CloudProviders.resolveCloudProvider(providerId);
   const apiKey = provider?.apiKey.trim() || (getSetting("VOICE_CALL_REALTIME_API_KEY") || "").trim();
+  /**
+   * WebSocket 地址：优先用「厂商推导值」，其次才看手填的设置。
+   *
+   * 手填值只有在**用户真的改过**时才优先（比如自建中转）—— 判据是"存的值不等于默认值"。
+   * 否则选了百炼却还连着上一个厂商的地址，表现为"换厂商后连不上"，而界面上地址那一栏
+   * 看着是对的（它是旧的）。
+   */
+  const stored = (getSetting("VOICE_CALL_REALTIME_BASE_URL") || "").trim();
+  const derived = realtimeBaseUrlForProvider(provider?.baseUrl);
+  const customized = stored !== "" && stored !== DEFAULT_REALTIME_BASE_URL;
   return {
     provider: getVoiceCallProvider(),
     providerId,
     apiKey,
-    baseUrl: (getSetting("VOICE_CALL_REALTIME_BASE_URL") || DEFAULT_REALTIME_BASE_URL).trim(),
+    baseUrl: customized ? stored : (derived ?? stored ?? DEFAULT_REALTIME_BASE_URL),
     model: (getSetting("VOICE_CALL_REALTIME_MODEL") || DEFAULT_REALTIME_MODEL).trim(),
     voice: (getSetting("VOICE_CALL_REALTIME_VOICE") || DEFAULT_REALTIME_VOICE).trim(),
     configured: !!apiKey,
@@ -189,10 +200,21 @@ export class RealtimeVoiceClient {
   private openedOnce = false;
   private respText = "";
   private log: (line: string) => void;
+  /**
+   * 失败上报（可选）：与 `log` 分开是为了让失败进 `error` 级 —— 过程日志按 debug 记，
+   * 混在一起的话 `omi logs --level error` 看不到任何通话故障，「云端连不上」只能靠
+   * 用户复述现象。
+   */
+  private onFailure: (message: string, detail?: Record<string, unknown>) => void;
 
-  constructor(cfg: RealtimeVoiceConfig, log?: (line: string) => void) {
+  constructor(
+    cfg: RealtimeVoiceConfig,
+    log?: (line: string) => void,
+    onFailure?: (message: string, detail?: Record<string, unknown>) => void,
+  ) {
     this.cfg = cfg;
     this.log = log ?? (() => {});
+    this.onFailure = onFailure ?? (() => {});
   }
 
   /** 建立连接并下发 session 配置。断线自动重连（1s→2s→5s 封顶，最多 5 次）。 */
@@ -286,6 +308,12 @@ export class RealtimeVoiceClient {
   private fail(message: string): void {
     this.stopped = true;
     this.log(`realtime error: ${message}`);
+    // 地址与模型一起记：连不上时第一个要确认的就是"到底连的哪个端点、要的哪个模型"。
+    this.onFailure(`云端实时语音失败：${message}`, {
+      model: this.cfg.model,
+      baseUrl: this.cfg.baseUrl,
+      openedOnce: this.openedOnce,
+    });
     this.emit({ type: "error", message });
   }
 

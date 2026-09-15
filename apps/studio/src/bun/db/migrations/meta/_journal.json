@@ -225,6 +225,13 @@
       "when": 1790095000005,
       "tag": "0031_nosy_jubilee",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1790095000006,
+      "tag": "0032_pale_thundra",
+      "breakpoints": true
     }
   ]
 }

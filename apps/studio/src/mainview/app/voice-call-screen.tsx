@@ -26,11 +26,12 @@ import { useAppStore } from "@stores/app";
 import { useRouter } from "@stores/router";
 import { useVoiceCallStore, type CallPhase } from "@stores/voice-call";
 import { useVoiceCallEngine } from "@hooks/use-voice-call";
+import { useServerMessageSync } from "@hooks/use-server-message-sync";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 // 只从 shared 取值：bun/realtime-voice.ts 会被主进程的 db / paths 拖进来，
 // 而 webview 里没有 os / fs，值导入它等于整页白屏（常量本身也不再重复一份）。
-import { DEFAULT_REALTIME_MODEL, REALTIME_MODELS } from "../../shared/realtime-voice";
+import { DEFAULT_REALTIME_MODEL, REALTIME_MODELS, isRealtimeModelId, realtimeBaseUrlForProvider } from "../../shared/realtime-voice";
 
 /**
  * 实时语音通话（电话式协作）：
@@ -171,6 +172,7 @@ function PreflightRow({
   /** 未就绪时点击跳去配置。 */
   onClick?: () => void;
 }) {
+  const t = useT();
   return (
     <button
       type="button"
@@ -192,7 +194,7 @@ function PreflightRow({
         <span className="font-medium">{label}</span>
         <span className="ml-1.5 break-words text-muted-foreground">{detail}</span>
         {!ok && onClick && (
-          <span className="mt-0.5 block text-[11px] font-medium text-primary">去配置 →</span>
+          <span className="mt-0.5 block text-[11px] font-medium text-primary">{t("voicecall.goConfigure")}</span>
         )}
       </div>
     </button>
@@ -221,8 +223,6 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
   // 必须声明在 selectedProvider 之前：下面 .find 的回调在本行执行前就会读到它。
   const [providerId, setProviderId] = useState("");
   const selectedProvider = providerList.find((p) => p.id === providerId) ?? null;
-  /** 主进程解析出来的 Key（厂商的 Key，或没选厂商时旧版手填的那个）。 */
-  const resolvedKey = cfg?.apiKey ?? "";
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [voice, setVoice] = useState("");
@@ -261,13 +261,8 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
     }
     setTesting(true);
     try {
-      // 连接测试用厂商的 Key（主进程按 providerId 解析；这里传已解析好的值兜底）。
-      const res = await rpcClient.voicecallTestRealtime({
-        apiKey: selectedProvider?.apiKey ?? resolvedKey,
-        baseUrl,
-        model,
-        voice,
-      });
+      // 连接测试的 Key 由主进程按 providerId 解析 —— 页面不再把密钥读进 webview 又传回来。
+      const res = await rpcClient.voicecallTestRealtime({ baseUrl, model, voice });
       setTestResult(res);
       if (res.ok) setShowForm(false);
     } finally {
@@ -321,6 +316,10 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
               onValueChange={(v) => {
                 setProviderId(v);
                 const p = providerList.find((x) => x.id === v);
+                // 地址跟着厂商走：认得出的厂商（百炼）直接推出实时端点，不再让用户手填
+                // 一个换厂商不会跟着换的 wss 地址。认不出的（自建中转）保持现值。
+                const derived = realtimeBaseUrlForProvider(p?.baseUrl);
+                if (derived) setBaseUrl(derived);
                 // 顺手把该厂商的实时对话模型填上（有的话），省一步选择。
                 const realtime = p?.models.find((m) => m.id === DEFAULT_REALTIME_MODEL);
                 if (realtime) setModel(realtime.id);
@@ -347,9 +346,6 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
               </SelectContent>
             </Select>
             <p className="text-[10px] text-muted-foreground">{t("cloud.where")}</p>
-            {!selectedProvider && resolvedKey ? (
-              <p className="text-[10px] text-amber-600">{t("voicecall.cloudKeyLegacy")}</p>
-            ) : null}
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
@@ -361,7 +357,9 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
                 <SelectContent position="popper" align="start" sideOffset={4}>
                   {[
                     ...new Set([
-                      ...(selectedProvider?.models.map((m) => m.id) ?? []),
+                      // 厂商清单里只挑实时族 —— 以前把对话 / 生图模型一起列出来，
+                      // 选中后只会在连接时报一句看不懂的错。
+                      ...(selectedProvider?.models.map((m) => m.id).filter(isRealtimeModelId) ?? []),
                       ...REALTIME_MODELS,
                     ]),
                   ].map((m) => (
@@ -524,12 +522,13 @@ export function VoiceCallWindow() {
     enabled: conversationId != null,
   });
 
+  // 切会话先清空，避免把上一个通话的消息带过来；重取只合并（规则与对话 / Agent 共用）。
+  // 合并不整体替换：否则窗口重新聚焦 / invalidate 触发重取时，会把正在流式的助手
+  // 正文用服务端那份还没落库的内容盖掉（见 use-server-message-sync 的文档）。
   useEffect(() => {
-    useChatStore.getState().setStreaming(false);
-    if (convQuery.data) {
-      useChatStore.getState().setActiveMessages(convQuery.data.messages);
-    }
-  }, [conversationId, convQuery.data]);
+    useChatStore.getState().setActiveMessages([]);
+  }, [conversationId]);
+  useServerMessageSync(conversationId, convQuery.data);
 
   useEffect(() => {
     const el = scrollRef.current;
