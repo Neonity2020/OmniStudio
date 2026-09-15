@@ -130,8 +130,8 @@ td.tps { font-weight: 600; color: var(--primary); }
 .bar-ctx { width: 46px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
 .bar-cache { width: 96px; color: var(--muted); }
 .bar-label { width: 190px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bar-track { flex: 1; height: 9px; border-radius: 999px; background: var(--border); overflow: hidden; }
-.bar-fill { height: 100%; border-radius: 999px; background: var(--primary); opacity: .75; }
+.bar-track { flex: 1; display: block; height: 9px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--primary); opacity: .75; }
 .bar-value { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
 .cache-row { display: flex; flex-wrap: wrap; gap: 6px 14px; border: 1px solid var(--border); background: var(--card); border-radius: 10px; padding: 8px 12px; font-size: 12px; margin-bottom: 6px; }
 .cache-row .ctx { width: 46px; color: var(--muted); font-variant-numeric: tabular-nums; }

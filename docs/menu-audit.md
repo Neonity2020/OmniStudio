@@ -292,7 +292,7 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
   （error 级、带 conversationId 与字节数）。
 - [x] **[P2] 云端连接失败只记 debug** — `RealtimeVoiceClient` 新增 `onFailure` 钩子（与过程日志
   `log` 分开），失败记 error 并带上 model / baseUrl / openedOnce；「未配置就拨号」也留痕。
-- [ ] **[P2] 音频/字幕推送无节流** — `rpc/index.ts:5300-5318`。见跨菜单 B（与 OCR 的推送一起做，
+- [x] **[P2] 音频/字幕推送无节流** — 已修：字幕按 60ms `throttleLatest` 合并、终态前 flush；音频分片是追加队列不节流（见跨菜单 B）。
   它们是同一类问题，改法也一样）。
 
 ---
@@ -316,9 +316,9 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 - [x] **[P2] 硬编码中文错误文案** — 六处（启动 / 停止 / 安装 / 删除失败）改走词条。
 - [x] **[P2] 注释与文案漂移** — 两处「Base URL + API Key」的注释改掉；`voice.compat.desc` 的中英文案
   同步成「厂商与密钥在设置里配一次，这里只选模型」。
-- [ ] **[P2] 页面仍接收明文 apiKey** — `getTTSProviderConfig` / `getASRProviderConfig` 的响应仍带
+- [x] **[P2] 页面仍接收明文 apiKey** — 已修：`getTTSProviderConfig` / `getASRProviderConfig` 响应去掉 `apiKey`，`voicecallSaveProviderConfig` / `voicecallTestRealtime` 也删除 `apiKey` 参数，密钥只在主进程按 `providerId` 解析。
   `apiKey`（当前 UI 不用它）。要清理得连同 `CloudProviderInfo.apiKey` 一起处理 —— 见跨菜单 C。
-- [ ] **[P2] `runTTS` 仍允许页面传 `base` 覆盖** — `rpc/index.ts:1573`；`voice.ts:257`。
+- [x] **[P2] `runTTS` 仍允许页面传 `base` 覆盖** — 已修：`runTTS` 不再接受 `base`，地址密钥只从服务商行 + 全局设置解析。
   同属跨菜单 C 的收口清单。
 
 ---
@@ -482,7 +482,7 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
   **测试**：`live-translate-queue.test.ts` 6 条（含"10×5 只派 3 个""在飞占额度""原文在变不翻"）。
 - [x] **[P2] 硬编码中文** — `translate-screen.tsx` 的「切换失败」→ `translate.switchFailed`；
   `live-translate.tsx` 三处引擎失败兜底 → 复用既有的 `voice.engine.installFailed` / `voice.engine.startFailed`。
-- [ ] **[P2] 自建选择器绕开统一组件** — `translate-screen.tsx:55-223`。见跨菜单 C。
+- [~] **[P2] 自建选择器绕开统一组件** — 复核后判定不是「页面自填云端地址/密钥」：翻译器同时管理**本地运行中模型**与云端模型，并通过 `selectChatModel` 复用全局默认（带 `providerId`）。`CloudModelSelect` 只覆盖云端两级选择，不能直接替。保留。
 
 **验收**：`bun run typecheck` 0 错、`bun run lint` 0 错、全量 **1280 用例 / 0 失败**。
 
@@ -537,9 +537,9 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
 - [x] **[P2] 死 RPC + 误导性 UI** — `skillsGetCentralInfo`/`skillsSetCentralPath`/`skillsReindex`
   有契约与实现（`rpc/index.ts:2017-2030/4682-4691`）但前端无调用；侧栏 tooltip 写「中央技能库路径」
   而内容是「N 技能 · M 工具」（`skills/sidebar.tsx:52-59`）。
-- [ ] **[P2] zip/.skill 导入未逐条目校验路径** — 注释声称防 Zip-Slip（`installer.ts:418-441`），
+- [x] **[P2] zip/.skill 导入未逐条目校验路径** — 已修：`installer.ts` 在解压前用 `isSafeArchiveEntry` 逐条目校验（`../` / 绝对路径直接拒绝）。
   实际解包后只 `findSkillRoot`，依赖系统 `unzip` 的行为。
-- [ ] **[P2] 市场搜索固定 60 条无分页** — `market-tab.tsx:128`；我的技能是客户端全量过滤（`:111-127`）。
+- [~] **[P2] 市场搜索固定 60 条无分页** — 上游 skills.sh 搜索 API 只接受 `limit`（上限 300）、无游标，无法真正分页；保留固定上限。
 
 ---
 
@@ -565,7 +565,7 @@ AGENTS.md 写「a new cloud model selector must go through `CloudModelSelect` + 
   全量返回，docs-tab 直接 `docs.map`。KB 是唯一完全没有上限的文档列表（目录导入单次 300 文件、可累积）。
 - [x] **[P2] 导入操作无结果反馈** — `kbAddFiles` 对不存在路径直接 `continue`（`knowledge.ts:356`）；
   `kbAddFolder` 的 `skipped` 前端丢弃（`docs-tab.tsx:339`）；四个 mutation 都无 `onError`（`:318-361`）。
-- [ ] **[P2] KB 云模型选择绕开 cloud_providers** — 候选来自扁平设置 `CLOUD_MODELS`
+- [ ] **[P2] KB 云模型选择绕开 cloud_providers** — 明确保留为债：需把 KB 表的 per-KB `embeddingBase/ApiKey`、`rerankBase/ApiKey` 迁成 `providerId`（含 DB 迁移 + 候选解析 + 界面），影响面大，单列后续。
   （`knowledge.ts:641-657`），页面手填 base/key（`kb/settings-tab.tsx:391-404`）。见跨菜单 C。
 
 ---
