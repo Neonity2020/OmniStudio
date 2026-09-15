@@ -100,6 +100,7 @@ mock.module("@lib/rpc", () => ({
 const { act, createElement } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
+const { TooltipProvider } = await import("@ui/tooltip");
 const { SettingsScreen } = await import("./settings");
 const { translate } = await import("../../../shared/i18n");
 
@@ -118,7 +119,15 @@ async function renderSettings() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const root = createRoot(container);
   await act(async () => {
-    root.render(createElement(QueryClientProvider, { client }, createElement(SettingsScreen)));
+    // 与 App 同款 Provider（components/providers.tsx）：本地模型 / 模型库的行内按钮
+    // 挂了 Tooltip，缺 Provider 会直接抛错。
+    root.render(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(TooltipProvider, null, createElement(SettingsScreen)),
+      ),
+    );
   });
   // 一拍给查询解析，一拍给渲染。
   await act(async () => {
