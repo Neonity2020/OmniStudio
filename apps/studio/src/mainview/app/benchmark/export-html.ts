@@ -1,4 +1,5 @@
 import { fmtCtx } from "@/shared/benchmark";
+import { RELEASE_REPO_URL } from "@/shared/release";
 import type { DisplayResult } from "./parts";
 import {
   cacheRowsOf,
@@ -20,6 +21,17 @@ import {
  */
 
 export type ReportLang = "zh" | "en";
+
+/** 产品名（不翻译）：报告抬头的字标与 <title> 都用它，免得分享出去不知道出自哪儿。 */
+const BRAND = "OmniStudio";
+
+/**
+ * 品牌标记：与应用图标同一个形状（圆角方环）。
+ *
+ * 内联 SVG 而不是引 `assets/omni-logo.png`（512² ≈ 350KB）：报告要能当一个文件
+ * 发出去，塞一张图就白搭；这个几何形状几十个字节就能画完。
+ */
+const BRAND_MARK = `<svg class="mark" viewBox="0 0 100 100" width="22" height="22" aria-hidden="true" focusable="false"><path fill="currentColor" fill-rule="evenodd" d="M26 0h48a26 26 0 0 1 26 26v48a26 26 0 0 1-26 26H26A26 26 0 0 1 0 74V26A26 26 0 0 1 26 0Zm13.5 25.5h21a14 14 0 0 1 14 14v21a14 14 0 0 1-14 14h-21a14 14 0 0 1-14-14v-21a14 14 0 0 1 14-14Z"/></svg>`;
 
 /** HTML 转义：错误串、模型名、档位标签都来自服务端或历史数据，一律当不可信文本。 */
 function esc(value: unknown): string {
@@ -90,6 +102,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .report { max-width: 1040px; margin: 0 auto; padding: 40px 28px 56px; }
+.brand { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+.brand .mark { color: var(--fg); }
+.brand .name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+.brand .tagline { font-size: 11px; color: var(--muted); border-left: 1px solid var(--border); padding-left: 8px; }
 .eyebrow { margin: 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 h1 { margin: 6px 0 10px; font-size: 22px; line-height: 1.3; word-break: break-word; }
 h2 { margin: 0 0 10px; font-size: 14px; }
@@ -132,13 +148,20 @@ td.tps { font-weight: 600; color: var(--primary); }
 .bar-label { width: 190px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar-track { flex: 1; display: block; height: 9px; border-radius: 999px; background: var(--border); overflow: hidden; }
 .bar-fill { display: block; height: 100%; border-radius: 999px; background: var(--primary); opacity: .75; }
-.bar-value { width: 74px; text-align: right; font-variant-numeric: tabular-nums; }
+.bar-value { width: 74px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bar-value.wide { width: 118px; }
 .cache-row { display: flex; flex-wrap: wrap; gap: 6px 14px; border: 1px solid var(--border); background: var(--card); border-radius: 10px; padding: 8px 12px; font-size: 12px; margin-bottom: 6px; }
 .cache-row .ctx { width: 46px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .speedup { color: var(--ok); margin-left: 4px; }
 .reuse { margin-left: auto; font-size: 11px; color: var(--muted); }
 .err-banner { border: 1px solid var(--danger); border-radius: 10px; padding: 10px 12px; color: var(--danger); font-size: 12px; margin-top: 16px; }
-footer { margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11px; color: var(--muted); }
+footer {
+  margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--border);
+  display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center;
+  font-size: 11px; color: var(--muted);
+}
+footer .repo { margin-left: auto; color: var(--primary); text-decoration: none; font-variant-numeric: tabular-nums; }
+footer .repo:hover { text-decoration: underline; }
 .empty { border: 1px dashed var(--border); border-radius: 10px; padding: 24px; text-align: center; font-size: 12px; color: var(--muted); }
 @media print {
   body { background: #fff; }
@@ -373,7 +396,7 @@ function evalBody(result: DisplayResult, t: ReportT): string {
       (c) => `<div class="bar-row">
       <span class="bar-label" title="${esc(c.category)}">${esc(c.category)}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${Math.min(Math.max(c.accuracy, 0), 100).toFixed(2)}%"></span></span>
-      <span class="bar-value">${esc(c.accuracy)}% (${esc(c.correct)}/${esc(c.total)})</span>
+      <span class="bar-value wide">${esc(c.accuracy)}% (${esc(c.correct)}/${esc(c.total)})</span>
     </div>`,
     )
     .join("\n    ");
@@ -415,12 +438,17 @@ export function buildBenchmarkReportHtml(opts: {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${esc(`${title} · ${result.model}`)}</title>
+<title>${esc(`${BRAND} · ${title} · ${result.model}`)}</title>
 <style>${STYLE}</style>
 </head>
 <body>
 <main class="report">
   <header>
+    <div class="brand">
+      ${BRAND_MARK}
+      <span class="name">${esc(BRAND)}</span>
+      <span class="tagline">${esc(t("benchmark.export.tagline"))}</span>
+    </div>
     <p class="eyebrow">${esc(title)}</p>
     <h1>${esc(result.model)}</h1>
     <div class="badges">
@@ -437,7 +465,10 @@ export function buildBenchmarkReportHtml(opts: {
   ${result.kind === "speed" ? cacheSection(result, t) : ""}
   ${result.kind === "speed" ? speedTable(result, t) : ""}
   ${result.kind === "speed" ? speedChart(result, t) : ""}
-  <footer>${esc(t("benchmark.export.footer"))} · ${esc(t("benchmark.export.generatedAt"))} ${esc(fmtStamp(now.getTime()))}</footer>
+  <footer>
+    <span>${esc(t("benchmark.export.footer"))} · ${esc(t("benchmark.export.generatedAt"))} ${esc(fmtStamp(now.getTime()))}</span>
+    <a class="repo" href="${esc(RELEASE_REPO_URL)}">${esc(RELEASE_REPO_URL.replace(/^https?:\/\//, ""))}</a>
+  </footer>
 </main>
 </body>
 </html>
