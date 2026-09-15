@@ -19,6 +19,7 @@ import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { ScrollArea } from "@ui/scroll-area";
+import { PageShell } from "@components/setting-ui";
 import { useGatewayStore } from "@stores/gateway";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
@@ -176,7 +177,7 @@ export function GatewayScreen() {
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-6 pb-30 pt-2">
+      <PageShell>
         <div>
           <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <WaypointsIcon className="size-5" />
@@ -352,7 +353,7 @@ export function GatewayScreen() {
           <p className="mt-2 text-[11px] text-muted-foreground/70">{t("settings.gateway.protocol.hint")}</p>
           <p className="mt-1 text-[11px] text-muted-foreground/70">{t("settings.gateway.endpoints.hint")}</p>
         </div>
-      </div>
+      </PageShell>
     </ScrollArea>
   );
 }

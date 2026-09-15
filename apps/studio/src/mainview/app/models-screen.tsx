@@ -37,6 +37,7 @@ import {
   ModelFormatBadge,
 } from "@/mainview/components/model-category-badge";
 import { ModelCategoryChips } from "@/mainview/components/model-category-chips";
+import { PageShell } from "@components/setting-ui";
 
 /**
  * 推荐模型行（与在线市场/本地模型的行样式统一）：
@@ -308,7 +309,7 @@ export function ModelsScreen({
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-6 pb-30 pt-2">
+      <PageShell>
         <div>
           <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <StoreIcon className="size-5" />
@@ -369,7 +370,7 @@ export function ModelsScreen({
             </div>
           )}
         </div>
-      </div>
+      </PageShell>
     </ScrollArea>
   );
 }

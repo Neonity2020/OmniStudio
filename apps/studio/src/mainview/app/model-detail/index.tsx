@@ -12,6 +12,7 @@ import { useModelDetailStore } from "@stores/model-detail";
 import { useT } from "@stores/ui-lang";
 import { MODEL_SOURCES, MODEL_SOURCE_META, classifyModel, fileBaseName, matchQuant, type MarketFile, type ModelSource } from "../../../shared/modelscope";
 import { ModelFileKind } from "../../../shared/modelscope";
+import { PageShell } from "@components/setting-ui";
 import { SourceBadge } from "@components/source-badge";
 import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { installedFileNames } from "@/mainview/lib/installed-models";
@@ -138,7 +139,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-6 py-6">
+      <PageShell>
         {/* Back */}
         <Button variant="ghost" size="sm" className="-ml-2 w-fit" onClick={goBack}>
           <ArrowLeftIcon data-icon="inline-start" className="size-4" />
@@ -389,7 +390,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
             </div>
           )}
         </div>
-      </div>
+      </PageShell>
     </ScrollArea>
   );
 }

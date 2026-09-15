@@ -4,6 +4,7 @@ import { rpcClient } from "@lib/rpc";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { ScrollArea } from "@ui/scroll-area";
+import { PageShell } from "@components/setting-ui";
 import { useRouter } from "@stores/router";
 import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 import { useT } from "@stores/ui-lang";
@@ -52,7 +53,7 @@ export function LocalModelsScreen({
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-6 pb-30 pt-2">
+      <PageShell>
         <div>
           <h2 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <CpuIcon className="size-5" />
@@ -98,7 +99,7 @@ export function LocalModelsScreen({
         </div>
 
         <DefaultModelConfig />
-      </div>
+      </PageShell>
     </ScrollArea>
   );
 }

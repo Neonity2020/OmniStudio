@@ -79,3 +79,31 @@ export function PageHeader({ title, description }: { title: string; description?
     </div>
   );
 }
+
+/**
+ * 一级页面的内容宽度。设置页的每个标签页都走 `PageShell`，宽度只在这里改 ——
+ * 各页各写一个 `max-w-*` 会让概览 / 使用统计 / 本地模型 / 默认模型左右边缘互相对不齐，
+ * 切标签页时整块内容还会横向跳动。
+ */
+export const PAGE_WIDTH = "max-w-5xl";
+
+/**
+ * 一级页面的内容容器：居中 + 统一宽度与内边距 + 纵向间距。
+ * 页面自身的差异（`gap-3`、`h-full` 等）通过 `className` 覆盖默认值。
+ */
+export function PageShell({
+  children,
+  className,
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div
+      data-slot="page-shell"
+      className={cn("mx-auto flex w-full flex-col gap-5 px-6 py-6", PAGE_WIDTH, className)}
+    >
+      {children}
+    </div>
+  );
+}

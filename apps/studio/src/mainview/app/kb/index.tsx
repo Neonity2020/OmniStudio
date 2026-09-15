@@ -15,6 +15,7 @@ import { Button } from "@ui/button";
 import { useKbStore, type KbTab } from "@stores/kb";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { StatCard } from "@components/stat-card";
 import type { KbView } from "@/bun/knowledge";
 import { KbDocsTab } from "./docs-tab";
 import { KbRecallTab } from "./recall-tab";
@@ -37,33 +38,6 @@ const TABS: { key: KbTab; labelKey: string }[] = [
   { key: "governance", labelKey: "kb.tab.governance" },
   { key: "access", labelKey: "kb.tab.access" },
 ];
-
-function StatCard({
-  icon,
-  value,
-  label,
-  caption,
-}: {
-  icon: React.ReactNode;
-  value: string;
-  label: string;
-  caption?: string;
-}) {
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border bg-card px-3 py-2">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-semibold tabular-nums leading-tight">{value}</span>
-        <span className="block truncate text-[10px] leading-tight text-muted-foreground">
-          {label}
-          {caption ? ` · ${caption}` : ""}
-        </span>
-      </span>
-    </div>
-  );
-}
 
 /** 库详情头部：名称/描述 + 四格统计带 + 标签栏。 */
 function KbHeader({ kb }: { kb: KbView }) {
@@ -90,22 +64,26 @@ function KbHeader({ kb }: { kb: KbView }) {
 
       <div className="flex flex-wrap gap-2">
         <StatCard
+          variant="rowCompact"
           icon={<FileTextIcon className="size-4" />}
           value={String(kb.docCount)}
           label={t("kb.stats.docs")}
         />
         <StatCard
+          variant="rowCompact"
           icon={<LayersIcon className="size-4" />}
           value={String(kb.chunkCount)}
           label={t("kb.stats.chunks")}
         />
         <StatCard
+          variant="rowCompact"
           icon={<SparklesIcon className="size-4" />}
           value={kb.embeddingModel ? `${kb.embeddedCount}/${kb.chunkCount}` : "—"}
           label={t("kb.stats.vectors")}
           caption={kb.embeddingModel ? `${vectorPct}%` : undefined}
         />
         <StatCard
+          variant="rowCompact"
           icon={<SearchIcon className="size-4" />}
           value={kb.embeddingModel ? t("kb.stats.mixed") : t("kb.stats.keyword")}
           label={t("kb.stats.retrieval")}

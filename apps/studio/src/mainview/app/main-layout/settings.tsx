@@ -24,6 +24,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { ScrollArea } from "@ui/scroll-area";
+import { PageShell } from "@components/setting-ui";
 import { CloudProviderPanel } from "./cloud-provider-panel";
 import { IntegrationsSettings } from "./integrations-tab";
 import { DefaultModelsPanel } from "./default-models-panel";
@@ -110,9 +111,6 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   { labelKey: "settings.group.data", tabs: ["usage", "logs", "backup"] },
 ];
 
-/** 命令 / 代码片段较宽，命令行页与云服务、默认模型一样放宽内容宽度。 */
-const WIDE_TABS: SettingsTab[] = ["network", "defaults", "cli"];
-
 /** 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题。 */
 const SELF_HEADED_TABS: SettingsTab[] = [
   "network",
@@ -128,7 +126,7 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "appearance",
 ];
 
-/** 命令 / 代码片段较宽，命令行页与云服务、默认模型一样放宽内容宽度。 */
+/** 设置页：一级页面，每个标签页的内容宽度统一由 `PageShell` 决定。 */
 export function SettingsScreen() {
   const t = useT();
   const [activeTab, setActiveTab] = useState<SettingsTab>("stats");
@@ -242,13 +240,7 @@ export function SettingsScreen() {
         </div>
       ) : (
         <ScrollArea className="min-h-0 flex-1">
-          {/* 模型云服务 / 默认模型是宽版式（三栏 / 双列卡片），放宽内容宽度 */}
-          <div
-            className={cn(
-              "mx-auto w-full px-6 py-6",
-              WIDE_TABS.includes(activeTab) ? "max-w-5xl" : "max-w-2xl",
-            )}
-          >
+          <PageShell>
             {/* 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题 */}
             {!SELF_HEADED_TABS.includes(activeTab) && (
               <div className="mb-6">
@@ -286,7 +278,7 @@ export function SettingsScreen() {
             )}
 
             {activeTab === "about" && <AboutTab />}
-          </div>
+          </PageShell>
         </ScrollArea>
       )}
     </div>

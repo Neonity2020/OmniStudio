@@ -203,6 +203,44 @@ test("自启动开关落在概览页：默认开启，关掉后写入 AUTO_START
   await cleanup();
 });
 
+/**
+ * 页面宽度只有一份。
+ *
+ * 每页各写自己的 `max-w-*`（曾经同时存在 max-w-2xl / 3xl / 5xl / 6xl 四种，控制台那份
+ * 干脆一个都没写），切标签页时内容左右边缘会来回跳 —— 这里钉住"所有标签页都用
+ * `PageShell` 的同一个宽度"：容器在场、宽度等于 `PAGE_WIDTH`、且页面没有再写第二个
+ * `max-w-*` 把它盖掉。
+ */
+test("每个标签页的内容容器宽度一致（都走 PageShell 的单一宽度）", async () => {
+  const { PAGE_WIDTH } = await import("@components/setting-ui");
+  const { cleanup } = await renderSettings();
+  const nav = document.querySelector("nav[aria-label]");
+
+  // 挑的是改造前宽度各不相同的页面：概览/本地模型/模型库是 3xl，默认模型 5xl，
+  // 使用统计 6xl，通用这类行式页面 2xl，控制台完全没有宽度上限。
+  for (const label of ["概览", "默认模型", "本地模型", "模型库", "使用统计", "通用", "控制台"]) {
+    const button = [...nav!.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === label,
+    );
+    expect(button).not.toBeUndefined();
+    await act(async () => {
+      (button as unknown as HTMLElement).click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const shells = document.querySelectorAll('[data-slot="page-shell"]');
+    expect({ label, shells: shells.length }).toEqual({ label, shells: 1 });
+    const widths = shells[0]!.className
+      .split(/\s+/)
+      .filter((cls) => cls.startsWith("max-w-"));
+    expect({ label, widths }).toEqual({ label, widths: [PAGE_WIDTH] });
+  }
+
+  await cleanup();
+});
+
 test("原「性能」页的参数在本地模型页都有入口（删页面不丢设置）", async () => {
   const { PARAM_FIELDS, PIPELINE_FIELDS } = await import("../local-models/params");
   const keys = new Set([

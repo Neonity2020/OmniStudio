@@ -75,7 +75,7 @@
 9. **筛选 chip 样式两份**：提示词广场与 Skills 各一份（已抽 `components/filter-chip.ts:chipClass`，两处均接入）。
 10. **「muted」分段切换另一变体三处**：`kb/index.tsx`（标签栏）/ `prompt/edit-dialog.tsx`（类型切换）/ `app-sidebar.tsx:1304`（视图切换），样式为 `bg-muted p-0.5` + 选中 `bg-background shadow-sm`，与 `SegmentedControl`（border + primary）不同。待各自菜单处理时再决定是否并入 `SegmentedControl` 的 variant。
 11. **应用页反向依赖 `main-layout` 内部件**：`memory-screen.tsx` 从 `./main-layout/memory-tab` 引卡片、从 `./main-layout/setting-ui` 引排版件；`usage-screen.tsx` 同样引 `setting-ui`。应用目录依赖布局目录属于层次倒置。→ 已把通用的 `setting-ui` 上移到 `components/setting-ui.tsx`（10 处导入同步改 `@components/setting-ui`），记忆卡片迁入 `app/memory/`（见 §15）。
-12. **统计小卡（StatCard）至少四份**：`memory/index.tsx`、`kb/index.tsx`、`dashboard-screen.tsx`、`kb/governance-tab.tsx:Stat`，尺寸/字号各有差异，统一会改变界面观感，暂记为债、待产品确认。
+12. **统计小卡（StatCard）至少四份**：**已收口**到 `components/stat-card.tsx`，用 `variant`（row / rowCompact / stack / stackCompact）固化记忆概览 / 知识库详情 / 概览页 / 知识库治理四种外观，类串逐字保留；概览页与治理页保留同名薄包装。新增 `stat-card.test.tsx` 锁住四个变体。
 13. **设置分页全部躺在 `app/main-layout/`**：`settings.tsx` + 九个 `*-tab.tsx`（含 1082 行的 `backup-tab.tsx`）+ `cloud-provider-panel` / `default-models-panel` / `console-screen` / `document-view`。它们既不是布局也不是侧栏，理想结构是独立的 `app/settings/` 目录。移动面广（导入路径 + 测试），曾经保守地未动；本轮已将栏目内的集成页拆为 `integrations-tab.tsx`。
 14. **模型相关的屏未归组**：`app/models-screen.tsx`（模型库）、`app/market-screen.tsx`（在线市场）、`app/local-models/`（本地模型）、`app/model-detail/`（详情）分散在 `app/` 根/各自目录，命名不统一且共享 `formatBytes` / `MODEL_*` 等。理想结构是 `app/models/{index,market,local,detail}`。需重命名 + 改多处导入 + 测试，本轮任务额度内未做；`formatBytes` 已统一到 `@lib/format`（见债 #7），不再有两份重复。
 

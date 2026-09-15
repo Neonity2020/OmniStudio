@@ -2,24 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { ArchiveIcon, BrainIcon, GlobeIcon, HistoryIcon, LayersIcon, PinIcon, ShieldAlertIcon, SparklesIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { useT } from "@stores/ui-lang";
+import { StatCard } from "@components/stat-card";
 import { MemoryEnableCard, MemoryMaintenanceCard, MemoryPendingCard, MemorySyncCard } from "./cards";
 import { MemoryListCard } from "./list-card";
 import { MemoryApiCard } from "./api-card";
-
-function StatCard({ label, value, icon }: { label: string; value: string | number; icon: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-3 rounded-xl border bg-card px-4 py-3">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-        {icon}
-      </span>
-      <div className="min-w-0">
-        <p className="text-lg font-semibold leading-tight tabular-nums">{value}</p>
-        <p className="truncate text-[11px] text-muted-foreground">{label}</p>
-      </div>
-    </div>
-  );
-}
-
 
 export function MemoryScreen() {
   const t = useT();
