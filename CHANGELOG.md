@@ -12,6 +12,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 - **CI 从 0.0.9 起一直是红的（本地却全绿）：runner 装的 bun 是 1.3.9，而 `--parallel` 是 1.4 才有的开关**。1.3.x 上 `bun test --parallel` **不报未知参数、直接忽略**，于是回到"共享 worker + `mock.module` 跨文件泄漏"的老症状（`bunfig.toml` 里记过的那一类：safeJoin / 备份 / 密钥加密 / 笔记 / 内置技能…全在毫不相干的文件里红），CI 80 红、本地 0 红，差别只在运行时版本 —— 版本来自 `package.json` 的 `packageManager`，而 runner 按它装 1.3.9。修法是把版本钉到 1.4.2（开发机实际在用的），并在 `bunfig.toml` 写明"升级运行时时先确认 `bun test --help` 里还有 `--parallel`"。同一提交在 1.3.9 下 80 红 / 1.4.2 下全绿，已双向验证。
 
+- **修完版本之后仍剩两条"只有本机才成立"的断言**（都是新加的用例，本机绿、CI 红，原因与运行环境有关而不是与代码有关）：
+  - `python-engine` 的清华镜像重试用例按字面串 `"pip install"` 过滤命令 —— 本机恰好装着 uv 时走的是 `uv pip install`，匹配得上；CI 没有 uv 走的是 `<venv>/bin/pip3 install`，而 `pip3 install` 里并没有 `"pip install"` 这个子串，于是断言收到 0 条命令。现在 uv 的探测可注入（`PythonInstallOptions.findUv`），"有 uv"与"没 uv"两条命令形状各有一条用例钉住（`--index-url` vs `-i`、`uv venv` vs `python -m venv`）。
+  - `gateway-web` 的两条用例要读 vite 产物 `apps/studio/dist`，而 CI 的检查作业从来没有构建过它（独立的 `vite build` 作业在另一个 runner 上）。现在没构建时**如实跳过并打出说明**（本地没构建过也不会红），同时 ci.yml 的检查作业补了一步 `vite build`（约 20 秒），所以它们在 CI 上是真跑到的，不是被跳过掩盖掉的。
+
 ## [0.1.0] - 2026-09-15
 
 ### Added / 新增

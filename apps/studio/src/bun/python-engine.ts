@@ -57,6 +57,12 @@ export type PythonInstallOptions = {
   runner?: CommandRunner;
   /** 找系统 Python 的方式（测试注入假实现）。 */
   findPython?: () => string | null;
+  /**
+   * 找 uv 的方式。装了 uv 与没装是**两条命令形状**（`uv pip install --index-url` /
+   * `pip3 install -i`），测试要把两条都钉住 —— 只钉住一条的话，本机恰好装着 uv 就绿、
+   * CI（没有 uv）就红，而红的只是断言写错了，不是装不上去。
+   */
+  findUv?: () => string | null;
   /** 创建 venv 用的 Python；不传则自行查找。 */
   pythonPath?: string;
 };
@@ -182,7 +188,7 @@ export async function installPythonEngine(options: PythonInstallOptions): Promis
   }
 
   const engineDir = pythonEngineDir(id);
-  const uv = Bun.which("uv", { PATH: searchPath() });
+  const uv = (options.findUv ?? (() => Bun.which("uv", { PATH: searchPath() })))();
   const venvPython = pythonEnginePython(id);
 
   try {

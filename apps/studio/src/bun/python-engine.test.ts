@@ -124,6 +124,17 @@ function pythonEnginePythonFor(venvDir: string): string {
   return `${venvDir}/bin/python3`;
 }
 
+/**
+ * 装包那几条命令（不区分 uv 与 pip 两种形状）。
+ *
+ * 别按字面串 `"pip install"` 过滤：`pip3 install` 里没有那个子串（"pip3" 后面是 "3"），
+ * 而有没有 uv 又取决于跑测试的机器 —— 这正是 CI 上唯一红掉的那条断言（本机有 uv、CI 没有）。
+ * 两条形状都只在装包命令里带独立的 `install` 参数，用它判定。
+ */
+function installCalls(calls: string[][]): string[][] {
+  return calls.filter((cmd) => cmd.includes("install"));
+}
+
 describe("找 Python 与版本探测", () => {
   test("解析 3.x 的 minor 版本", () => {
     const run: CommandRunner = {
@@ -206,7 +217,7 @@ describe("installPythonEngine", () => {
 
     expect(result.ok).toBe(true);
     expect(result.version).toBe("0.28.4");
-    expect(run.calls.some((cmd) => cmd.join(" ").includes("pip install"))).toBe(false);
+    expect(installCalls(run.calls)).toHaveLength(0);
     expect(report.lines.some((line) => line.includes("已安装"))).toBe(true);
   });
 
@@ -221,13 +232,40 @@ describe("installPythonEngine", () => {
       reporter: report,
       runner: run,
       findPython: () => "/usr/bin/python3.12",
+      // 钉住"机器上没有 uv"这条形状：本机恰好装着 uv 时走的是 `uv pip install
+      // --index-url`，只按字面串 "pip install" 断言会在这里变红（CI 上就是这么红的）。
+      findUv: () => null,
     });
 
     expect(result.ok).toBe(true);
-    const pipCalls = run.calls.filter((cmd) => cmd.join(" ").includes("pip install"));
+    const pipCalls = installCalls(run.calls);
     expect(pipCalls).toHaveLength(2);
-    expect(pipCalls[1]!.join(" ")).toContain("pypi.tuna.tsinghua.edu.cn");
+    expect(pipCalls[0]!.join(" ")).toContain("pip3 install");
+    expect(pipCalls[1]!.join(" ")).toContain("-i https://pypi.tuna.tsinghua.edu.cn/simple");
     expect(report.lines.some((line) => line.includes("清华镜像"))).toBe(true);
+  });
+
+  test("有 uv 时走 uv 那条形状（venv 与 index 参数都不一样）", async () => {
+    const report = reporter();
+    const run = fakeRunner({ pipSucceedsAt: 2, probeVersion: "0.28.4" });
+    const result = await installPythonEngine({
+      id: "mlx-lm",
+      label: "MLX",
+      packages: ["mlx-lm"],
+      probeModule: "mlx_lm",
+      reporter: report,
+      runner: run,
+      findPython: () => "/usr/bin/python3.12",
+      findUv: () => "/opt/homebrew/bin/uv",
+    });
+
+    expect(result.ok).toBe(true);
+    // venv 由 uv 建，装包走 `uv pip install`，重试时用 `--index-url`（不是 pip 的 `-i`）
+    expect(run.calls.some((cmd) => cmd[0] === "/opt/homebrew/bin/uv" && cmd[1] === "venv")).toBe(true);
+    const pipCalls = installCalls(run.calls);
+    expect(pipCalls).toHaveLength(2);
+    expect(pipCalls[0]!.slice(0, 3)).toEqual(["/opt/homebrew/bin/uv", "pip", "install"]);
+    expect(pipCalls[1]!.join(" ")).toContain("--index-url https://pypi.tuna.tsinghua.edu.cn/simple");
   });
 
   test("两次都失败：如实报错，收尾行走失败分支", async () => {
