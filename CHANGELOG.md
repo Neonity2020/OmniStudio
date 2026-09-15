@@ -8,6 +8,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+## [0.1.0] - 2026-09-15
+
 ### Added / 新增
 
 - **阶跃星辰（StepFun）的语音三件套接进对应应用：TTS / ASR / 实时通话各走自己的端点**。「模型云服务」里的阶跃预设补上了 `stepaudio-3-tts`、`stepaudio-3-asr-max`、`stepaudio-3-realtime-preview`（含 2.5 代作对照），语音页、语音识别页、通话页直接就能选到 —— 预设新增的模型会**自动补进存量厂商行**（`syncPresetModels`），老用户不需要先去设置页点「获取模型列表」。三家的接口差异都在实现里写死了，用户不必知道：**TTS** 走 OpenAI 兼容的 `/v1/audio/speech`（`stepaudio-3-tts`，`voice` 必填）；**ASR** 走 `/v1/audio/asr/sse`（base64 + SSE 增量文本 —— StepAudio 3 ASR 只在这个端点，另一个同步文件接口不支持它、带时间戳的那条又要求音频是公网可下载的 URL，桌面端给不了；说话人分离因此不支持，会记一条日志而不是假装成功）；**实时通话**走 `wss://api.stepfun.com/v1/realtime`，事件名与百炼相同但字段不同：`pcm16` 而不是 `pcm`、断句只认 `server_vad`、上行 24k 而不是 16k，且**不发手工 commit**（服务端 VAD 自己管，补一个提交空缓冲的 commit 只会换来一条报错）。方言判定在 `realtimeDialectFor`（地址为主、模型名为辅），换厂商时地址、模型、音色一起跟着换（`isPresetRealtimeEndpoint` 让"从阶跃切回百炼"不再把阶跃的 wss 当成用户自填值留着）。
