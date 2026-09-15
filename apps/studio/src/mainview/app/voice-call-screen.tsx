@@ -19,6 +19,7 @@ import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Markdown } from "@components/markdown";
+import { SegmentedControl } from "@components/segmented-control";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import type { ChatMessage } from "../../bun/chat";
 import { useChatStore } from "@stores/chat";
@@ -571,24 +572,15 @@ export function VoiceCallWindow() {
           {/* 通话模式切换 */}
           <div>
             <Label className="mb-1.5 block text-xs">{t("voicecall.providerTitle")}</Label>
-            <div className="flex overflow-hidden rounded-lg border">
-              {(["local", "cloud"] as const).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => providerMutation.mutate(m)}
-                  className={cn(
-                    "flex flex-1 items-center justify-center gap-1.5 px-2 py-1.5 text-xs transition-colors",
-                    provider === m
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {m === "local" ? <CpuIcon className="size-3.5" /> : <CloudIcon className="size-3.5" />}
-                  {m === "local" ? t("voicecall.providerLocal") : t("voicecall.providerCloud")}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              variant="attached"
+              value={provider}
+              onChange={(m) => providerMutation.mutate(m)}
+              options={[
+                { value: "local", label: t("voicecall.providerLocal"), icon: <CpuIcon className="size-3.5" /> },
+                { value: "cloud", label: t("voicecall.providerCloud"), icon: <CloudIcon className="size-3.5" /> },
+              ]}
+            />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {providerSetting === ""
                 ? t("voicecall.providerFirstHint")

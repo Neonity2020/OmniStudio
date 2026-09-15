@@ -69,7 +69,7 @@
 3. **`rpc/index.ts` 巨型单文件**（同时承载契约与 handler，5000+ 行）。→ 契约类型抽到 `shared/rpc-contract.ts`（长期）。
 4. **错误约定不统一**：多数 handler 返回 `{ ok, error }` 判别式，少数直接 throw。前端调用点需同时处理两种。→ 遇到时统一，不专门重写。
 5. **侧栏列表组件都堆在 `app-sidebar.tsx`（1400+ 行）**。→ 各应用列表拆到各自目录（`app/chat/sidebar.tsx` 等），长期。已知：`BenchmarkRecordList` 仍在此文件。
-6. **分段切换控件多处重复**：逐字相同的 detached 版曾在 `ocr/parts.tsx` / `skills/parts.tsx` 各一份（已抽 `components/segmented-control.tsx`，两处均改为再导出）；另有约 9 处 `flex overflow-hidden rounded-lg border` 的 attached 版（benchmark×2 / live-translate / translate / voicecall / image / video / voice asr / voice tts），样式略有差异，待各自菜单处理时统一。
+6. **分段切换控件多处重复**：逐字相同的 detached 版曾在 `ocr/parts.tsx` / `skills/parts.tsx` 各一份（已抽 `components/segmented-control.tsx`，两处均改为再导出）。**已收口 attached 版**：`SegmentedControl` 新增 `variant="attached"`（`flex overflow-hidden rounded-lg border`），按「是否带图标」自动选 `px-2 gap-1.5` / `px-3`，benchmark×2 / live-translate / translate / voicecall / image / video / voice asr / voice tts 共 9 处全部改为调用，外观逐字保持不变；新增 `segmented-control.test.tsx` 锁住两个变体的类串。
 7. **字节格式化多份实现且语义不一**：`lib/format.ts:formatSize`（IEC）与 voice / image / ocr / kb / setup 各自的 `formatBytes`（有的十进制 GB/MB，有的 IEC，有的带 TB）。统一会改变界面显示值（1000 vs 1024），需产品确认后再做。
 8. **复制按钮三份实现**：OCR / 翻译 / 提示词各写一份（已抽 `components/copy-button.tsx`，三处均已接入；顺带修了 webview 里 `navigator.clipboard` 不可用时另两份会抛的问题）。后又支持 `iconOnly` + `title` + `className`，并接入设置 → 集成的 Agent 启动命令、设置 → 命令行的 `CopyLine` / `SnippetCard`。剩余：`cloud-provider-panel` 密钥行内联的裸 `<button>`（与显示/隐藏眼睛成对）、`document-view` / `dashboard` / `gateway` / `local-models` / `voice-asr-result` 等处的复制（各自菜单处理）。
 9. **筛选 chip 样式两份**：提示词广场与 Skills 各一份（已抽 `components/filter-chip.ts:chipClass`，两处均接入）。

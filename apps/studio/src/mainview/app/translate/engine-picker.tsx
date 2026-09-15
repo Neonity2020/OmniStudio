@@ -7,6 +7,7 @@ import { Label } from "@ui/label";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@ui/select";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { SegmentedControl } from "@components/segmented-control";
 
 export function useTranslationEngine(): "model" | "google" {
   const { data: settingsData } = useQuery({
@@ -105,24 +106,16 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   return (
     <div>
       <Label className="mb-1.5 block text-xs">{t("translate.engine.title")}</Label>
-      <div className="flex overflow-hidden rounded-lg border">
-        {(["model", "google"] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            disabled={busy}
-            onClick={() => switchEngine.mutate(key)}
-            className={cn(
-              "flex-1 px-3 py-1.5 text-xs transition-colors",
-              engineKey === key
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-          >
-            {key === "model" ? t("translate.engine.model") : t("translate.engine.google")}
-          </button>
-        ))}
-      </div>
+      <SegmentedControl
+        variant="attached"
+        disabled={busy}
+        value={engineKey}
+        onChange={(v) => switchEngine.mutate(v)}
+        options={[
+          { value: "model", label: t("translate.engine.model") },
+          { value: "google", label: t("translate.engine.google") },
+        ]}
+      />
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
         {switchEngine.isPending
           ? t("translate.engine.switching")

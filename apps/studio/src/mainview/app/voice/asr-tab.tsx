@@ -4,6 +4,7 @@ import { AudioLinesIcon, MicIcon, XIcon, Loader2Icon, FileAudioIcon, SquareIcon,
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError, ResultEmpty } from "@components/media-result";
+import { SegmentedControl } from "@components/segmented-control";
 import { Button } from "@ui/button";
 import { Label } from "@ui/label";
 import { Badge } from "@ui/badge";
@@ -591,30 +592,16 @@ export function AsrTab() {
           {/* 推理引擎切换 */}
           <div>
             <Label className="mb-1.5 block text-xs">{t("voice.asr.engine")}</Label>
-            <div className="flex overflow-hidden rounded-lg border">
-              {(
-                [
-                  { key: "whisper", label: t("voice.asrAudiocpp.engineWhisper"), icon: <ServerIcon className="size-3.5" /> },
-                  { key: "audiocpp", label: t("voice.asrAudiocpp.engineAcp"), icon: <CpuIcon className="size-3.5" /> },
-                  { key: "api", label: t("voice.asr.sourceRemote"), icon: <GlobeIcon className="size-3.5" /> },
-                ] as const
-              ).map(({ key, label, icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => switchEngine(key)}
-                  className={cn(
-                    "flex flex-1 items-center justify-center gap-1.5 px-2 py-1.5 text-xs transition-colors",
-                    engineMode === key
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {icon}
-                  {label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              variant="attached"
+              value={engineMode}
+              onChange={switchEngine}
+              options={[
+                { value: "whisper", label: t("voice.asrAudiocpp.engineWhisper"), icon: <ServerIcon className="size-3.5" /> },
+                { value: "audiocpp", label: t("voice.asrAudiocpp.engineAcp"), icon: <CpuIcon className="size-3.5" /> },
+                { value: "api", label: t("voice.asr.sourceRemote"), icon: <GlobeIcon className="size-3.5" /> },
+              ]}
+            />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {engineMode === "whisper"
                 ? t("voice.asr.desc")

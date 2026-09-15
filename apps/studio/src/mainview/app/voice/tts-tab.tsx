@@ -4,6 +4,7 @@ import { AudioLinesIcon, XIcon, Loader2Icon, FileAudioIcon, SparklesIcon, Square
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError, ResultEmpty } from "@components/media-result";
+import { SegmentedControl } from "@components/segmented-control";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
@@ -16,7 +17,6 @@ import { AUDIOCPP_REPO, AUDIOCPP_LANG_LABELS } from "@/shared/audiocpp";
 import { detectReferenceAudioSupport } from "@/shared/tts-reference-audio";
 import type { TtsLocalModelInfo } from "../../../bun/tts-local";
 import type { VoiceRecordRow } from "../../../bun/voice";
-import { cn } from "@/mainview/lib/utils";
 import { DEFAULT_VOICE_BASE_URL } from "../voice-provider-presets";
 import { PlayAudio, ResultPanel, TtsLoading, SettingsValues, useClones, EdgeVoicePicker, LocalModelRow, LocalVoicePicker } from "./parts";
 
@@ -286,30 +286,16 @@ export function TtsTab() {
           {/* 推理引擎切换 */}
           <div>
             <Label className="mb-1.5 block text-xs">{t("voice.tts.engine")}</Label>
-            <div className="flex overflow-hidden rounded-lg border">
-              {(
-                [
-                  { key: "local", label: t("voice.tts.sourceLocal"), icon: <CpuIcon className="size-3.5" /> },
-                  { key: "edge", label: t("voice.tts.sourceEdge"), icon: <GlobeIcon className="size-3.5" /> },
-                  { key: "compat", label: t("voice.tts.sourceCompat"), icon: <ServerIcon className="size-3.5" /> },
-                ] as const
-              ).map(({ key, label, icon }) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => switchSource(key)}
-                  className={cn(
-                    "flex flex-1 items-center justify-center gap-1.5 px-2 py-1.5 text-xs transition-colors",
-                    source === key
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {icon}
-                  {label}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              variant="attached"
+              value={source}
+              onChange={switchSource}
+              options={[
+                { value: "local", label: t("voice.tts.sourceLocal"), icon: <CpuIcon className="size-3.5" /> },
+                { value: "edge", label: t("voice.tts.sourceEdge"), icon: <GlobeIcon className="size-3.5" /> },
+                { value: "compat", label: t("voice.tts.sourceCompat"), icon: <ServerIcon className="size-3.5" /> },
+              ]}
+            />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {t(source === "local" ? "voice.local.desc" : source === "edge" ? "voice.tts.edgeDesc" : "voice.compat.desc")}
             </p>

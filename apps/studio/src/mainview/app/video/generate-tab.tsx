@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SparklesIcon, Loader2Icon, EraserIcon, ClapperboardIcon, ChevronDownIcon, ImagePlusIcon, XIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
+import { SegmentedControl } from "@components/segmented-control";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
@@ -245,23 +246,12 @@ export function GenerateTab() {
           {/* 后端切换 */}
           <div>
             <Label className="mb-1.5 block text-xs">{t("video.backend")}</Label>
-            <div className="flex overflow-hidden rounded-lg border">
-              {BACKEND_ITEMS.map(({ key, label }) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => switchBackend(key)}
-                  className={cn(
-                    "flex-1 px-3 py-1.5 text-xs transition-colors",
-                    backend === key
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {t(label)}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              variant="attached"
+              value={backend}
+              onChange={switchBackend}
+              options={BACKEND_ITEMS.map((b) => ({ value: b.key, label: t(b.label) }))}
+            />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {t(
                 backend === "comfyui"

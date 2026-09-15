@@ -8,6 +8,7 @@ import { Spinner } from "@ui/spinner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { BENCHMARK_CACHE_MODES, BENCHMARK_MAX_CONTEXT, BENCHMARK_MIN_CONTEXT, fmtCtx } from "@/shared/benchmark";
 import { cn } from "@/mainview/lib/utils";
+import { SegmentedControl } from "@components/segmented-control";
 import type { BenchmarkConfig } from "./use-benchmark-config";
 
 /** 左栏配置面板：测速 / 评测的全部参数与启动按钮。 */
@@ -22,46 +23,30 @@ export function BenchmarkConfigPanel({ cfg }: { cfg: BenchmarkConfig }) {
           <div className="flex flex-col gap-5">
             <div>
               <Label className="mb-1.5 block text-xs">{t("benchmark.tab")}</Label>
-              <div className="flex overflow-hidden rounded-lg border">
-                {(["speed", "eval"] as const).map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    disabled={isRunning}
-                    onClick={() => setMode(key)}
-                    className={cn(
-                      "flex-1 px-3 py-1.5 text-xs transition-colors",
-                      mode === key
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    {t(key === "speed" ? "benchmark.tab.speed" : "benchmark.tab.eval")}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl
+                variant="attached"
+                disabled={isRunning}
+                value={mode}
+                onChange={setMode}
+                options={[
+                  { value: "speed", label: t("benchmark.tab.speed") },
+                  { value: "eval", label: t("benchmark.tab.eval") },
+                ]}
+              />
             </div>
   
             <div>
               <Label className="mb-1.5 block text-xs">{t("benchmark.source")}</Label>
-              <div className="flex overflow-hidden rounded-lg border">
-                {(["local", "cloud"] as const).map((key) => (
-                  <button
-                    key={key}
-                    type="button"
-                    disabled={isRunning}
-                    onClick={() => setSource(key)}
-                    className={cn(
-                      "flex-1 px-3 py-1.5 text-xs transition-colors",
-                      source === key
-                        ? "bg-primary text-primary-foreground"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    {t(key === "local" ? "benchmark.source.local" : "benchmark.source.cloud")}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl
+                variant="attached"
+                disabled={isRunning}
+                value={source}
+                onChange={setSource}
+                options={[
+                  { value: "local", label: t("benchmark.source.local") },
+                  { value: "cloud", label: t("benchmark.source.cloud") },
+                ]}
+              />
             </div>
   
             {source === "local" ? (

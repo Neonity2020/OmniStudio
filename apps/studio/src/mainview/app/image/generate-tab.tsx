@@ -12,6 +12,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@ui/collaps
 import { useT, useUILang } from "@stores/ui-lang";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError } from "@components/media-result";
+import { SegmentedControl } from "@components/segmented-control";
 import { useImageStore } from "@stores/image";
 import { useMlxInstallStore } from "@stores/mlx-install";
 import { useMlxModelDownloadStore } from "@stores/mlx-model-download";
@@ -305,32 +306,19 @@ export function GenerateTab() {
           {/* 后端切换 */}
           <div>
             <Label className="mb-1.5 block text-xs">{t("image.backend")}</Label>
-            <div className="flex overflow-hidden rounded-lg border">
-              {(
-                [
-                  { key: "api", label: "image.backend.cloud" },
-                  { key: "mlx", label: "image.backend.mlx" },
-                  { key: "comfyui", label: "image.backend.comfyui" },
-                ] as const
-              ).map(({ key, label }) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => {
-                    setBackend(key);
-                    void rpcClient.saveImageGenConfig({ backend: key });
-                  }}
-                  className={cn(
-                    "flex-1 px-3 py-1.5 text-xs transition-colors",
-                    backend === key
-                      ? "bg-primary text-primary-foreground"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )}
-                >
-                  {t(label)}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl
+              variant="attached"
+              value={backend}
+              onChange={(key) => {
+                setBackend(key);
+                void rpcClient.saveImageGenConfig({ backend: key });
+              }}
+              options={[
+                { value: "api", label: t("image.backend.cloud") },
+                { value: "mlx", label: t("image.backend.mlx") },
+                { value: "comfyui", label: t("image.backend.comfyui") },
+              ]}
+            />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {t(
                 backend === "api"
