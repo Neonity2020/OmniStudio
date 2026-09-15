@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { formatBytes } from "@lib/format";
 import { SourceBadge } from "@components/source-badge";
 import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
@@ -36,13 +37,6 @@ import {
 } from "@/shared/modelscope";
 import { ModelCategoryChips } from "@/mainview/components/model-category-chips";
 import { cn } from "@/mainview/lib/utils";
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
-}
 
 function formatParams(params: number): string {
   if (!params) return "";

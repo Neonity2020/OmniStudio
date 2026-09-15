@@ -1,9 +1,5 @@
-export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
-}
+// 体积口径统一到 @lib/format（十进制 1000 进位，模型/下载量通用）。
+export { formatBytes } from "@lib/format";
 
 export function formatParams(params: number): string {
   if (!params) return "";

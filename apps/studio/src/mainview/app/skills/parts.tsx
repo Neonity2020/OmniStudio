@@ -35,12 +35,10 @@ import {
 } from "@/shared/skills";
 import { cn } from "@/mainview/lib/utils";
 
-export function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "—";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
-}
+import { formatBytes as formatBytesSi } from "@lib/format";
+
+/** Skills 文件体积沿用 1 位小数（MB），与 @lib/format 默认口径只差一个小数位。 */
+export const formatBytes = (bytes: number) => formatBytesSi(bytes, { mbDecimals: 1 });
 
 export { chipClass } from "@components/filter-chip";
 

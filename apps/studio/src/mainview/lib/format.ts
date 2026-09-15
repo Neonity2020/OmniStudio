@@ -69,6 +69,26 @@ export function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/**
+ * 十进制（1000 进位）字节格式化 —— 模型体积 / 下载量 / 存储占用的统一口径。
+ *
+ * 原先 model-detail / market / models / local-models / voice / skills / dashboard /
+ * download-view 各写一份，零点处理与小数位略有差异，这里用参数吸收，避免把
+ * 「0 B 还是 —」「GB 一位还是两位」这类差异带进界面（改口径要先跟显示值对齐）。
+ *
+ * IEC（1024 进位）的几处（`formatSize` / kb / image / ocr / setup）语义不同，未并入。
+ */
+export function formatBytes(
+  bytes: number,
+  opts?: { zero?: string; gbDecimals?: number; mbDecimals?: number },
+): string {
+  const { zero = "—", gbDecimals = 2, mbDecimals = 0 } = opts ?? {};
+  if (!Number.isFinite(bytes) || bytes <= 0) return zero;
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(gbDecimals)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(mbDecimals)} MB`;
+  return `${Math.round(bytes / 1e3)} KB`;
+}
+
 export function friendlyType(mime: string): string {
   if (mime.includes("pdf")) return "PDF";
   if (mime.includes("png")) return "PNG";

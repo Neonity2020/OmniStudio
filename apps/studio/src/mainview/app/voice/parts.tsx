@@ -518,10 +518,7 @@ export function LocalVoicePicker({
 }
 
 
-export function formatBytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return "—";
-  if (n >= 1e9) return `${(n / 1e9).toFixed(2)} GB`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} MB`;
-  return `${Math.round(n / 1e3)} KB`;
-}
+// 体积口径统一到 @lib/format（本文件内也直接调用）。
+import { formatBytes } from "@lib/format";
+export { formatBytes };
 

@@ -33,6 +33,7 @@ import type { ServerStatus } from "../../bun/server-manager";
 import type { ServerStats } from "../../bun/stats";
 import { ENGINE_PORT_KEYS, modelNameFromRef, type InferenceEngine } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
+import { formatBytes as formatBytesSi } from "@lib/format";
 
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -42,11 +43,9 @@ function formatTokens(n: number): string {
   return String(Math.round(n));
 }
 
+/** 概览页沿用「0 B」占位与 1 位 GB 小数，口径集中到 @lib/format。 */
 function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
+  return formatBytesSi(bytes, { zero: "0 B", gbDecimals: 1 });
 }
 
 function formatRate(tokPerSec: number): string {
