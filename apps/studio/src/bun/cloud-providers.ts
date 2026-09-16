@@ -4,13 +4,17 @@ import { db } from "./db";
 import { cloudProviders } from "./db/schema";
 import { ensureSettingsEncrypted, getAllSettings, getSetting, updateSettings } from "./db/settings";
 import { logEvent } from "./app-log";
-import { decryptSecret, encryptSecret, isEncryptedSecret } from "./secrets";
+import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "./secrets";
 import {
+  CLOUD_PRESETS,
   getPreset,
+  isBuiltinBaseUrl,
+  isBuiltinProvider,
   isLocalBaseUrl,
   modelTypeOf,
   parseCloudModels,
   presetModelEntries,
+  sortProviders,
   type CloudModelEntry,
   type CloudModelType,
   type CloudProviderInfo,
@@ -42,7 +46,7 @@ function rowToInfo(row: typeof cloudProviders.$inferSelect): CloudProviderInfo {
     name: row.name,
     vendor: row.vendor,
     baseUrl: row.baseUrl,
-    apiKey: decryptSecret(row.apiKey),
+    apiKey: readApiKey(row),
     models: parseCloudModels(row.models),
     enabled: row.enabled === 1,
     videoApi: (row.videoApi ?? "") as CloudVideoApi,
@@ -52,10 +56,37 @@ function rowToInfo(row: typeof cloudProviders.$inferSelect): CloudProviderInfo {
   };
 }
 
-/** 读行时取明文 apiKey（密文落盘、读取解密；旧明文透传）。 */
-function rowApiKey(row: { apiKey: string }): string {
-  return decryptSecret(row.apiKey);
+/**
+ * 读行时取明文 apiKey（密文落盘、读取解密；旧明文透传）。
+ * 解不开时按空串处理并记一条日志（见 `readApiKey`），不把异常抛给调用方。
+ */
+function rowApiKey(row: { id: string; name?: string; apiKey: string }): string {
+  return readApiKey(row);
 }
+
+/**
+ * apiKey 解不开时的降级：按空串处理（= 这一行退化成"没配密钥"）并记一条日志。
+ * 多来自"恢复了一份别处机器的备份"——归档不含 `secrets.key`，那份密文在本机
+ * 解不开；让整个模型云服务页跟着炸掉没有意义，用户重填一次密钥即可。
+ */
+function readApiKey(row: { id: string; name?: string; apiKey: string }): string {
+  const result = tryDecryptSecret(row.apiKey);
+  if (result.ok) return result.value;
+  if (!apiKeyWarned.has(row.id)) {
+    apiKeyWarned.add(row.id);
+    logEvent({
+      level: "warn",
+      source: "settings",
+      event: "cloud_provider.decrypt.failed",
+      message: `厂商「${row.name || row.id}」的 API Key 在本机解不开，已按未配置处理`,
+      detail: { id: row.id, reason: result.error.slice(0, 200) },
+    });
+  }
+  return "";
+}
+
+/** 已报过警的厂商行：一次进程内每行只记一条。 */
+const apiKeyWarned = new Set<string>();
 
 function getRow(id: string) {
   return db.select().from(cloudProviders).where(eq(cloudProviders.id, id)).get();
@@ -94,12 +125,17 @@ function ensureApiKeysEncrypted(): void {
  * 首次访问时把散落在 settings 里的旧云服务配置迁移入表（幂等：表非空即跳过）。
  * - CUSTOM_PROVIDERS 里的自定义服务商 → 各一行（api_key 为空，旧版未存）；
  * - 当前 CLOUD_PROVIDER（预设或自定义）→ 一行，带上 VLLM_API_KEY 与 CLOUD_MODELS；
- * - 全新安装（无任何云配置）→ 预置一行 OmniLabs（未激活），引导用户补 Key。
+ *
+ * 收尾一律走 `ensureBuiltinProviders()`：**内置厂商目录整份入驻**，新装与老库同一条路，
+ * 不在这里再复制一份预设内容（复制过的两份迟早会各不相同）。
  */
 export function ensureMigrated(): void {
   ensureApiKeysEncrypted();
   const existing = db.select({ id: cloudProviders.id }).from(cloudProviders).all();
-  if (existing.length > 0) return;
+  if (existing.length > 0) {
+    ensureBuiltinProviders();
+    return;
+  }
 
   const legacy = getAllSettings();
   const now = Date.now();
@@ -126,7 +162,9 @@ export function ensureMigrated(): void {
           baseUrl: typeof o.baseUrl === "string" ? o.baseUrl : "",
           apiKey: "",
           models: JSON.stringify(
-            Array.isArray(o.models) ? (o.models.filter((m) => typeof m === "string") as string[]).map((id) => ({ id })) : [],
+            Array.isArray(o.models)
+              ? (o.models.filter((m) => typeof m === "string") as string[]).map((id) => ({ id }))
+              : [],
           ),
           createdAt: now,
           updatedAt: now,
@@ -145,7 +183,8 @@ export function ensureMigrated(): void {
     if (preset) {
       const savedModels = parseCloudModels(legacy.CLOUD_MODELS);
       const merged = new Map(savedModels.map((m) => [m.id, m]));
-      for (const entry of presetModelEntries(preset)) if (!merged.has(entry.id)) merged.set(entry.id, entry);
+      for (const entry of presetModelEntries(preset))
+        if (!merged.has(entry.id)) merged.set(entry.id, entry);
       rows.push({
         id: preset.id,
         name: preset.name,
@@ -163,23 +202,61 @@ export function ensureMigrated(): void {
     }
   }
 
-  if (rows.length === 0) {
-    const preset = getPreset("omnilabs")!;
-    rows.push({
-      id: preset.id,
-      name: preset.name,
-      vendor: preset.vendor,
-      baseUrl: preset.baseUrl,
-      apiKey: "",
-      models: JSON.stringify(presetModelEntries(preset)),
-      createdAt: now,
-      updatedAt: now,
-    });
+  if (rows.length > 0) {
+    for (const row of rows) {
+      db.insert(cloudProviders).values(row).onConflictDoNothing().run();
+    }
   }
+  ensureBuiltinProviders();
+}
 
-  for (const row of rows) {
-    db.insert(cloudProviders).values(row).onConflictDoNothing().run();
+/**
+ * 内置厂商目录入驻（幂等）：预设目录里缺谁补谁，已有的一律不动。
+ *
+ * 这就是「把国内主流厂商的入口直接列出来」那条需求的落地处 —— 用户不用先去
+ * 「添加服务商」里挑，装上就整份可见，只差一个 Key。新装、老库升级、新增预设
+ * 三条路都走这里；已经被用户配过的行（Key / 模型清单 / 地址）原样保留。
+ *
+ * 地址与预设一致的行会被判定为「内置地址」（`isBuiltinBaseUrl`）：界面上只读、
+ * 写库被拒，改由应用随版本维护。
+ */
+export function ensureBuiltinProviders(): void {
+  const existing = new Set(
+    db
+      .select({ id: cloudProviders.id })
+      .from(cloudProviders)
+      .all()
+      .map((r) => r.id),
+  );
+  const missing = CLOUD_PRESETS.filter((p) => !existing.has(p.id));
+  if (missing.length === 0) return;
+
+  const now = Date.now();
+  for (const preset of missing) {
+    db.insert(cloudProviders)
+      .values({
+        id: preset.id,
+        name: preset.name,
+        vendor: preset.vendor,
+        baseUrl: preset.baseUrl,
+        apiKey: "",
+        models: JSON.stringify(presetModelEntries(preset)),
+        // 入驻但未启用：填好 Key、校验通过之后才「启动」（各功能页只列已启动的）。
+        enabled: 0,
+        videoApi: preset.videoApi ?? "",
+        musicApi: preset.musicApi ?? "",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .onConflictDoNothing()
+      .run();
   }
+  logEvent({
+    source: "app",
+    event: "cloud-provider.builtin-seed",
+    message: `内置厂商入驻 ${missing.length} 家：${missing.map((p) => p.name).join("、")}`,
+    detail: { ids: missing.map((p) => p.id) },
+  });
 }
 
 /**
@@ -228,7 +305,7 @@ function syncActiveSlot(row: typeof cloudProviders.$inferSelect): void {
   updateSettings({
     CLOUD_PROVIDER: row.id,
     VLLM_API_BASE: row.baseUrl,
-    VLLM_API_KEY: decryptSecret(row.apiKey) || "EMPTY",
+    VLLM_API_KEY: readApiKey(row) || "EMPTY",
     CLOUD_MODELS: row.models,
   });
 }
@@ -238,16 +315,9 @@ export function listCloudProviders(): { providers: CloudProviderInfo[]; activeId
   ensureAppProvidersMigrated();
   syncPresetModels();
   const rows = db.select().from(cloudProviders).all();
-  // 激活的排最前，其余按创建时间
   const activeId = activeProviderId();
-  const sorted = rows
-    .map(rowToInfo)
-    .sort((a, b) => {
-      if (a.id === activeId) return -1;
-      if (b.id === activeId) return 1;
-      return a.createdAt - b.createdAt;
-    });
-  return { providers: sorted, activeId };
+  // 激活的排最前，其余按内置目录顺序（同一批入驻的行创建时间相同），自定义排最后。
+  return { providers: sortProviders(rows.map(rowToInfo), activeId), activeId };
 }
 
 /** 按 id 取单个服务商（基准测试等按需直连，无需全局激活）。 */
@@ -300,7 +370,10 @@ export function createCloudProvider(input: {
     if (!name) return { ok: false, error: "缺少服务商名称" };
     const baseUrl = (input.baseUrl ?? "").trim();
     if (baseUrl && !looksLikeUrl(baseUrl)) {
-      return { ok: false, error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）" };
+      return {
+        ok: false,
+        error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）",
+      };
     }
     let id = `custom-${now}`;
     while (getRow(id)) id = `custom-${Date.now()}`;
@@ -336,7 +409,19 @@ export function updateCloudProvider(
 
   const nextBaseUrl = patch.baseUrl !== undefined ? patch.baseUrl.trim() : row.baseUrl;
   if (nextBaseUrl && !looksLikeUrl(nextBaseUrl)) {
-    return { ok: false, error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）" };
+    return {
+      ok: false,
+      error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）",
+    };
+  }
+  // 内置厂商（地址仍是官方地址的那些行）的地址由应用维护：界面上只读，这里再挡一道
+  // ——写库的路不止界面一条（控制面 / 将来的导入），坏地址一旦落库就是"这家永远调不通"，
+  // 而用户手里没有改回来的入口。要自建网关/中转请走「自定义服务商」。
+  if (patch.baseUrl !== undefined && nextBaseUrl !== row.baseUrl && isBuiltinBaseUrl(row)) {
+    return {
+      ok: false,
+      error: "内置厂商的 API 地址由应用维护，不能修改；需要自建网关请添加「自定义服务商」",
+    };
   }
 
   const next = {
@@ -348,7 +433,10 @@ export function updateCloudProvider(
     videoApi: patch.videoApi !== undefined ? patch.videoApi : (row.videoApi ?? ""),
     musicApi: patch.musicApi !== undefined ? patch.musicApi : (row.musicApi ?? ""),
   };
-  db.update(cloudProviders).set({ ...next, updatedAt: Date.now() }).where(eq(cloudProviders.id, id)).run();
+  db.update(cloudProviders)
+    .set({ ...next, updatedAt: Date.now() })
+    .where(eq(cloudProviders.id, id))
+    .run();
 
   // 激活行的配置变化即时生效（写回 VLLM_* 槽位）
   if (activeProviderId() === id) {
@@ -360,6 +448,11 @@ export function updateCloudProvider(
 export function deleteCloudProvider(id: string): { ok: boolean; error?: string } {
   const row = getRow(id);
   if (!row) return { ok: false, error: "服务商不存在" };
+  // 内置厂商不删：它们是目录的一部分（下一次读取还会原样入驻），删掉只会让用户
+  // 以为"删干净了"，下次打开又全回来。不想用就停用（关掉开关）。
+  if (isBuiltinProvider(row)) {
+    return { ok: false, error: "内置厂商不能删除，停用即可" };
+  }
   db.delete(cloudProviders).where(eq(cloudProviders.id, id)).run();
 
   // 删除的是激活服务商：清空槽位并回到本地模式
@@ -497,7 +590,9 @@ async function readModelList(
   const models = Array.from(
     new Set(
       items
-        .map((m) => (typeof (m as { id?: unknown } | null)?.id === "string" ? (m as { id: string }).id : ""))
+        .map((m) =>
+          typeof (m as { id?: unknown } | null)?.id === "string" ? (m as { id: string }).id : "",
+        )
         .filter(Boolean),
     ),
   );
@@ -566,7 +661,11 @@ export async function probeProviderKey(input: {
   if (!base) return { ok: false, error: "缺少 API 地址" };
   if (!key && !isLocalBaseUrl(base)) return { ok: false, error: "缺少 API 密钥" };
 
-  const r = await fetchRemoteModels({ baseUrl: base, apiKey: key, timeoutMs: input.timeoutMs ?? 10_000 });
+  const r = await fetchRemoteModels({
+    baseUrl: base,
+    apiKey: key,
+    timeoutMs: input.timeoutMs ?? 10_000,
+  });
   // 顺便把模型清单带回去：启用时就能告诉用户这家有几张牌。
   return r.ok ? { ok: true, models: r.models } : { ok: false, error: r.error };
 }
@@ -586,7 +685,8 @@ export async function setCloudProviderEnabled(
   if (!row) return { ok: false, error: "服务商不存在" };
 
   if (!enabled) {
-    db.update(cloudProviders).set({ enabled: 0, updatedAt: Date.now() })
+    db.update(cloudProviders)
+      .set({ enabled: 0, updatedAt: Date.now() })
       .where(eq(cloudProviders.id, id))
       .run();
     if (activeProviderId() === id) {
@@ -612,7 +712,8 @@ export async function setCloudProviderEnabled(
     });
     return { ok: false, error: probe.error ?? "密钥校验未通过" };
   }
-  db.update(cloudProviders).set({ enabled: 1, updatedAt: Date.now() })
+  db.update(cloudProviders)
+    .set({ enabled: 1, updatedAt: Date.now() })
     .where(eq(cloudProviders.id, id))
     .run();
 
@@ -627,6 +728,97 @@ export async function setCloudProviderEnabled(
     detail: { id, baseUrl: row.baseUrl, models: probe.models?.length ?? 0 },
   });
   return { ok: true, modelCount: probe.models?.length };
+}
+
+/**
+ * 「选厂商 + 填 Key」一步落地（引导页 URL 模式的收尾，也是别处向导的通用入口）。
+ *
+ * 引导页若只写 VLLM_* 老槽位，用户填过的 Key 在「模型云服务」页看起来仍是"没配过"
+ * —— 同一份凭据两个页面各存一份就必然这样。这里让引导页直接落进 `cloud_providers`：
+ * 内置厂商用预设行，自定义按地址复用或新建一行；再把选中的模型并进清单、启用
+ * （走与设置页同一个密钥探针）并激活 —— 激活会把 baseUrl / apiKey / models 写回
+ * VLLM_* 槽位，网关、CLI、集成选择器零改动。
+ */
+export async function configureCloudProvider(input: {
+  providerId?: string;
+  name?: string;
+  baseUrl?: string;
+  apiKey: string;
+  model?: string;
+}): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const providerId = (input.providerId ?? "").trim();
+  let row = providerId ? getRow(providerId) : undefined;
+  if (providerId && !row) return { ok: false, error: "服务商不存在" };
+
+  const now = Date.now();
+  if (!row) {
+    // 自定义：地址一样就复用（用户可能已经在设置页里配过这台网关），否则新建一行。
+    const base = (input.baseUrl ?? "").trim();
+    if (!base) return { ok: false, error: "缺少 API 地址" };
+    if (!looksLikeUrl(base)) {
+      return {
+        ok: false,
+        error: "API 地址要以 http:// 或 https:// 开头（这里填服务地址，不是 API Key）",
+      };
+    }
+    row = findRowByBase(base);
+    if (!row) {
+      let id = `custom-${now}`;
+      while (getRow(id)) id = `custom-${Date.now()}`;
+      db.insert(cloudProviders)
+        .values({
+          id,
+          name: (input.name ?? "").trim() || providerNameForBase(base),
+          vendor: "自定义",
+          baseUrl: base,
+          apiKey: "",
+          models: "[]",
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+      row = getRow(id);
+    }
+    if (!row) return { ok: false, error: "服务商创建失败" };
+  }
+
+  const key = input.apiKey.trim();
+  const probe = await probeProviderKey({ baseUrl: row.baseUrl, apiKey: key });
+  if (!probe.ok) {
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "cloud-provider.enable-failed",
+      message: `配置云服务商 ${row.name} 失败：${probe.error ?? "校验未通过"}`,
+      detail: { id: row.id, baseUrl: row.baseUrl },
+    });
+    return { ok: false, id: row.id, error: probe.error ?? "密钥校验未通过" };
+  }
+
+  const model = (input.model ?? "").trim();
+  const existing = parseCloudModels(row.models);
+  const models =
+    model && !existing.some((m) => m.id === model) ? [...existing, { id: model }] : existing;
+  db.update(cloudProviders)
+    .set({
+      apiKey: key ? encryptSecret(key) : row.apiKey,
+      models: JSON.stringify(models),
+      // 与设置页同一条规矩：密钥（本机端点则免）校验通过才算启用。
+      enabled: 1,
+      updatedAt: now,
+    })
+    .where(eq(cloudProviders.id, row.id))
+    .run();
+  // 先把当前模型定下来，再激活 —— 激活只会在"当前模型不属于该厂商"时才改它。
+  if (model) updateSettings({ VLLM_MODEL_NAME: model, CHAT_MODEL: model });
+  activateCloudProvider(row.id);
+  logEvent({
+    source: "app",
+    event: "cloud-provider.configure",
+    message: `配置并启用云服务商 ${row.name}`,
+    detail: { id: row.id, baseUrl: row.baseUrl, model: model || null },
+  });
+  return { ok: true, id: row.id };
 }
 
 /**
@@ -868,7 +1060,8 @@ export function saveAppModelChoice(input: {
 }): { ok: boolean; error?: string } {
   const provider = getRow(input.providerId);
   if (!provider) return { ok: false, error: "服务商不存在" };
-  if (provider.enabled !== 1) return { ok: false, error: "该服务商还没启用（去「设置 → 模型云服务」启动）" };
+  if (provider.enabled !== 1)
+    return { ok: false, error: "该服务商还没启用（去「设置 → 云端模型」启动）" };
 
   const patch: Record<string, string> = { [input.settingKey]: provider.id };
   const model = (input.model ?? "").trim();

@@ -25,10 +25,9 @@ export { MINIMAX_VIDEO_MODELS, SEEDANCE_VIDEO_MODELS };
  *
  * 三种后端，全部是「提交任务 + 轮询」的异步模式：
  *
- * 1. **MiniMax（云端，Hailuo / T2V 系）**：POST /v1/video_generation 提交，
- *    GET /v1/query/video_generation?task_id=… 轮询，成片用 file_id 走
- *    GET /v1/files/retrieve 取下载地址。支持首帧图（图生视频）。
- *    自部署的 MiniMax 兼容服务改 Base URL 即可（只实现了旧版 v2 私约的也能兜底）。
+ * 1. **MiniMax（云端，H3 系）**：POST /v2/video_generation 提交（content 数组），
+ *    GET /v2/query/video_generation/{task_id} 轮询，成片地址在 task.content.url。
+ *    支持首帧图（图生视频）。自部署的 MiniMax 兼容服务改 Base URL 即可（只做 v2）。
  *
  * 2. **Seedance（云端，火山方舟）**：POST /api/v3/contents/generations/tasks
  *    提交（分辨率/比例/时长等以 `--flag` 尾缀写在提示词里），
@@ -123,18 +122,23 @@ type RecordRow = typeof videoRecords.$inferSelect;
 // 常量
 // ---------------------------------------------------------------------------
 
-/** MiniMax 生视频的时长档位（Hailuo 系只认 6 / 10 秒，别的秒数会被上游拒或静默改）。 */
-export const MINIMAX_DURATIONS = [6, 10];
-
-/** MiniMax 生视频的分辨率档位。 */
-export const MINIMAX_RESOLUTIONS = ["720P", "768P", "1080P"];
+/**
+ * MiniMax v2 各模型的分辨率与时长上限（官方文档：分辨率只认 768P / 2K / 480P，
+ * 其中 H3 是 768P / 2K、4~15 秒，H3-Max 是 480P / 768P、5~15 秒）。
+ * 不在表里的模型（中转站自造的 id）不校验，只按协议区间夹一下，
+ * 免得把上游的参数错误提前变成我们自己的拦路虎。
+ */
+const MINIMAX_MODEL_SPECS: Record<string, { resolutions: string[]; min: number; max: number }> = {
+  "MiniMax-H3": { resolutions: ["768P", "2K"], min: 4, max: 15 },
+  "MiniMax-H3-Max": { resolutions: ["480P", "768P"], min: 5, max: 15 },
+};
 
 /** 各接口协议的时长范围（秒）：云端按厂商协议分（MiniMax / Seedance），本地是 ComfyUI。 */
 export const VIDEO_DURATION_RANGE: Record<"minimax" | "seedance" | "comfyui", {
   min: number;
   max: number;
 }> = {
-  minimax: { min: 6, max: 10 },
+  minimax: { min: 4, max: 15 },
   seedance: { min: 3, max: 12 },
   comfyui: { min: 3, max: 15 },
 };
@@ -208,7 +212,7 @@ type CloudVideoTarget = {
 function resolveCloudTarget(providerId: string): CloudVideoTarget {
   const provider = CloudProviders.resolveCloudProvider(providerId);
   if (!provider) {
-    throw new Error("还没选择云厂商。请到「设置 → 模型云服务」启用一个支持生视频的厂商");
+    throw new Error("还没选择云厂商。请到「设置 → 云端模型」启用一个支持生视频的厂商");
   }
   if (!provider.baseUrl.trim()) throw new Error(`云厂商「${provider.name}」还没有填 API 地址`);
   const videoApi = provider.videoApi;
@@ -280,8 +284,9 @@ async function readErrorBody(res: Response): Promise<{ raw: string; message: str
       | null;
     const message = json?.error?.message ?? json?.base_resp?.status_msg ?? json?.message;
     if (typeof message === "string" && message.trim()) {
-      // MiniMax 把业务码放在 base_resp.status_code，正文里不带它 —— 而排查时大家搜的
-      // 恰恰是这个码（1004 login fail）。丢掉就白记了，所以有码就并进消息里。
+      // 中转站（以及 MiniMax 音乐那类老接口）把业务码放在 base_resp.status_code，
+      // 正文里往往不带它 —— 而排查时大家搜的恰恰是这个码（1004 login fail）。
+      // 丢掉就白记了，所以有码就并进消息里。
       const code = json?.base_resp?.status_code;
       const withCode =
         code === undefined || code === null || message.includes(String(code))
@@ -311,7 +316,7 @@ function looksLikeJson(raw: string): boolean {
 function withRouteHint(base: string, status: number, raw: string, message: string): string {
   if (status !== 404 || looksLikeJson(raw)) return message;
   const text = message || "404 page not found";
-  return `${text}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 模型云服务」检查该厂商的地址 —— 填根地址即可，不要带 /v1、/v2`;
+  return `${text}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 云端模型」检查该厂商的地址 —— 填根地址即可，不要带 /v1、/v2`;
 }
 
 /** 上游报错文案。`hintBase` 给定时，路由级 404 会补上「地址可能填错」的提示。 */
@@ -516,48 +521,56 @@ async function downloadToRef(url: string, fallbackName: string): Promise<string>
 }
 
 // ---------------------------------------------------------------------------
-// 提交：MiniMax（官方 v1 接口）
+// 提交：MiniMax（v2 接口）
 // ---------------------------------------------------------------------------
 
 /**
- * MiniMax 生视频走官方公开接口（v1）：
+ * MiniMax 生视频只走 v2 —— 官方现行接口，模型是 H3 系：
  *
- *   POST {root}/v1/video_generation                  提交（model + prompt + 可选首帧图）
- *   GET  {root}/v1/query/video_generation?task_id=…  查状态（Queueing/Preparing/Processing/Success/Fail）
- *   GET  {root}/v1/files/retrieve?file_id=…          取成片下载地址（file.download_url）
+ *   POST {root}/v2/video_generation                提交（model + content 数组 + resolution + duration）
+ *   GET  {root}/v2/query/video_generation/{id}     查状态（queued / running / succeeded / failed / cancelled）
  *
- * 两个真踩过的坑，都写在这里，别再退回去：
+ * 成片地址在查询响应的 `task.content.url` 里，直接下载即可（没有 file_id 换链那一步）。
  *
- * 1. **业务错误走 HTTP 200 + base_resp.status_code**（1004 鉴权 / 1002 限流 / 2013 参数）。
- *    只看 `res.ok` 会把失败当成功；反过来，网关与中转站可能把任意路径兜底成
- *    **200 + HTML 首页**，那时连 JSON 都不是。
- * 2. 老实现用的是 `/v2/video_generation` + `content[]` 请求体（那是 OmniLabs 的私有约定，
- *    抄的 Seedance 形状），MiniMax 官方要的是 `prompt` 字符串 —— 路径与请求体都不对，
- *    所以"提交成功过"也只可能是撞上了某台兼容服务。v2 形状这里保留成兜底，
- *    但**默认走官方 v1**。
+ * 三个真踩过的坑，都写在这里，别再退回去：
+ *
+ * 1. **请求体是 `content` 数组**（文本项 + 首帧图项），不是 v1 的 `prompt` 字符串 /
+ *    `first_frame_image`；`resolution` / `duration` 是必填，`ratio` 纯文生视频时必填。
+ * 2. **v1 那套上游已经不认**：`/v1/video_generation` + Hailuo / T2V 系模型 id 提交新模型，
+ *    上游回 `2013 invalid params, 该模型请使用 /v2/video_generation 接口`。所以这里只留 v2，
+ *    不再做 v1/v2 双形状兜底 —— 两套并存的代价是每次请求都要猜哪套能用。
+ * 3. **错误不再是 HTTP 200 + base_resp**：v2 用 OpenAI 风格（`{error:{message,http_code}}`
+ *    配 4xx/5xx）。但仍要防住网关 / 中转站把任意路径兜底成 **200 + HTML 首页**，
+ *    那时连 JSON 都不是。
  */
 
-/** 请求形状：官方 v1（prompt）与 OmniLabs 那套 v2 私约（content 数组）。 */
-type MinimaxFlavor = "v1" | "v2";
-
-/** 提交时用了哪套形状（按 task_id 记）：两套的查询路径不同，轮询跟着用同一套。 */
-const minimaxFlavors = new Map<string, MinimaxFlavor>();
-
-/** Hailuo 系模型只认 6 / 10 秒：取最接近的合法档位（等距时取长的那档）。 */
-export function nearestMinimaxDuration(seconds: number | undefined): number {
-  const want = Math.round(seconds ?? MINIMAX_DURATIONS[0]!);
-  return MINIMAX_DURATIONS.reduce(
-    (best, cur) => (Math.abs(cur - want) <= Math.abs(best - want) ? cur : best),
-    MINIMAX_DURATIONS[0]!,
-  );
+/**
+ * 时长收敛到 v2 认可的区间（整数秒）：H3 4~15、H3-Max 5~15。
+ * 缺省给 5 秒（H3 系的默认档，H3-Max 的下限），上游不会因为"没选时长"直接拒。
+ */
+export function clampMinimaxDuration(seconds: number | undefined, model = ""): number {
+  const spec = MINIMAX_MODEL_SPECS[model.trim()] ?? VIDEO_DURATION_RANGE.minimax;
+  const want = Math.round(seconds ?? 5);
+  return Math.min(Math.max(want, spec.min), spec.max);
 }
 
-/** 只有 Hailuo 系模型吃 duration / resolution；T2V-01 / I2V-01 那代没有这两个参数。 */
-function minimaxTakesQualityParams(model: string): boolean {
-  return /hailuo/i.test(model);
+/** v2 的默认分辨率：768P 是 H3 与 H3-Max 的共同档，也是官方给的默认值。 */
+export const MINIMAX_DEFAULT_RESOLUTION = "768P";
+
+/** 分辨率收敛到该模型的合法档位：模型不在表里（中转站自造 id）就原样下发。 */
+function clampMinimaxResolution(resolution: string | undefined, model: string): string {
+  const spec = MINIMAX_MODEL_SPECS[model.trim()];
+  const want = (resolution ?? "").trim();
+  if (!spec) return want || MINIMAX_DEFAULT_RESOLUTION;
+  if (spec.resolutions.includes(want)) return want;
+  // 不合档位时退回 768P —— 上游对不合档位的分辨率只回一句 2013，含糊得很，
+  // 与其让用户猜，不如把 H3-Max 上选的 2K 换成人人都有的那一档。
+  return spec.resolutions.includes(MINIMAX_DEFAULT_RESOLUTION)
+    ? MINIMAX_DEFAULT_RESOLUTION
+    : spec.resolutions[0]!;
 }
 
-/** 提交用的请求头（v1 / v2 一样）。 */
+/** 提交用的请求头。 */
 function minimaxHeaders(key: string): Record<string, string> {
   return {
     "Content-Type": "application/json",
@@ -566,50 +579,42 @@ function minimaxHeaders(key: string): Record<string, string> {
 }
 
 /**
- * 解析 MiniMax 的响应体：把「HTTP 200 但 base_resp.status_code ≠ 0」这种业务错误
- * 提出来，也拦下"返回的是网页"这种连 JSON 都不是的情况。
+ * 解析 MiniMax 的响应体：提取 v2 的错误信封（`{type:"error", error:{message, http_code}}`），
+ * 也拦下"返回的是网页"这种连 JSON 都不是的情况。
+ *
+ * 只认 v2 的形状：错误一定配着 4xx/5xx 的 HTTP 状态（v1 那套「HTTP 200 + base_resp.status_code」
+ * 已经随接口一起作废），所以调用方先看 `res.ok`，再看这里给出的可读消息。
  */
 function parseMinimaxJson(raw: string): {
   json: Record<string, unknown> | null;
   error: string | null;
-  /** base_resp.status_code（业务码）；没有就是 null。 */
-  code: number | null;
 } {
   const text = raw.trim();
-  if (!text) return { json: null, error: "上游返回了空响应", code: null };
+  if (!text) return { json: null, error: "上游返回了空响应" };
   if (!looksLikeJson(text)) {
     return {
       json: null,
-      code: null,
       error:
         "上游返回的是网页（HTML）而不是接口响应 —— 这个地址多半是网站首页或中转站，" +
-        "不支持 MiniMax 视频接口，请到「设置 → 模型云服务」换一个厂商",
+        "不支持 MiniMax 视频接口，请到「设置 → 云端模型」换一个厂商",
     };
   }
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(text) as Record<string, unknown>;
   } catch {
-    return { json: null, code: null, error: `上游响应不是合法 JSON：${text.slice(0, 120)}` };
+    return { json: null, error: `上游响应不是合法 JSON：${text.slice(0, 120)}` };
   }
-  const baseResp = json.base_resp as { status_code?: unknown; status_msg?: unknown } | undefined;
-  const code = baseResp?.status_code;
-  if (typeof code === "number" && code !== 0) {
-    const message = String(baseResp?.status_msg ?? "").trim() || "上游返回错误";
-    const hint =
-      code === 1004
-        ? "（API Key 被上游拒绝，去「设置 → 模型云服务」检查）"
-        : code === 1002
-          ? "（上游限流，稍后重试）"
-          : code === 2013
-            ? "（参数或模型名不对：MiniMax 只认 MiniMax-Hailuo-2.3 / MiniMax-Hailuo-02 / T2V-01 这类模型 id）"
-            : "";
-    return { json, code, error: `${code} ${message}${hint}` };
+  const err = json.error as { message?: unknown; type?: unknown } | undefined;
+  const message = typeof err?.message === "string" ? err.message.trim() : "";
+  if (message) {
+    const type = typeof err?.type === "string" ? err.type.trim() : "";
+    return { json, error: type ? `${type}: ${message}` : message };
   }
-  return { json, error: null, code: null };
+  return { json, error: null };
 }
 
-/** 从响应里取 task_id（v1 顶层 / v2 可能在 data 里）。 */
+/** 从响应里取 task_id（v2 在顶层，个别中转站会塞进 data）。 */
 function minimaxTaskId(json: Record<string, unknown> | null): string {
   const direct = json?.task_id;
   if (typeof direct === "string" && direct) return direct;
@@ -617,81 +622,7 @@ function minimaxTaskId(json: Record<string, unknown> | null): string {
   return typeof nested === "string" ? nested : "";
 }
 
-/** 官方 v1 提交。返回 task_id；路由不存在时返回 null（交给 v2 兜底）。 */
-async function submitMinimaxV1(
-  target: CloudVideoTarget,
-  params: SubmitVideoParams,
-  model: string,
-  root: string,
-): Promise<string | null> {
-  const firstFrame = params.firstFrameRef ? await firstFrameDataUrl(params.firstFrameRef) : null;
-  const body: Record<string, unknown> = { model, prompt: params.prompt };
-  if (firstFrame) body.first_frame_image = firstFrame;
-  if (minimaxTakesQualityParams(model)) {
-    body.duration = nearestMinimaxDuration(params.duration);
-    if (params.resolution) body.resolution = params.resolution;
-  }
-
-  const res = await fetch(`${root}/v1/video_generation`, {
-    method: "POST",
-    headers: minimaxHeaders(target.key),
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  });
-  const { raw, message } = await readErrorBody(res);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(withRouteHint(root, res.status, raw, message) || `提交 MiniMax 生成任务失败（${res.status}）`);
-
-  const parsed = parseMinimaxJson(raw);
-  if (parsed.error) throw new Error(parsed.error);
-  const taskId = minimaxTaskId(parsed.json);
-  if (!taskId) throw new Error(`MiniMax 未返回 task_id：${raw.slice(0, 200) || "（空响应）"}`);
-  minimaxFlavors.set(taskId, "v1");
-  return taskId;
-}
-
-/**
- * OmniLabs 那套 v2 私约的兜底提交（`/v2/video_generation` + `content` 数组）。
- * 只在官方 v1 路由不存在时用：自部署 / 兼容服务可能只实现了这一套。
- */
-async function submitMinimaxV2Compat(
-  target: CloudVideoTarget,
-  params: SubmitVideoParams,
-  model: string,
-  root: string,
-): Promise<string | null> {
-  const content: Record<string, unknown>[] = [{ type: "text", text: params.prompt }];
-  if (params.firstFrameRef) {
-    const dataUrl = await firstFrameDataUrl(params.firstFrameRef);
-    if (dataUrl) content.push({ type: "image_url", image_url: dataUrl });
-  }
-  const body: Record<string, unknown> = {
-    model,
-    content,
-    duration: nearestMinimaxDuration(params.duration),
-    aigc_watermark: params.watermark ?? false,
-  };
-  if (params.ratio) body.ratio = params.ratio;
-  if (params.resolution) body.resolution = params.resolution;
-
-  const res = await fetch(`${root}/v2/video_generation`, {
-    method: "POST",
-    headers: minimaxHeaders(target.key),
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120_000),
-  });
-  const { raw, message } = await readErrorBody(res);
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(withRouteHint(root, res.status, raw, message) || `提交 MiniMax 生成任务失败（${res.status}）`);
-
-  const parsed = parseMinimaxJson(raw);
-  if (parsed.error) throw new Error(parsed.error);
-  const taskId = minimaxTaskId(parsed.json);
-  if (!taskId) throw new Error(`MiniMax 未返回 task_id：${raw.slice(0, 200) || "（空响应）"}`);
-  minimaxFlavors.set(taskId, "v2");
-  return taskId;
-}
-
+/** 提交一次 MiniMax v2 生成任务，返回 task_id。 */
 async function submitMinimax(
   target: CloudVideoTarget,
   params: SubmitVideoParams,
@@ -701,15 +632,53 @@ async function submitMinimax(
   if (!root) throw new Error("请先配置 MiniMax 服务地址");
   const model = params.model?.trim() || fallbackModel || MINIMAX_VIDEO_MODELS[0]!;
 
-  const taskId = await submitMinimaxV1(target, params, model, root);
-  if (taskId) return taskId;
-  const legacy = await submitMinimaxV2Compat(target, params, model, root);
-  if (legacy) return legacy;
-  // 两套路径都不存在：这地址不是 MiniMax 视频服务（中转站/首页都会这样）
-  throw new Error(
-    `上游没有 MiniMax 视频接口：/v1/video_generation 与 /v2/video_generation 都不存在（当前 API 地址 ${root}）。` +
-      `请到「设置 → 模型云服务」确认该厂商的地址是 MiniMax 官方（https://api.minimaxi.com 或 https://api.minimax.chat，不带 /v1）`,
-  );
+  const content: Record<string, unknown>[] = [{ type: "text", text: params.prompt }];
+  if (params.firstFrameRef) {
+    const dataUrl = await firstFrameDataUrl(params.firstFrameRef);
+    // 图像项是 `image_url: { url }` 对象（裸字符串是旧私约的形状，v2 不认）
+    if (dataUrl) {
+      content.push({ type: "image_url", image_url: { url: dataUrl }, role: "first_frame" });
+    }
+  }
+  const body: Record<string, unknown> = {
+    model,
+    content,
+    // resolution 与 duration 在 v2 里是必填，没给就落到该模型的默认档
+    resolution: clampMinimaxResolution(params.resolution, model),
+    duration: clampMinimaxDuration(params.duration, model),
+    // 纯文生视频必须给具体比例（adaptive 只在带图 / 参考素材时合法），没给就按横屏
+    ratio: params.ratio?.trim() || "16:9",
+  };
+  // v2 文档里没有水印字段：只在用户显式打开时才带（真不认也只是被上游忽略）
+  if (params.watermark) body.aigc_watermark = true;
+
+  const res = await fetch(`${root}/v2/video_generation`, {
+    method: "POST",
+    headers: minimaxHeaders(target.key),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const { raw, message } = await readErrorBody(res);
+  if (res.status === 404 && !looksLikeJson(raw)) {
+    // 路由级 404：这地址不是 MiniMax v2 视频服务（中转站 / 首页都会这样）
+    throw new Error(
+      `上游没有 MiniMax v2 视频接口（当前 API 地址 ${root}）：生视频只有 /v2/video_generation 这一条路径。` +
+        `请到「设置 → 云端模型」确认该厂商的地址是 MiniMax 官方（https://api.minimaxi.com 或 https://api.minimax.chat，不带 /v1）`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      message
+        ? `${message}（HTTP ${res.status}）`
+        : `提交 MiniMax 生成任务失败（${res.status}）`,
+    );
+  }
+
+  const parsed = parseMinimaxJson(raw);
+  if (parsed.error) throw new Error(parsed.error);
+  const taskId = minimaxTaskId(parsed.json);
+  if (!taskId) throw new Error(`MiniMax 未返回 task_id：${raw.slice(0, 200) || "（空响应）"}`);
+  return taskId;
 }
 
 // ---------------------------------------------------------------------------
@@ -999,9 +968,13 @@ export async function submitVideoGeneration(
 
     // 云端：厂商决定接口协议（MiniMax / Seedance），地址与密钥同样来自厂商行。
     const target = resolveCloudTarget(cfg.providerId);
-    // MiniMax 只认 6 / 10 秒：库里记的时长要与真正发出去的一致，
-    // 否则卡片上写着 5s、上游生成的是 6s。
-    if (target.videoApi === "minimax") common.duration = nearestMinimaxDuration(params.duration);
+    // 时长与分辨率都要按模型收敛（H3 4~15 秒 / 768P·2K，H3-Max 5~15 秒 / 480P·768P）：
+    // 库里记的得与真正发出去的一致，否则卡片上写着 4s，上游生成的是 5s。
+    if (target.videoApi === "minimax") {
+      const model = common.model ?? cfg.model;
+      common.duration = clampMinimaxDuration(params.duration, model);
+      common.resolution = clampMinimaxResolution(params.resolution, model);
+    }
     const taskId =
       target.videoApi === "seedance"
         ? await submitSeedance(target, params, cfg.model)
@@ -1041,8 +1014,19 @@ export async function submitVideoGeneration(
 // 对外入口：轮询（前端每 5s 调一次；应用重启后继续，任务不丢）
 // ---------------------------------------------------------------------------
 
-const MINIMAX_DONE = new Set(["Success", "Succeeded", "success", "succeeded"]);
-const MINIMAX_FAILED = new Set(["Fail", "Failed", "fail", "Error", "error", "failed"]);
+// v2 的状态是 queued / running / succeeded / failed / cancelled；大小写与近义词多留几个，
+// 认不出的状态会当成"还在跑"一直轮询，宁可多认几个也别把终态漏掉。
+const MINIMAX_DONE = new Set(["succeeded", "success", "Success", "Succeeded"]);
+const MINIMAX_FAILED = new Set([
+  "failed",
+  "cancelled",
+  "canceled",
+  "fail",
+  "Fail",
+  "Failed",
+  "error",
+  "Error",
+]);
 const SEEDANCE_DONE = new Set(["succeeded"]);
 const SEEDANCE_FAILED = new Set(["failed", "cancelled"]);
 
@@ -1076,15 +1060,15 @@ type PollResult = {
  * 上游 HTTP 错误 → 能不能靠重试解决。
  *
  * 401/403 是鉴权被上游拒绝：每 5 秒重试一次不会变好，只会把真实原因埋掉 ——
- * 真踩过：MiniMax 返回 `1004 login fail`，应用一路当成"还在生成"，任务挂到
- * 30 分钟超时才被标记失败，日志里一个字都没有，排查只能靠猜。
+ * 真踩过：上游回 `login fail`，应用一路当成"还在生成"，任务挂到 30 分钟超时
+ * 才被标记失败，日志里一个字都没有，排查只能靠猜。
  */
 function classifyPollStatus(status: number, message: string): PollFailure {
   if (status === 401 || status === 403) {
     return {
       fatal: true,
       status,
-      message: `上游鉴权失败（${status}）：${message || "API Key 被拒绝"} —— 请到「设置 → 模型云服务」检查该厂商的 API Key`,
+      message: `上游鉴权失败（${status}）：${message || "API Key 被拒绝"} —— 请到「设置 → 云端模型」检查该厂商的 API Key`,
     };
   }
   if (status >= 500) {
@@ -1113,30 +1097,12 @@ function classifyPoll404(base: string, raw: string, message: string): PollResult
     pollFailure: {
       fatal: true,
       status: 404,
-      message: `${message || "404 page not found"}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 模型云服务」检查该厂商的地址`,
+      message: `${message || "404 page not found"}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 云端模型」检查该厂商的地址`,
     },
   };
 }
 
-/** Success 后取成片地址：MiniMax 的查询只给 file_id，要再查一次 /files/retrieve 拿 download_url。 */
-async function minimaxFileUrl(root: string, key: string, fileId: string): Promise<string> {
-  const res = await fetch(`${root}/v1/files/retrieve?file_id=${encodeURIComponent(fileId)}`, {
-    headers: key ? { Authorization: `Bearer ${key}` } : {},
-    signal: AbortSignal.timeout(30_000),
-  });
-  const { raw, message } = await readErrorBody(res);
-  if (!res.ok) {
-    throw new Error(withRouteHint(root, res.status, raw, message) || `取成片地址失败（${res.status}）`);
-  }
-  const parsed = parseMinimaxJson(raw);
-  if (parsed.error) throw new Error(parsed.error);
-  const file = parsed.json?.file as { download_url?: unknown } | undefined;
-  const url = file?.download_url;
-  if (typeof url !== "string" || !url) throw new Error(`上游未返回成片下载地址（file_id=${fileId}）`);
-  return url;
-}
-
-/** 成片地址在各家响应里的位置不一，按可能性逐个试。 */
+/** 成片地址在 v2 里是 `task.content.url`；各家中转站还可能塞在别的字段，逐个试。 */
 function minimaxVideoUrl(json: Record<string, unknown> | null): string {
   if (!json) return "";
   const content = json.content as { url?: unknown; video_url?: unknown } | undefined;
@@ -1153,110 +1119,75 @@ function minimaxVideoUrl(json: Record<string, unknown> | null): string {
   return "";
 }
 
-/** 成片 file_id 的位置同样各家不一。 */
-function minimaxFileId(json: Record<string, unknown> | null): string {
-  if (!json) return "";
-  const file = json.file as { name?: unknown; file_id?: unknown } | undefined;
-  for (const c of [json.file_id, file?.file_id, file?.name]) {
-    if (typeof c === "string" && c) return c;
-  }
-  return "";
+/** 任务失败的原因：v2 放在 `task.error.message`（带内部码），个别中转站用 fail_reason / message。 */
+function minimaxFailureReason(task: Record<string, unknown> | null | undefined): string {
+  const err = task?.error as { message?: unknown; code?: unknown } | undefined;
+  const message = [err?.message, task?.fail_reason, task?.message].find(
+    (v): v is string => typeof v === "string" && v.trim() !== "",
+  );
+  if (!message) return "生成失败";
+  const code = err?.code;
+  return code === undefined || code === null ? message.trim() : `${String(code)} ${message.trim()}`;
 }
 
-/** 按指定形状查一次任务；`routeMissing` 表示这个地址根本没有那套查询路径。 */
-async function pollMinimaxFlavor(
-  target: CloudVideoTarget,
-  taskId: string,
-  flavor: MinimaxFlavor,
-  root: string,
-): Promise<{ routeMissing: boolean; result: PollResult }> {
-  const endpoint =
-    flavor === "v2"
-      ? `${root}/v2/query/video_generation/${encodeURIComponent(taskId)}`
-      : `${root}/v1/query/video_generation?task_id=${encodeURIComponent(taskId)}`;
-  const res = await fetch(endpoint, {
+/** 查一次 v2 任务状态（queued / running → 还在跑；succeeded → task.content.url）。 */
+async function pollMinimax(target: CloudVideoTarget, taskId: string): Promise<PollResult> {
+  const root = normalizeApiBase(target.base, "");
+  if (!root) return { done: true, failed: "该厂商还没填 API 地址，请到「设置 → 云端模型」补上" };
+
+  const res = await fetch(`${root}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
     headers: target.key ? { Authorization: `Bearer ${target.key}` } : {},
     signal: AbortSignal.timeout(30_000),
   });
   const { raw, message } = await readErrorBody(res);
   if (res.status === 404) {
-    // 纯文本 404 = 路由不存在（换另一套形状还有救）；JSON 404 = 上游说任务没了（终态）
-    if (!looksLikeJson(raw)) return { routeMissing: true, result: { done: false } };
-    return { routeMissing: false, result: { done: true, failed: "上游任务不存在或已过期" } };
+    // 纯文本 404 = 路由不存在（地址填错，改好还能接着把任务查回来）；JSON 404 = 上游说任务没了（终态）
+    if (!looksLikeJson(raw)) {
+      return {
+        done: false,
+        pollFailure: {
+          fatal: true,
+          status: 404,
+          message:
+            `${message || "404 page not found"}：上游没有这个接口路径（当前 API 地址 ${root}）—— ` +
+            `MiniMax 的任务查询只有 /v2/query/video_generation/{task_id} 一条路径，地址填根地址即可（不要带 /v1、/v2），` +
+            `请到「设置 → 云端模型」检查该厂商的地址`,
+        },
+      };
+    }
+    return { done: true, failed: "上游任务不存在或已过期" };
   }
   if (!res.ok) {
     // 网络抖动 / 5xx 下轮再查；鉴权被拒交给上层判死（不再静默 done:false）
-    return {
-      routeMissing: false,
-      result: { done: false, pollFailure: classifyPollStatus(res.status, message) },
-    };
+    return { done: false, pollFailure: classifyPollStatus(res.status, message) };
   }
 
   const parsed = parseMinimaxJson(raw);
   if (parsed.error) {
-    // 业务码走 HTTP 200：1004 这类鉴权失败跟 HTTP 401 同等对待，其余按可重试处理
-    const fatal = parsed.code === 1004 || parsed.code === 1005 || parsed.code === 1006;
-    return { routeMissing: false, result: { done: false, pollFailure: { fatal, message: parsed.error } } };
+    // 错误信封配着 200（少数中转站会这样）：能重试，但原因要透到界面与日志
+    return { done: false, pollFailure: { fatal: false, status: res.status, message: parsed.error } };
   }
 
+  // v2 把任务放在 `task` 里（个别中转站会把它摊平到顶层）
   const json = parsed.json;
-  const status = typeof json?.status === "string" ? json.status : "";
+  const task = (json?.task as Record<string, unknown> | undefined) ?? json;
+  const status = typeof task?.status === "string" ? task.status : "";
   if (MINIMAX_FAILED.has(status)) {
-    const reason = [json?.fail_reason, json?.error, json?.message].find(
-      (v): v is string => typeof v === "string" && v.trim() !== "",
-    );
-    return { routeMissing: false, result: { done: true, failed: reason ?? "生成失败" } };
+    return { done: true, failed: minimaxFailureReason(task) };
   }
   if (!MINIMAX_DONE.has(status)) {
-    const progress = normalizeProgress((json as { progress?: unknown } | null)?.progress);
-    return { routeMissing: false, result: { done: false, progress } };
+    return { done: false, progress: normalizeProgress(task?.progress) };
   }
 
-  // Success：先看响应里有没有直接给地址；MiniMax 官方只给 file_id，再查一次取下载地址
-  let url = minimaxVideoUrl(json);
-  if (!url) {
-    const fileId = minimaxFileId(json);
-    if (fileId) url = await minimaxFileUrl(root, target.key, fileId);
-  }
-  if (!url) {
-    return {
-      routeMissing: false,
-      result: { done: true, failed: "上游未返回成片地址（既没有下载地址也没有 file_id）" },
-    };
-  }
+  const url = minimaxVideoUrl(task ?? null);
+  if (!url) return { done: true, failed: "上游未返回成片地址（查询响应里没有 task.content.url）" };
   const absolute = /^https?:\/\//i.test(url) ? url : new URL(url, `${root}/`).toString();
-  return { routeMissing: false, result: { done: true, videoUrl: absolute } };
-}
-
-async function pollMinimax(target: CloudVideoTarget, taskId: string): Promise<PollResult> {
-  const root = normalizeApiBase(target.base, "");
-  if (!root) return { done: true, failed: "该厂商还没填 API 地址，请到「设置 → 模型云服务」补上" };
-
-  const remembered = minimaxFlavors.get(taskId) ?? "v1";
-  const first = await pollMinimaxFlavor(target, taskId, remembered, root);
-  if (!first.routeMissing) return first.result;
-
-  // 这个地址没有那套查询路径：换另一套形状再试一次（自部署 / 兼容服务常只实现一套）
-  const other: MinimaxFlavor = remembered === "v1" ? "v2" : "v1";
-  const second = await pollMinimaxFlavor(target, taskId, other, root);
-  if (!second.routeMissing) {
-    minimaxFlavors.set(taskId, other);
-    return second.result;
-  }
-  // 两套都不存在：地址不对（配置问题，宽限期内改好还能接着查）
-  return {
-    done: false,
-    pollFailure: {
-      fatal: true,
-      status: 404,
-      message: `上游没有 MiniMax 的任务查询接口（当前 API 地址 ${root}）：/v1/query/video_generation 与 /v2/query/video_generation 都不存在，请到「设置 → 模型云服务」检查该厂商的地址`,
-    },
-  };
+  return { done: true, videoUrl: absolute };
 }
 
 async function pollSeedance(target: CloudVideoTarget, taskId: string): Promise<PollResult> {
   const base = normalizeApiBase(target.base, "/api/v3");
-  if (!base) return { done: true, failed: "该厂商还没填 API 地址，请到「设置 → 模型云服务」补上" };
+  if (!base) return { done: true, failed: "该厂商还没填 API 地址，请到「设置 → 云端模型」补上" };
   const res = await fetch(`${base}/contents/generations/tasks/${taskId}`, {
     headers: target.key ? { Authorization: `Bearer ${target.key}` } : {},
     signal: AbortSignal.timeout(30_000),

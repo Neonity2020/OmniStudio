@@ -286,12 +286,16 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // setup-env 这一条查询上，不刷就一直是旧状态。
         if (lines.some(isInstallTerminalLine)) {
           queryClient.invalidateQueries({ queryKey: ["setup-env"] });
+          // 设置 → 模型引擎页的每行状态（版本 / 路径 / 占用）同样只在终态时重查：
+          // pip 一次安装能打几百行日志，逐行刷新等于把状态查询打成轮询。
+          queryClient.invalidateQueries({ queryKey: ["local-engines"] });
         }
       },
       engineInstallPhase: (event) => {
         useEngineInstallStore.getState().setPhase(event);
         if (event.phase === "done" || event.phase === "failed") {
           queryClient.invalidateQueries({ queryKey: ["setup-env"] });
+          queryClient.invalidateQueries({ queryKey: ["local-engines"] });
         }
       },
       ppOcrPhase: ({ phase }) => {
@@ -329,12 +333,23 @@ const rpc = Electroview.defineRPC<AppRPC>({
         if (kbId != null) queryClient.invalidateQueries({ queryKey: ["kb-docs", kbId] });
         queryClient.invalidateQueries({ queryKey: ["kb-chunks"] });
       },
-      navigate: ({ path }) => {
-        // 前端导航没有 URL 路由，全靠 router store；CLI 跳转只用到无参数路径。
+      navigate: ({ path, tab, sub }) => {
+        // 前端导航没有 URL 路由，全靠 router store。
         // 模型库已并入设置页，旧的 "models" 路由映射到设置-模型库标签。
+        // tab / sub 是 CLI 给的更深落点（`omi start --cloud` → 模型库的云端模型页签）。
         if (path === "models") {
-          useRouter.getState().setRoute({ path: "settings", tab: "store" });
-        } else if (path === "settings" || path === "chat" || path === "index") {
+          useRouter.getState().setRoute({
+            path: "settings",
+            tab: tab ?? "library",
+            ...(sub ? { sub } : {}),
+          });
+        } else if (path === "settings") {
+          useRouter.getState().setRoute({
+            path: "settings",
+            ...(tab ? { tab } : {}),
+            ...(sub ? { sub } : {}),
+          });
+        } else if (path === "chat" || path === "index") {
           useRouter.getState().setRoute({ path });
         } else if (path === "automations") {
           // 自动化不再是左侧一级菜单：跳进 Agent 并打开它的自动化子视图。

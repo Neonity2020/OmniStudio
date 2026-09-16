@@ -66,8 +66,14 @@ export function formatBytes(b: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** 下载速率显示（bytes/s → `12.3 MB/s`），多文件模型只展示整体速度。 */
+export function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || !Number.isFinite(bytesPerSec) || bytesPerSec <= 0) return "";
+  return `${formatBytes(bytesPerSec)}/s`;
+}
+
 export function downloadImage(url: string, record: ImageRecordRow) {
-  void rpcClient.saveImageToDownloads({
+  return rpcClient.saveImageToDownloads({
     url,
     filename: `image-${record.id}-${Date.now()}.png`,
   });

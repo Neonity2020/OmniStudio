@@ -338,6 +338,6 @@ export async function cmdCloud(parsed: ParsedArgs) {
     console.error("应用未运行。");
     process.exit(1);
   }
-  await controlRequest("navigate", { path: "settings" });
-  console.log("已在应用里打开“设置 → 云端”配置页。");
+  await controlRequest("navigate", { path: "settings", tab: "cloud" });
+  console.log("已在应用里打开“设置 → 云端模型”配置页。");
 }

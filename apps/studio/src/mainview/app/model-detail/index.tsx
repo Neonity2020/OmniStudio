@@ -19,7 +19,7 @@ import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category
 import { installedFileNames } from "@/mainview/lib/installed-models";
 import { cn } from "@/mainview/lib/utils";
 import { FileRow } from "./file-row";
-import { DownloadRecommendedButton } from "./download-button";
+import { ModelDownloadCard } from "./download-button";
 import { formatBytes, formatParams, SUPPORT_FILE_RE, sortBySizeAsc } from "./parts";
 
 /**
@@ -41,7 +41,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
   const queryClient = useQueryClient();
   const { source } = useModelDetailStore();
   const setRoute = useRouter((s) => s.setRoute);
-  const goBack = () => (onBack ? onBack() : setRoute({ path: "settings", tab: "store" }));
+  const goBack = () => (onBack ? onBack() : setRoute({ path: "settings", tab: "library" }));
   const { engine } = useEngine();
   // null = auto: follow the active engine's native format
   const [formatFilter, setFormatFilter] = useState<"all" | ModelFileKind | null>(null);
@@ -264,7 +264,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
           {/* Big download button */}
           <div className="mt-4 flex flex-wrap items-center gap-2 border-t pt-4">
             {recommended ? (
-              <DownloadRecommendedButton
+              <ModelDownloadCard
                 repo={repo}
                 file={recommended}
                 source={modelSource}

@@ -19,7 +19,7 @@ import { MediaSourceFilter } from "@components/media-source-badge";
 import { useMusicStore } from "@stores/music";
 import type { MusicRecordRow } from "../../../bun/music-gen";
 import type { MediaSource } from "../../../bun/db/schema";
-import { HistoryCard } from "./parts";
+import { ALL_WORKS_PLAYLIST_ID, HistoryCard } from "./parts";
 
 export function HistoryScreen() {
   const t = useT();
@@ -45,6 +45,9 @@ export function HistoryScreen() {
       setError(undefined);
       setToDelete(null);
       queryClient.invalidateQueries({ queryKey: ["music-records"] });
+      // 作品被删时也会离开它所在的歌单（后端清成员关系），侧栏与曲目页跟着刷新。
+      queryClient.invalidateQueries({ queryKey: ["music-playlists"] });
+      queryClient.invalidateQueries({ queryKey: ["music-playlist-tracks"] });
     },
     onError: (e) => {
       setError(String(e));
@@ -97,6 +100,9 @@ export function HistoryScreen() {
               <HistoryCard
                 key={r.id}
                 record={r}
+                // 整页的作品作为队列：在这一页点播之后，上一首/下一首能顺着这里走。
+                records={records}
+                source={{ playlistId: ALL_WORKS_PLAYLIST_ID, name: t("music.nav.all") }}
                 onOpen={() => {
                   setView("generate");
                   setFocusRecordId(r.id);

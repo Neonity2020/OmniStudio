@@ -3,7 +3,7 @@ import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/setting
 import { resolveManagedPython } from "../python-engine";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
-import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
+import { MAX_LOG_CHARS, killProcessTree, probeCommand, pumpServerOutput, spawnServerProcess } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
@@ -89,15 +89,10 @@ export class SglangRuntime implements Runtime {
     const pythonPath = Bun.which("python3") ?? Bun.which("python");
     if (!pythonPath) return { found: false };
 
-    try {
-      const proc = Bun.spawn([pythonPath, "-c", "import sglang; print(sglang.__version__)"], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const exited = await waitExit(proc, 5000);
-      if (exited) return { found: true, path: pythonPath, mode: "python" };
-    } catch {
-      // not available
+    // 退出码为 0 才算数：只判"进程退出了"（`waitExit`）会让任何装了 python3 的机器
+    // 都报"已安装" —— 导入失败同样是"退出了"。
+    if (await probeCommand([pythonPath, "-c", "import sglang; print(sglang.__version__)"], 5000)) {
+      return { found: true, path: pythonPath, mode: "python" };
     }
 
     return { found: false };

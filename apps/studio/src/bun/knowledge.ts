@@ -24,6 +24,7 @@ import {
 } from "./embeddings";
 import { resolveEmbeddingBackend } from "./model-servers";
 import { resolveCloudProvider } from "./cloud-providers";
+import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "./secrets";
 import { getKbIndex, invalidateKbIndex, kbIndexStats, peekKbIndex, type KbSearchIndex } from "./kb-index";
 import {
   awaitKbIdle,
@@ -254,6 +255,78 @@ function kbAgg(kbId: number): { docCount: number; chunkCount: number; embeddedCo
   };
 }
 
+/**
+ * 知识库的两列密钥（嵌入 / 重排）和云端厂商的 Key 一样落盘加密。
+ *
+ * 读的一侧统一在这里解密：`getKb` 与 `listKnowledgeBases` 是这一行数据仅有的两个出口，
+ * 收在这两个函数里，下游（向量化 / 重排 / 界面）拿到的就都是明文，不必各自记得解一次。
+ * 解不开（换了机器 / 换了数据目录）按未配置处理 —— 与厂商 Key 同一条约定，
+ * 否则一个解不开的密文会被当成密钥原样发到上游，换回 401 而看不出原因。
+ */
+function decryptKbRow(row: KnowledgeBaseRow): KnowledgeBaseRow {
+  return {
+    ...row,
+    embeddingApiKey: readKbKey(row.id, "embedding", row.embeddingApiKey),
+    rerankApiKey: readKbKey(row.id, "rerank", row.rerankApiKey),
+  };
+}
+
+/**
+ * 老库里的明文密钥：读到就顺手加密写回（写穿）。
+ *
+ * 没做成「启动时扫一遍」是因为那需要一张「跑过没跑过」的标志，而标志一旦为真，
+ * 之后新增的明文行就再也轮不到被加密 —— 逐行判断反而更结实：密文行一次写都不发生，
+ * 明文行只会被写一次。知识库是个位数量级，这个判断的成本可以忽略。
+ */
+function encryptPlaintextKbKeys(row: KnowledgeBaseRow): void {
+  const patch: Record<string, string> = {};
+  if (row.embeddingApiKey && !isEncryptedSecret(row.embeddingApiKey)) {
+    patch.embeddingApiKey = encryptSecret(row.embeddingApiKey);
+  }
+  if (row.rerankApiKey && !isEncryptedSecret(row.rerankApiKey)) {
+    patch.rerankApiKey = encryptSecret(row.rerankApiKey);
+  }
+  if (Object.keys(patch).length === 0) return;
+  try {
+    db.update(knowledgeBases).set(patch).where(eq(knowledgeBases.id, row.id)).run();
+  } catch (e) {
+    // 加密写回失败不影响这次读取（读取侧对明文是透传的），下次读到再试。
+    logEvent({
+      level: "warn",
+      source: "kb",
+      event: "kb.api_key.encrypt_failed",
+      message: `知识库 ${row.id} 的明文密钥加密写回失败，本次按明文继续`,
+      detail: { kbId: row.id, error: e },
+    });
+  }
+}
+
+const kbKeyWarned = new Set<string>();
+
+/** 写的一侧：空值保持空（不制造密文），其余加密。 */
+function encryptKbKey(value: string): string {
+  const trimmed = value.trim();
+  return trimmed ? encryptSecret(trimmed) : trimmed;
+}
+
+function readKbKey(kbId: number, slot: "embedding" | "rerank", value: string): string {
+  if (!value) return value;
+  const result = tryDecryptSecret(value);
+  if (result.ok) return result.value;
+  const marker = `${kbId}:${slot}`;
+  if (!kbKeyWarned.has(marker)) {
+    kbKeyWarned.add(marker);
+    logEvent({
+      level: "warn",
+      source: "kb",
+      event: "kb.api_key.decrypt.failed",
+      message: `知识库 ${kbId} 的${slot === "embedding" ? "嵌入" : "重排"} Key 在本机解不开，已按未配置处理`,
+      detail: { kbId, slot, reason: result.error.slice(0, 200) },
+    });
+  }
+  return "";
+}
+
 function kbToView(row: KnowledgeBaseRow): KbView {
   return {
     ...row,
@@ -272,11 +345,17 @@ export function listKnowledgeBases(): KbView[] {
     .from(knowledgeBases)
     .orderBy(desc(knowledgeBases.updatedAt))
     .all()
-    .map(kbToView);
+    .map((row) => {
+      encryptPlaintextKbKeys(row);
+      return kbToView(decryptKbRow(row));
+    });
 }
 
 export function getKb(id: number): KnowledgeBaseRow | null {
-  return db.select().from(knowledgeBases).where(eq(knowledgeBases.id, id)).get() ?? null;
+  const row = db.select().from(knowledgeBases).where(eq(knowledgeBases.id, id)).get();
+  if (!row) return null;
+  encryptPlaintextKbKeys(row);
+  return decryptKbRow(row);
 }
 
 export function createKb(input: {
@@ -333,11 +412,11 @@ export function updateKb(id: number, patch: KbUpdatePatch): { kb: KbView; embedd
   if (patch.description !== undefined) set.description = patch.description.trim() || null;
   if (patch.embeddingModel !== undefined) set.embeddingModel = patch.embeddingModel.trim();
   if (patch.embeddingBase !== undefined) set.embeddingBase = patch.embeddingBase.trim();
-  if (patch.embeddingApiKey !== undefined) set.embeddingApiKey = patch.embeddingApiKey.trim();
+  if (patch.embeddingApiKey !== undefined) set.embeddingApiKey = encryptKbKey(patch.embeddingApiKey);
   if (patch.embeddingProviderId !== undefined) set.embeddingProviderId = patch.embeddingProviderId.trim();
   if (patch.rerankModel !== undefined) set.rerankModel = patch.rerankModel.trim();
   if (patch.rerankBase !== undefined) set.rerankBase = patch.rerankBase.trim();
-  if (patch.rerankApiKey !== undefined) set.rerankApiKey = patch.rerankApiKey.trim();
+  if (patch.rerankApiKey !== undefined) set.rerankApiKey = encryptKbKey(patch.rerankApiKey);
   if (patch.rerankProviderId !== undefined) set.rerankProviderId = patch.rerankProviderId.trim();
   if (patch.chunkSize !== undefined) set.chunkSize = clampInt(patch.chunkSize, 200, 4000, 800);
   if (patch.chunkOverlap !== undefined) set.chunkOverlap = clampInt(patch.chunkOverlap, 0, 1000, 120);

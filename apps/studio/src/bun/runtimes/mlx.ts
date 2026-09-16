@@ -5,7 +5,7 @@ import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/setting
 import { resolveManagedPython } from "../python-engine";
 import { markServerStarted } from "../stats";
 import { extractDeadWorkerError, extractStartupError } from "./errors";
-import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
+import { MAX_LOG_CHARS, killProcessTree, probeCommand, pumpServerOutput, spawnServerProcess } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
@@ -165,12 +165,9 @@ export class MlxRuntime implements Runtime {
     for (const py of ["python3", "python"]) {
       const pythonPath = Bun.which(py);
       if (!pythonPath) continue;
-      try {
-        const proc = Bun.spawn([pythonPath, "-c", "import mlx_lm"], { stdout: "pipe", stderr: "pipe" });
-        const exited = await waitExit(proc, 5000);
-        if (exited) return { found: true, path: pythonPath, mode: "python" };
-      } catch {
-        // try next interpreter
+      // 退出码为 0 才算数：`import mlx_lm` 失败同样是"进程退出了"。
+      if (await probeCommand([pythonPath, "-c", "import mlx_lm"], 5000)) {
+        return { found: true, path: pythonPath, mode: "python" };
       }
     }
 

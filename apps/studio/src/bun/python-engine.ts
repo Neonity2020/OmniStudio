@@ -65,6 +65,11 @@ export type PythonInstallOptions = {
   findUv?: () => string | null;
   /** 创建 venv 用的 Python；不传则自行查找。 */
   pythonPath?: string;
+  /**
+   * 升级：已装好也照样跑一遍 `pip install --upgrade`（引擎管理页的「升级」按钮）。
+   * 不带这个标志的默认行为仍然是"装过就跳过"——引导页点一次不该把几百 MB 重下一遍。
+   */
+  upgrade?: boolean;
 };
 
 export type PythonInstallResult = {
@@ -171,8 +176,8 @@ export async function installPythonEngine(options: PythonInstallOptions): Promis
     return result;
   };
 
-  // 已经装好且模块导得进来：直接返回，别把几百 MB 再下一遍。
-  const existing = resolveManagedPython(id, options.probeModule, runner);
+  // 已经装好且模块导得进来：直接返回，别把几百 MB 再下一遍（升级时例外）。
+  const existing = options.upgrade ? null : resolveManagedPython(id, options.probeModule, runner);
   if (existing) {
     const version = probeVersion(existing, distribution, runner) ?? readPythonEngineVersion(id) ?? undefined;
     reporter.log(`${label} 已安装${version ? `（${version}）` : ""}，跳过。\n`);

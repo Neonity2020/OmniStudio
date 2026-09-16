@@ -4,9 +4,9 @@ import {
   TrashIcon,
   ChevronRightIcon,
   HistoryIcon,
-  MusicIcon,
   BanIcon,
   PauseIcon,
+  PlayIcon,
 } from "lucide-react";
 import { AudioDownloadButton, audioFileName } from "@components/audio-download";
 import { Button } from "@ui/button";
@@ -14,8 +14,13 @@ import { Badge } from "@ui/badge";
 import { useT } from "@stores/ui-lang";
 import { MediaSourceBadge } from "@components/media-source-badge";
 import { useMusicStore } from "@stores/music";
+import { isPlayable, useMusicPlayer, type MusicQueueSource } from "@stores/music-player";
 import type { MusicRecordRow } from "../../../bun/music-gen";
 import { cn } from "@/mainview/lib/utils";
+import { AddToPlaylistButton } from "./add-to-playlist";
+import { MusicCover, PlayingBars, recordSeed } from "./cover";
+import { CoverMenu } from "./cover-menu";
+import { parseLyrics } from "./lyrics";
 
 /** 任务类型 → i18n 标签键。三档与 StepFun 的 task 取值一一对应。 */
 export const TASK_LABELS: Record<"text_to_music" | "music_cover" | "vocal_to_music", string> = {
@@ -107,26 +112,71 @@ export function displayName(record: MusicRecordRow): string {
  * 没反应 —— 真踩过。前者弹目录选择框、转圈、存完打绿勾并把路径放进 tooltip，
  * 与语音页完全一致。
  */
-function downloadName(record: MusicRecordRow): string {
+export function downloadName(record: MusicRecordRow): string {
   return record.title?.trim() || `music-${record.id}`;
 }
 
-/** 音频条目的图标位：生成中显示转圈，其余显示音符。 */
-export function MusicThumb({ record, className }: { record: MusicRecordRow; className?: string }) {
+/** 「全部作品」这类没有具体歌单的队列来源：id 用 0，与真实歌单 id 不会撞。 */
+export const ALL_WORKS_PLAYLIST_ID = 0;
+
+/**
+ * 播放/暂停按钮：所有入口（结果卡、历史卡、最近条、曲目行）共用一份行为 ——
+ *
+ *  - 正在播的就是这一首 → 暂停/继续；
+ *  - 否则把 `records` 整份当作队列，从这一首开始播（上一首/下一首因此能顺着列表走）。
+ *
+ * 生成中 / 失败的作品不响应（按钮直接置灰）。
+ */
+export function PlayPauseButton({
+  record,
+  records,
+  source,
+  size = "sm",
+  showLabel,
+  className,
+}: {
+  record: MusicRecordRow;
+  /** 点播放时要成为队列的那一份列表（顺序照抄，通常是用户眼前看到的列表）。 */
+  records: MusicRecordRow[];
+  source: MusicQueueSource | null;
+  size?: "sm" | "lg" | "icon-sm";
+  showLabel?: boolean;
+  className?: string;
+}) {
+  const t = useT();
+  const { playQueue, toggle } = useMusicPlayer.getState();
+  const playing = useMusicPlayer((s) => s.playing);
+  const currentId = useMusicPlayer((s) => (s.index >= 0 ? (s.queue[s.index]?.id ?? null) : null));
+  const isCurrent = currentId === record.id;
+  const isPlaying = isCurrent && playing;
+  const canPlay = isPlayable(record);
+
+  const activate = () => {
+    if (!canPlay) return;
+    if (isCurrent) toggle();
+    else playQueue(records, record.id, source);
+  };
+
   return (
-    <span
-      className={cn(
-        "flex items-center justify-center rounded bg-muted",
-        record.status === "failed" && "text-destructive/70",
-        className,
-      )}
+    <Button
+      variant={size === "lg" ? "default" : "ghost"}
+      size={size === "icon-sm" ? "icon-sm" : size}
+      tooltip={isPlaying ? t("music.player.pause") : t("music.player.play")}
+      aria-label={isPlaying ? t("music.player.pause") : t("music.player.play")}
+      disabled={!canPlay}
+      className={cn(size === "lg" && "rounded-full gap-1.5", className)}
+      onClick={(e) => {
+        e.stopPropagation();
+        activate();
+      }}
     >
-      {record.status === "processing" ? (
-        <Loader2Icon className="size-3.5 animate-spin text-primary" />
+      {isPlaying ? (
+        <PauseIcon className={cn("fill-current", size === "lg" ? "size-4" : "size-3.5")} />
       ) : (
-        <MusicIcon className="size-3.5 text-muted-foreground" />
+        <PlayIcon className={cn("fill-current", size === "lg" ? "size-4" : "size-3.5")} />
       )}
-    </span>
+      {showLabel && (isPlaying ? t("music.player.pause") : t("music.player.play"))}
+    </Button>
   );
 }
 
@@ -243,9 +293,14 @@ export function MusicFailedCard({
 export function MusicPlayerCard({
   record,
   onDelete,
+  playlistRecords,
+  source,
 }: {
   record: MusicRecordRow;
   onDelete: (id: number) => void;
+  /** 点播放时要成为队列的那份列表（创作页传"最近生成"的那一份，让上一首/下一首有得走）。 */
+  playlistRecords: MusicRecordRow[];
+  source: MusicQueueSource | null;
 }) {
   const t = useT();
   // 歌词优先显示上游改写后的那份：用户拿到的是"实际唱出来的词"，
@@ -256,9 +311,12 @@ export function MusicPlayerCard({
     <div className="flex min-w-0 max-w-3xl flex-col gap-3">
       <div className="flex flex-col gap-4 rounded-xl border bg-card p-5 shadow-sm">
         <div className="flex items-start gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/12">
-            <MusicIcon className="size-5 text-primary" />
-          </span>
+          <MusicCover
+            seed={recordSeed(record)}
+            label={displayName(record)}
+            src={record.coverUrl}
+            className="size-11"
+          />
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">
               {displayName(record) || t("music.untitled")}
@@ -273,13 +331,19 @@ export function MusicPlayerCard({
           </div>
         </div>
 
-        <audio
-          key={record.id}
-          src={record.audioUrl ?? undefined}
-          controls
-          preload="metadata"
-          className="w-full"
-        />
+        {/* 播放交给底部播放条（封面 / 进度 / 上下首 / 循环都在那儿），这里只放一个起播按钮 ——
+            原来是浏览器自带的 <audio controls>，样式与页面其余部分对不上，
+            也进不了播放队列（点播放条上的"下一首"接不上）。 */}
+        <div className="flex items-center gap-3">
+          <PlayPauseButton
+            record={record}
+            records={playlistRecords}
+            source={source}
+            size="lg"
+            showLabel
+          />
+          <span className="text-[10px] text-muted-foreground">{t("music.result.playHint")}</span>
+        </div>
 
         <p className="text-[11px] leading-relaxed text-muted-foreground">{record.caption}</p>
 
@@ -288,9 +352,24 @@ export function MusicPlayerCard({
             <summary className="cursor-pointer px-3 py-2 text-[11px] font-medium text-muted-foreground">
               {t("music.result.lyrics")}
             </summary>
-            <pre className="max-h-64 overflow-y-auto px-3 pb-3 font-sans text-[11px] leading-relaxed whitespace-pre-wrap text-foreground/85">
-              {lyrics}
-            </pre>
+            {/* 与单曲播放页共用同一套清洗与段落判定（`lyrics.ts`）：上游会在歌词里塞
+                `## 标题` / `**【主歌一】**` 这类 markdown 记号，直接吐原文就是一屏记号。 */}
+            <div className="max-h-64 overflow-y-auto px-3 pb-3">
+              {parseLyrics(lyrics).map((line, i) =>
+                line.tag ? (
+                  <p
+                    key={`${i}-${line.text}`}
+                    className="mt-2 text-[10px] font-medium tracking-wide text-muted-foreground/60"
+                  >
+                    {line.text}
+                  </p>
+                ) : (
+                  <p key={`${i}-${line.text}`} className="text-[11px] leading-relaxed text-foreground/85">
+                    {line.text}
+                  </p>
+                ),
+              )}
+            </div>
           </details>
         )}
       </div>
@@ -305,6 +384,8 @@ export function MusicPlayerCard({
           )}
         </p>
         <div className="flex shrink-0 items-center gap-1">
+          <CoverMenu recordId={record.id} hasCover={!!record.coverUrl} />
+          <AddToPlaylistButton recordIds={[record.id]} />
           <AudioDownloadButton
             url={record.audioUrl!}
             filename={audioFileName(record.audioUrl!, downloadName(record))}
@@ -349,26 +430,38 @@ export function RecentStrip({
       </span>
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
         {recent.map((r) => (
-          <button
+          <div
             key={r.id}
-            type="button"
-            title={displayName(r) || undefined}
-            onClick={() => setFocusRecordId(r.id)}
             className={cn(
-              "flex h-14 w-32 shrink-0 items-center gap-2 rounded-lg border px-2 text-left transition",
+              "flex h-14 w-32 shrink-0 items-center gap-2 rounded-lg border px-2 transition",
               "hover:border-primary/60 hover:ring-2 hover:ring-primary/30",
             )}
           >
-            <MusicThumb record={r} className="size-8 shrink-0" />
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-[11px] leading-snug text-foreground/85">
-                {displayName(r) || t("music.untitled")}
+            {/* 卡片仍点进创作页看详情；试听按钮单独放在缩略图上（不抢点击）。 */}
+            <button
+              type="button"
+              title={displayName(r) || undefined}
+              onClick={() => setFocusRecordId(r.id)}
+              className="flex min-w-0 flex-1 items-center gap-2 text-left outline-none"
+            >
+              <MusicCover seed={recordSeed(r)} label={displayName(r)} src={r.coverUrl} className="size-8" />
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-[11px] leading-snug text-foreground/85">
+                  {displayName(r) || t("music.untitled")}
+                </span>
+                <span className="text-[9px] tabular-nums text-muted-foreground">
+                  {formatDuration(r.durationMs) ? `~${formatDuration(r.durationMs)}` : ""}
+                </span>
               </span>
-              <span className="text-[9px] tabular-nums text-muted-foreground">
-                {formatDuration(r.durationMs) ? `~${formatDuration(r.durationMs)}` : ""}
-              </span>
-            </span>
-          </button>
+            </button>
+            <PlayPauseButton
+              record={r}
+              records={recent}
+              source={{ playlistId: ALL_WORKS_PLAYLIST_ID, name: t("music.recent.title") }}
+              size="icon-sm"
+              className="size-6 shrink-0"
+            />
+          </div>
         ))}
       </div>
       <Button
@@ -390,20 +483,33 @@ export function RecentStrip({
 
 export function HistoryCard({
   record,
+  records,
+  source,
   onOpen,
   onDelete,
 }: {
   record: MusicRecordRow;
+  /** 同一页显示的全部作品：点播放时它整份成为队列，上一首/下一首能在这一页里走。 */
+  records: MusicRecordRow[];
+  source: MusicQueueSource;
   onOpen: () => void;
   onDelete: () => void;
 }) {
   const t = useT();
-  const [playing, setPlaying] = useState(false);
+  const currentId = useMusicPlayer((s) => (s.index >= 0 ? (s.queue[s.index]?.id ?? null) : null));
+  const playing = useMusicPlayer((s) => s.playing);
+  const isCurrent = currentId === record.id;
+
   return (
     <div className="group flex flex-col gap-2">
       <div className="relative flex h-28 flex-col justify-between overflow-hidden rounded-xl border bg-muted/40 p-3">
         <div className="flex items-start gap-2">
-          <MusicThumb record={record} className="size-9 shrink-0" />
+          <MusicCover
+            seed={recordSeed(record)}
+            label={displayName(record)}
+            src={record.coverUrl}
+            className="size-9"
+          />
           <button
             type="button"
             className="min-w-0 flex-1 text-left"
@@ -423,17 +529,17 @@ export function HistoryCard({
 
         {record.status === "done" && record.audioUrl ? (
           <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              tooltip={playing ? t("music.history.pause") : t("music.history.play")}
-              onClick={() => setPlaying((v) => !v)}
-            >
-              {playing ? <PauseIcon className="size-3.5" /> : <MusicIcon className="size-3.5" />}
-            </Button>
-            {playing && (
-              // 历史卡片上的试听：不占结果区，切走就停（组件卸载即停）。
-              <audio autoPlay src={record.audioUrl} controls className="h-7 min-w-0 flex-1" />
+            {/* 试听走底部播放条：进度、上下首、循环都在那儿，卡片上不再嵌一个浏览器原生播放器。 */}
+            <PlayPauseButton record={record} records={records} source={source} />
+            {isCurrent && playing ? (
+              <span className="flex items-center gap-1.5 text-[10px] text-primary">
+                <PlayingBars />
+                {t("music.player.nowPlaying")}
+              </span>
+            ) : (
+              <span className="text-[10px] tabular-nums text-muted-foreground">
+                {formatDuration(record.durationMs) ? `~${formatDuration(record.durationMs)}` : ""}
+              </span>
             )}
           </div>
         ) : (

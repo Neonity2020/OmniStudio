@@ -59,7 +59,7 @@ export type ImageRecordRow = {
 export type ImageGenConfig = {
   backend: ImageGenBackend;
   /**
-   * 云端后端选中的服务商 id（「设置 → 模型云服务」里配置的厂商）。
+   * 云端后端选中的服务商 id（「设置 → 云端模型」里配置的厂商）。
    * 地址与密钥由服务商行提供 —— 图像页只挑厂商 + 模型，不再单独保存连接信息。
    */
   providerId: string;

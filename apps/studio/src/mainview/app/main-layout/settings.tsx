@@ -1,18 +1,17 @@
 import { useState, useEffect, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ServerIcon,
-  CpuIcon,
   BlocksIcon,
   GlobeIcon,
   TerminalSquareIcon,
   TerminalIcon,
   LayoutDashboardIcon,
-  StarIcon,
   BoxIcon,
-  Link2Icon,
-  WaypointsIcon,
+  CpuIcon,
+  ServerIcon,
+  CircuitBoardIcon,
   CloudIcon,
+  WaypointsIcon,
   GithubIcon,
   PlugIcon,
   ShieldIcon,
@@ -26,9 +25,7 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { ScrollArea } from "@ui/scroll-area";
 import { PageShell } from "@components/setting-ui";
-import { CloudProviderPanel } from "./cloud-provider-panel";
 import { IntegrationsSettings } from "./integrations-tab";
-import { DefaultModelsPanel } from "./default-models-panel";
 import { AboutTab } from "./about-tab";
 import { WebSearchTab } from "./web-search-tab";
 import { McpTab } from "./mcp-tab";
@@ -36,6 +33,7 @@ import { AppearanceTab } from "./prefs-tabs";
 import { GeneralTab } from "./general-tab";
 import { CliTab } from "./cli-tab";
 import { BackupTab } from "./backup-tab";
+import { EnginesTab } from "./engines-tab";
 import { PermissionsTab } from "./permissions-tab";
 import { AgentCapsTab } from "./agent-caps-tab";
 import { useT } from "@stores/ui-lang";
@@ -44,22 +42,27 @@ import { DashboardScreen } from "../dashboard-screen";
 import { UsageScreen } from "../usage-screen";
 import { ConsoleScreen } from "./console-screen";
 import { ModelDetailScreen } from "../model-detail";
+import { RunModelsScreen } from "../local-models";
+import { CloudProviderPanel } from "./cloud-provider-panel";
+import { DefaultModelsPanel } from "./default-models-panel";
 import { TunnelScreen } from "../tunnel-screen";
-import { ModelsScreen } from "../models-screen";
-import { LocalModelsScreen } from "../local-models";
-import { MarketScreen } from "../market-screen";
 import { GatewayScreen } from "../gateway-screen";
+import {
+  DEFAULT_LIBRARY_TAB,
+  ModelLibraryScreen,
+  isLibraryTab,
+  type LibraryTab,
+} from "../model-library";
 import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
 import { useRouter } from "@stores/router";
 
 type SettingsFormState = Record<string, string>;
 
 type SettingsTab =
-  | "network"
-  | "defaults"
-  | "model"
-  | "store"
-  | "market"
+  | "library"
+  | "run"
+  | "cloud"
+  | "engines"
   | "gateway"
   | "tunnel"
   | "integrations"
@@ -77,11 +80,10 @@ type SettingsTab =
   | "about";
 
 const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
-  network: { icon: <ServerIcon className="size-4" />, labelKey: "settings.server" },
-  defaults: { icon: <StarIcon className="size-4" />, labelKey: "settings.defaults" },
-  model: { icon: <CpuIcon className="size-4" />, labelKey: "settings.model" },
-  store: { icon: <BoxIcon className="size-4" />, labelKey: "settings.store" },
-  market: { icon: <Link2Icon className="size-4" />, labelKey: "settings.market" },
+  library: { icon: <BoxIcon className="size-4" />, labelKey: "library.title" },
+  run: { icon: <CpuIcon className="size-4" />, labelKey: "run.title" },
+  cloud: { icon: <ServerIcon className="size-4" />, labelKey: "cloud.title" },
+  engines: { icon: <CircuitBoardIcon className="size-4" />, labelKey: "settings.engines.title" },
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
   tunnel: { icon: <CloudIcon className="size-4" />, labelKey: "settings.tunnel" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
@@ -104,7 +106,9 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   { tabs: ["stats"] },
   {
     labelKey: "settings.group.models",
-    tabs: ["network", "defaults", "model", "store", "market"],
+    // 模型这一组四条，各管一段：有哪些模型（模型库）/ 怎么跑（运行模型）/
+    // 用云端 API（云端模型）/ 引擎本体的安装升级（模型引擎）。
+    tabs: ["library", "run", "cloud", "engines"],
   },
   {
     labelKey: "settings.group.services",
@@ -115,10 +119,48 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   { labelKey: "settings.group.data", tabs: ["usage", "logs", "backup"] },
 ];
 
+/**
+ * 旧标签 id → 现归属。模型组这轮改过名也挪过位置，外部跳转却还在用旧 id：
+ * 小应用 `omni.openSettings("network")`、CLI navigate 的 `models`、各式错误回退。
+ * 这里映射一次，旧 id 不会落到空白页。
+ *
+ *   network / defaults（模型云服务、默认模型）→ 云端模型
+ *   model（本地模型）                        → 运行模型
+ *   store（模型库）                          → 模型库（默认页签）
+ *   market（在线模型市场）                    → 模型库 → 模型市场页签
+ */
+const LEGACY_TABS: Record<string, { tab: SettingsTab; libraryTab?: LibraryTab }> = {
+  network: { tab: "cloud" },
+  defaults: { tab: "cloud" },
+  model: { tab: "run" },
+  store: { tab: "library" },
+  market: { tab: "library", libraryTab: "market" },
+};
+
+/** 解析路由里的标签：认新 id，也认旧 id；非模型页签不带模型库子页签。 */
+function resolveRouteTab(
+  raw: string | undefined,
+  sub: string | undefined,
+): { tab: SettingsTab; libraryTab?: LibraryTab } | null {
+  if (!raw) return null;
+  if (raw in TAB_DEFS) {
+    const tab = raw as SettingsTab;
+    if (tab !== "library") return { tab };
+    return { tab, libraryTab: isLibraryTab(sub) ? sub : DEFAULT_LIBRARY_TAB };
+  }
+  const legacy = LEGACY_TABS[raw];
+  if (!legacy) return null;
+  return {
+    tab: legacy.tab,
+    libraryTab: isLibraryTab(sub) ? sub : legacy.libraryTab,
+  };
+}
+
 /** 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题。 */
 const SELF_HEADED_TABS: SettingsTab[] = [
-  "network",
-  "defaults",
+  "library",
+  "run",
+  "cloud",
   "about",
   "websearch",
   "mcp",
@@ -129,12 +171,14 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "general",
   "appearance",
   "tunnel",
+  "engines",
 ];
 
 /** 设置页：一级页面，每个标签页的内容宽度统一由 `PageShell` 决定。 */
 export function SettingsScreen() {
   const t = useT();
   const [activeTab, setActiveTab] = useState<SettingsTab>("stats");
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>(DEFAULT_LIBRARY_TAB);
   const [form, setForm] = useState<SettingsFormState>({});
   // 设置页内原地打开的模型详情：不切换全局路由，左侧分类菜单保持可见。
   const [detail, setDetail] = useState<ModelDetailSource | null>(null);
@@ -143,17 +187,29 @@ export function SettingsScreen() {
     setDetail(source);
   };
   const pickTab = (tab: SettingsTab) => {
+    // 从别的菜单点进模型库才回到默认页签；本来就在库里点它，别把人从当前页签踢走。
+    if (tab === "library" && activeTab !== "library") setLibraryTab(DEFAULT_LIBRARY_TAB);
     setActiveTab(tab);
     setDetail(null);
   };
+  /** 跳到模型库并指定页签（运行模型页的空态走这条）。 */
+  const openLibrary = (sub: LibraryTab) => {
+    pickTab("library");
+    setLibraryTab(sub);
+  };
 
-  // 外部跳转（CLI / OCR / 错误回退）带 tab 参数时切到对应标签。
+  // 外部跳转（CLI / OCR / 错误回退 / 小应用）带 tab / sub 参数时切到对应标签。
   const routeTab = useRouter((s) => (s.route.path === "settings" ? s.route.tab : undefined));
+  const routeSub = useRouter((s) => (s.route.path === "settings" ? s.route.sub : undefined));
   useEffect(() => {
-    if (!routeTab || !(routeTab in TAB_DEFS)) return;
-    setActiveTab((current) => (current === routeTab ? current : (routeTab as SettingsTab)));
+    const target = resolveRouteTab(routeTab, routeSub);
+    if (!target) return;
+    setActiveTab((current) => (current === target.tab ? current : target.tab));
+    if (target.libraryTab) {
+      setLibraryTab((current) => (current === target.libraryTab ? current : target.libraryTab!));
+    }
     setDetail(null);
-  }, [routeTab]);
+  }, [routeTab, routeSub]);
 
   const { data } = useQuery({
     queryKey: ["settings"],
@@ -214,17 +270,17 @@ export function SettingsScreen() {
         <div className="min-w-0 flex-1">
           <ModelDetailScreen onBack={() => setDetail(null)} />
         </div>
-      ) : activeTab === "model" ? (
-        <div className="min-w-0 flex-1">
-          <LocalModelsScreen onOpenDetail={openDetail} />
+      ) : activeTab === "library" ? (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <ModelLibraryScreen
+            tab={libraryTab}
+            onTabChange={setLibraryTab}
+            onOpenDetail={openDetail}
+          />
         </div>
-      ) : activeTab === "store" ? (
-        <div className="min-w-0 flex-1">
-          <ModelsScreen onOpenDetail={openDetail} />
-        </div>
-      ) : activeTab === "market" ? (
-        <div className="min-w-0 flex-1">
-          <MarketScreen onOpenDetail={openDetail} />
+      ) : activeTab === "run" ? (
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <RunModelsScreen onOpenLibrary={() => openLibrary("market")} />
         </div>
       ) : activeTab === "gateway" ? (
         <div className="min-w-0 flex-1">
@@ -258,9 +314,16 @@ export function SettingsScreen() {
               </div>
             )}
 
-            {activeTab === "network" && <CloudProviderPanel />}
+            {activeTab === "cloud" && (
+              <div className="flex flex-col gap-8">
+                <CloudProviderPanel />
+                <div className="border-t" />
+                <DefaultModelsPanel />
+              </div>
+            )}
 
-            {activeTab === "defaults" && <DefaultModelsPanel />}
+            {/* 「管理模型 →」回到模型库的默认页签（本地已下载） */}
+            {activeTab === "engines" && <EnginesTab onOpenModelsTab={() => pickTab("library")} />}
 
             {activeTab === "integrations" && (
               <IntegrationsSettings form={form} updateField={updateField} />

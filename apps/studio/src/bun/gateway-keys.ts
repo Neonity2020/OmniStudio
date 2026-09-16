@@ -5,7 +5,7 @@ import { logEvent } from "./app-log";
 import { db } from "./db";
 import { gatewayKeys, type GatewayKeyRow } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
-import { decryptSecret, encryptSecret } from "./secrets";
+import { encryptSecret, tryDecryptSecret } from "./secrets";
 import { GATEWAY_KEY_PREFIX } from "../shared/gateway-key";
 
 /**
@@ -48,11 +48,35 @@ function rowToView(row: GatewayKeyRow): GatewayKeyView {
   return {
     id: row.id,
     name: row.name,
-    key: decryptSecret(row.key),
+    key: readKey(row),
     enabled: row.enabled !== 0,
     createdAt: row.createdAt,
   };
 }
+
+/**
+ * 解一把密钥的明文。解不开时按**空串**处理并记一条日志：空串与任何请求都对不上，
+ * 效果就是"这把钥匙在这台机器上不可用"，而不会让设置 → 网关页整页报错
+ * （多来自恢复别处机器的备份：归档不含 `secrets.key`）。
+ */
+function readKey(row: GatewayKeyRow): string {
+  const result = tryDecryptSecret(row.key);
+  if (result.ok) return result.value;
+  if (!keyWarned.has(row.id)) {
+    keyWarned.add(row.id);
+    logEvent({
+      level: "warn",
+      source: "settings",
+      event: "gateway_key.decrypt.failed",
+      message: `网关密钥「${row.name}」在本机解不开（备份来自别的机器？），已按不可用处理`,
+      detail: { id: row.id, reason: result.error.slice(0, 200) },
+    });
+  }
+  return "";
+}
+
+/** 已报过警的密钥行：一次进程内每行只记一条。 */
+const keyWarned = new Set<string>();
 
 /** 按创建时间升序：列表顺序稳定，镜像取到的也是"最早启用的那一把"。 */
 function selectAll(): GatewayKeyView[] {
@@ -144,7 +168,10 @@ export function setGatewayKeyEnabled(id: string, enabled: boolean): GatewayKeyRe
   const row = db.select().from(gatewayKeys).where(eq(gatewayKeys.id, id)).get();
   if (!row) return { ok: false, error: "密钥不存在（可能已被删除）" };
   const view = rowToView({ ...row, enabled: enabled ? 1 : 0 });
-  db.update(gatewayKeys).set({ enabled: enabled ? 1 : 0 }).where(eq(gatewayKeys.id, id)).run();
+  db.update(gatewayKeys)
+    .set({ enabled: enabled ? 1 : 0 })
+    .where(eq(gatewayKeys.id, id))
+    .run();
   syncLegacyApiKey();
   logEvent({
     level: "info",

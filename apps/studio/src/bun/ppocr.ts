@@ -206,6 +206,11 @@ function getEngineDir(): string {
   return getDataDir("engines", "paddleocr");
 }
 
+/** 托管目录（引擎管理页探测占用 / 路径，以及卸载的目标）。 */
+export function engineDirPath(): string {
+  return getEngineDir();
+}
+
 function getVenvBinDir(): string {
   return path.join(getEngineDir(), "bin");
 }

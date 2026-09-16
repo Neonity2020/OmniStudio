@@ -17,7 +17,7 @@ import { OcrRecordList } from "../ocr/record-list";
 import { VoiceRecordList } from "../voice/record-list";
 import { ImageRecordList } from "../image/record-list";
 import { VideoRecordList } from "../video/record-list";
-import { MusicRecordList } from "../music/record-list";
+import { MusicPlaylistSidebar } from "../music/playlist-sidebar";
 import { TranslateRecordList } from "../translate/record-list";
 import { PromptSidebar } from "../prompt/sidebar";
 import { BenchmarkRecordList } from "../benchmark/record-list";
@@ -53,7 +53,7 @@ export function AppSidebar() {
         ) : activeApp === "video" ? (
           <VideoRecordList />
         ) : activeApp === "music" ? (
-          <MusicRecordList />
+          <MusicPlaylistSidebar />
         ) : activeApp === "translate" ? (
           <TranslateRecordList />
         ) : activeApp === "prompt" ? (

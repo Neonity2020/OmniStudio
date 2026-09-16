@@ -107,7 +107,6 @@ const listedRepos: string[] = [];
 /** 一键安装的调用记录。 */
 const installCalls: string[] = [];
 
-
 mock.module("@lib/rpc", () => ({
   rpcClient: {
     getSetupEnvironment: async () => setupEnv,
@@ -224,21 +223,56 @@ test("引擎步骤的「推荐」跟着机器走，并说明为什么", async ()
   await view.cleanup();
 });
 
-test("装了 mlx-lm 的 Apple 芯片：改推 MLX，模型页标出默认的 MLX 模型", async () => {
+test("装了 mlx-lm 的 Apple 芯片：改推 MLX，模型页给的是装得下的千问", async () => {
   setupEnv.mlx.found = true;
   try {
     const view = await renderFlow();
-    expect(view.text()).toContain("推荐 MLX + DeepSeek V4.1 Flash (MLX 4/8bit)");
+    // 16GB 的机器上 MLX 也推千问（bf16 口径：9B 的整仓库 19.3GB 装不下，落回 4B），
+    // 而不是以前那句写死的 DeepSeek 大 MoE。
+    expect(view.text()).toContain("推荐 MLX + Qwen3.5 4B（BF16 · 约占 11.0 GB 内存）");
 
     await clickButton("Next"); // → 引擎
     expect(view.text()).toContain("已装 mlx-lm：Apple 芯片上同一份权重推理更快");
 
-    await clickButton("Next"); // → 模型（MLX 预设）
-    expect(view.text()).toContain("DeepSeek V4.1 Flash (MLX 4/8bit)");
-    expect(view.text()).toContain("推荐");
+    await clickButton("Next"); // → 模型（与其它引擎同一份千问目录）
+    const text = view.text();
+    expect(text).toContain("Qwen3.5 9B");
+    expect(text).toContain("Qwen/Qwen3.5-9B"); // MLX 加载的是 HF safetensors 仓库
+    expect(text).toContain("推荐");
+    expect(text).not.toContain("DeepSeek"); // 引导页不该再出现它
     await view.cleanup();
   } finally {
     setupEnv.mlx.found = false;
+  }
+});
+
+test("32GB 机器 + mlx-lm：推荐的仍是千问，且没有装不下的模型被标成推荐", async () => {
+  const before = {
+    totalMemoryBytes: setupEnv.hardware.totalMemoryBytes,
+    freeMemoryBytes: setupEnv.hardware.freeMemoryBytes,
+    budgetBytes: setupEnv.hardware.budgetBytes,
+  };
+  setupEnv.mlx.found = true;
+  setupEnv.hardware.totalMemoryBytes = 32e9;
+  setupEnv.hardware.freeMemoryBytes = 18e9;
+  setupEnv.hardware.budgetBytes = 24e9; // 统一内存的 75%
+  try {
+    const view = await renderFlow();
+    const first = view.text();
+    expect(first).toContain("推荐 MLX + Qwen3.5 4B");
+    expect(first).not.toContain("DeepSeek");
+
+    await clickButton("Next"); // → 引擎
+    await clickButton("Next"); // → 模型
+    const text = view.text();
+    expect(text).toContain("推理可用预算 24 GB");
+    // 35B 的 bf16 在 32GB 的机器上装不下 → 标出来，而不是当推荐
+    expect(text).toContain("超出内存");
+    expect(text).not.toContain("DeepSeek");
+    await view.cleanup();
+  } finally {
+    setupEnv.mlx.found = false;
+    Object.assign(setupEnv.hardware, before);
   }
 });
 

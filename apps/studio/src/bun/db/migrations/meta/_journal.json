@@ -266,6 +266,27 @@
       "version": "6",
       "when": 1789471307003,
       "tag": "0037_tired_vanisher"
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1789530817000,
+      "tag": "0038_music_playlists",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1789530817001,
+      "tag": "0039_music_lyric_lrc",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "6",
+      "when": 1789530817002,
+      "tag": "0040_music_cover_path",
+      "breakpoints": true
     }
   ]
 }

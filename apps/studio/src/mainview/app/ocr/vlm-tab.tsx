@@ -160,7 +160,7 @@ export function VlmTab({
   const provider = providerData?.config;
   const configured = !!provider?.providerId;
 
-  // 云端 VLM OCR 只选厂商 + 模型（地址 / 密钥在「设置 → 模型云服务」里）。
+  // 云端 VLM OCR 只选厂商 + 模型（地址 / 密钥在「设置 → 云端模型」里）。
   const [pProviderId, setPProviderId] = useState("");
   const [pModel, setPModel] = useState("");
   const lastProvider = useRef("");
@@ -335,7 +335,7 @@ export function VlmTab({
             {installedModels.length === 0 ? (
               <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed px-3 py-3">
                 <p className="text-[11px] text-muted-foreground">{t("ocr.vlm.noModels")}</p>
-                <Button size="xs" variant="outline" onClick={() => router.setRoute({ path: "settings", tab: "store" })}>
+                <Button size="xs" variant="outline" onClick={() => router.setRoute({ path: "settings", tab: "library" })}>
                   <StoreIcon data-icon="inline-start" />
                   {t("ocr.vlm.goLibrary")}
                 </Button>

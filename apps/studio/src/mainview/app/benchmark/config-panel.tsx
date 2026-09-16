@@ -6,7 +6,7 @@ import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Spinner } from "@ui/spinner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
-import { BENCHMARK_CACHE_MODES, BENCHMARK_MAX_CONTEXT, BENCHMARK_MIN_CONTEXT, fmtCtx } from "@/shared/benchmark";
+import { BENCHMARK_CACHE_MODES, BENCHMARK_MAX_BATCH, BENCHMARK_MAX_CONTEXT, BENCHMARK_MIN_CONTEXT, fmtCtx } from "@/shared/benchmark";
 import { cn } from "@/mainview/lib/utils";
 import { SegmentedControl } from "@components/segmented-control";
 import type { BenchmarkConfig } from "./use-benchmark-config";
@@ -14,7 +14,7 @@ import type { BenchmarkConfig } from "./use-benchmark-config";
 /** 左栏配置面板：测速 / 评测的全部参数与启动按钮。 */
 export function BenchmarkConfigPanel({ cfg }: { cfg: BenchmarkConfig }) {
   const {
-    t, mode, setMode, source, setSource, isRunning, modelOptions, effectiveModel, setModel, providers, setRoute, providerId, setProviderId, providerIncomplete, providerKeyMissing, cloudModelOptions, effectiveCloudModel, setCloudModel, genLength, setGenLength, batchSize, setBatchSize, chipContexts, isPresetCtx, contexts, toggleContext, customCtx, setCustomCtx, customCtxError, setCustomCtxError, addCustomContext, overWindow, serverWindow, cacheModes, toggleCacheMode, evalSuitesQuery, suite, setSuite, sampleSize, setSampleSize, evalConcurrency, setEvalConcurrency, selectedSuiteInfo, startRun, startError, run,
+    t, mode, setMode, source, setSource, isRunning, modelOptions, effectiveModel, setModel, providers, setRoute, providerId, setProviderId, providerIncomplete, providerKeyMissing, cloudModelOptions, effectiveCloudModel, setCloudModel, genLength, setGenLength, batchSizes, toggleBatchSize, customBatch, setCustomBatch, customBatchError, setCustomBatchError, addCustomBatch, chipContexts, isPresetCtx, contexts, toggleContext, customCtx, setCustomCtx, customCtxError, setCustomCtxError, addCustomContext, overWindow, serverWindow, cacheModes, toggleCacheMode, evalSuitesQuery, suite, setSuite, sampleSize, setSampleSize, evalConcurrency, setEvalConcurrency, selectedSuiteInfo, startRun, startError, run,
   } = cfg;
   return (
     <>
@@ -97,7 +97,7 @@ export function BenchmarkConfigPanel({ cfg }: { cfg: BenchmarkConfig }) {
                         variant="ghost"
                         size="sm"
                         className="h-6 px-2 text-[11px]"
-                        onClick={() => setRoute({ path: "settings", tab: "network" })}
+                        onClick={() => setRoute({ path: "settings", tab: "cloud" })}
                       >
                         {t("benchmark.cloud.goSettings")}
                       </Button>
@@ -158,35 +158,74 @@ export function BenchmarkConfigPanel({ cfg }: { cfg: BenchmarkConfig }) {
   
             {mode === "speed" ? (
               <>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <Label htmlFor="benchGen" className="mb-1 block text-xs">
-                      {t("benchmark.genLength")}
-                    </Label>
-                    <Input
-                      id="benchGen"
-                      type="text"
-                      inputMode="numeric"
-                      value={String(genLength)}
-                      disabled={isRunning}
-                      onChange={(e) => setGenLength(Math.max(parseInt(e.target.value || "0", 10) || 16, 16))}
-                      className="h-8 text-xs"
-                    />
+                <div>
+                  <Label htmlFor="benchGen" className="mb-1 block text-xs">
+                    {t("benchmark.genLength")}
+                  </Label>
+                  <Input
+                    id="benchGen"
+                    type="text"
+                    inputMode="numeric"
+                    value={String(genLength)}
+                    disabled={isRunning}
+                    onChange={(e) => setGenLength(Math.max(parseInt(e.target.value || "0", 10) || 16, 16))}
+                    className="h-8 text-xs"
+                  />
+                </div>
+
+                {/* 并发和档位一样是一档要扫的维度：可以一次填多个，扫描矩阵按 档位 × 并发 × 缓存 展开 */}
+                <div>
+                  <Label className="mb-1.5 block text-xs">{t("benchmark.concurrency")}</Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {batchSizes.map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        disabled={isRunning}
+                        onClick={() => toggleBatchSize(n)}
+                        className="rounded-full border border-primary bg-primary/10 px-2.5 py-1 text-xs text-primary transition-colors"
+                      >
+                        ×{n}
+                      </button>
+                    ))}
                   </div>
-                  <div>
-                    <Label htmlFor="benchBatch" className="mb-1 block text-xs">
-                      {t("benchmark.concurrency")}
-                    </Label>
+                  <div className="mt-2 flex items-center gap-1.5">
                     <Input
                       id="benchBatch"
                       type="text"
                       inputMode="numeric"
-                      value={String(batchSize)}
+                      placeholder={t("benchmark.batch.customPlaceholder")}
+                      value={customBatch}
                       disabled={isRunning}
-                      onChange={(e) => setBatchSize(Math.max(parseInt(e.target.value || "0", 10) || 1, 1))}
-                      className="h-8 text-xs"
+                      onChange={(e) => {
+                        setCustomBatch(e.target.value);
+                        setCustomBatchError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          addCustomBatch();
+                        }
+                      }}
+                      className="h-7 flex-1 text-xs"
                     />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      disabled={isRunning || customBatch.trim() === ""}
+                      onClick={addCustomBatch}
+                    >
+                      {t("benchmark.contexts.add")}
+                    </Button>
                   </div>
+                  {customBatchError ? (
+                    <p className="mt-1 text-[11px] leading-relaxed text-destructive">{customBatchError}</p>
+                  ) : (
+                    <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
+                      {t("benchmark.batch.hint", { max: String(BENCHMARK_MAX_BATCH) })}
+                    </p>
+                  )}
                 </div>
   
                 <div>
@@ -282,7 +321,9 @@ export function BenchmarkConfigPanel({ cfg }: { cfg: BenchmarkConfig }) {
                     ))}
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-                    {t("benchmark.cache.hint", { count: String(contexts.length * cacheModes.length) })}
+                    {t("benchmark.cache.hint", {
+                      count: String(contexts.length * batchSizes.length * cacheModes.length),
+                    })}
                   </p>
                 </div>
               </>
@@ -409,6 +450,8 @@ export function BenchmarkConfigPanel({ cfg }: { cfg: BenchmarkConfig }) {
                           : "benchmark.progress.measure",
                         {
                           ctx: `${fmtCtx(run.progress.currentContext ?? 0)}${
+                            run.progress.currentBatch ? ` · ×${run.progress.currentBatch}` : ""
+                          }${
                             run.progress.currentCache ? ` · ${t(`benchmark.cache.${run.progress.currentCache}`)}` : ""
                           }`,
                         },

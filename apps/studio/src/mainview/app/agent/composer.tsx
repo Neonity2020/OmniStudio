@@ -305,6 +305,21 @@ export function AgentComposer({
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   };
 
+  /**
+   * 待填草稿（与聊天页同一份机制）：目前只有「回到这条提问」用到 ——
+   * 回退会把那条用户消息从历史里删掉，正文得还给用户，否则他得重新打一遍。
+   */
+  const pendingPrompt = useChatStore((s) => s.pendingPrompt);
+  useEffect(() => {
+    if (!pendingPrompt) return;
+    setInput(pendingPrompt);
+    useChatStore.getState().setPendingPrompt(null);
+    requestAnimationFrame(() => {
+      autoResize();
+      textareaRef.current?.focus();
+    });
+  }, [pendingPrompt]);
+
   const busy = running || streaming;
   const canSend =
     (input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0) && !busy;

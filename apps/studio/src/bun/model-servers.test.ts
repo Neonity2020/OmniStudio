@@ -47,6 +47,13 @@ class FakeRuntime {
   start = async () => {
     this.status = "starting";
     this.emitStatus();
+    const failure = FAILING.get(this.overrides.model ?? "");
+    if (failure) {
+      this.lastError = failure;
+      this.status = "error";
+      this.emitStatus();
+      return { ok: false, error: failure };
+    }
     this.status = "running";
     this.emitStatus();
     return { ok: true };
@@ -62,7 +69,8 @@ class FakeRuntime {
   getStatus = () => this.status;
   getPid = () => (this.status === "stopped" ? undefined : this.pid);
   getLogs = () => this.logs;
-  getLastError = () => "";
+  getLastError = () => this.lastError;
+  lastError = "";
   clearLogs = () => {
     this.logs = "";
   };
@@ -107,6 +115,15 @@ await mockModulePartial<typeof import("./model-store")>("./model-store", {
   slugModelFileName: (name) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
 });
 
+/** 这些目标一启动就失败，值是错误原文。 */
+const FAILING = new Map<string, string>();
+
+/** 下载队列桩：`pendingDownloadFor` 只看 fileName 与 status。 */
+const DOWNLOADS: { fileName: string; status: string; received: number; total: number | null; percent: number | null }[] = [];
+await mockModulePartial<typeof import("./download-manager")>("./download-manager", {
+  downloadManager: { list: () => DOWNLOADS } as never,
+});
+
 const Registry = await import("./model-servers");
 
 const tmpDir = mkdtempSync(join(tmpdir(), "model-servers-test-"));
@@ -131,6 +148,8 @@ beforeEach(async () => {
   SETTINGS.VLLM_PORT = "18401";
   PORT_OVERRIDE = null;
   created = [];
+  FAILING.clear();
+  DOWNLOADS.length = 0;
   await Registry.stopAllServed();
 });
 
@@ -308,5 +327,112 @@ describe("servedIdForTarget", () => {
     expect(Registry.servedIdForTarget(modelA)).toBe(`llama.cpp:${modelA}`);
     expect(Registry.servedIdForTarget(safetensorsDir)).toBe(`vllm:${safetensorsDir}`);
     expect(Registry.servedIdForTarget("")).toBeNull();
+  });
+});
+
+describe("空闲卸载（PERF-01）", () => {
+  /** 把虚拟的「现在」推到某个偏移之后：markServedActivity 盖的是真实时间，所以差值就是空闲时长。 */
+  const at = (minutes: number) => Date.now() + minutes * 60_000 + 1_000;
+
+  test("默认关闭（0 = 不卸载）", async () => {
+    await Registry.startServedModel({ model: modelA });
+    expect(await Registry.unloadIdleServers(at(600))).toEqual([]);
+    expect(Registry.listServedModels().length).toBe(1);
+  });
+
+  test("超过窗口没人用就卸载，并把端口让出来", async () => {
+    SETTINGS.SERVER_IDLE_UNLOAD_MINUTES = "10";
+    const { model } = await Registry.startServedModel({ model: modelA });
+
+    // 还没到窗口：不动
+    expect(await Registry.unloadIdleServers(at(9))).toEqual([]);
+    expect(Registry.listServedModels().length).toBe(1);
+
+    expect(await Registry.unloadIdleServers(at(11))).toEqual([model!.id]);
+    expect(Registry.listServedModels()).toEqual([]);
+    expect(PORT_OVERRIDE).toBeNull();
+  });
+
+  test("活动点会把空闲时钟推到现在", async () => {
+    SETTINGS.SERVER_IDLE_UNLOAD_MINUTES = "10";
+    await Registry.startServedModel({ model: modelA });
+
+    Registry.markServedActivity("a");
+    expect(await Registry.unloadIdleServers(at(5))).toEqual([]);
+    expect(await Registry.unloadIdleServers(at(11))).toEqual([
+      Registry.servedIdForTarget(modelA)!,
+    ]);
+  });
+
+  test("引擎还在输出就不卸载（外部客户端的长请求只有这个信号）", async () => {
+    SETTINGS.SERVER_IDLE_UNLOAD_MINUTES = "10";
+    await Registry.startServedModel({ model: modelA });
+
+    // 第一次检查只记基线：此时还没有「变化」可言，实例照常按窗口卸载
+    expect(await Registry.unloadIdleServers(at(1))).toEqual([]);
+
+    // 之后输出变了 → 这一轮判定为「还在干活」，空闲时钟被推到现在
+    created[0]!.emitLog("slot launched\n");
+    expect(await Registry.unloadIdleServers(at(11))).toEqual([]);
+    // 11 → 20 分钟之间又安静了 9 分钟，仍在窗口内
+    expect(await Registry.unloadIdleServers(at(20))).toEqual([]);
+    expect(Registry.listServedModels().length).toBe(1);
+    // 再安静超过一个窗口才卸载
+    expect(await Registry.unloadIdleServers(at(22))).toEqual([
+      Registry.servedIdForTarget(modelA)!,
+    ]);
+  });
+
+  test("已经停掉的实例不在候选里（不会重复卸载 / 报错）", async () => {
+    SETTINGS.SERVER_IDLE_UNLOAD_MINUTES = "10";
+    const { model } = await Registry.startServedModel({ model: modelA });
+    await Registry.stopServedModel(model!.id);
+    expect(await Registry.unloadIdleServers(at(30))).toEqual([]);
+  });
+});
+
+describe("启动失败的类型（LIE-05）", () => {
+  test("原文认得出来就按原文分类", async () => {
+    FAILING.set(modelA, "Error: unknown model architecture: 'spark2_5'");
+    const res = await Registry.startServedModel({ model: modelA });
+    expect(res.ok).toBe(false);
+    expect(res.model?.errorKind).toBe("model-format");
+  });
+
+  test("认不出来的原文归 unknown，不硬猜", async () => {
+    FAILING.set(modelA, "Process exited with code 1");
+    const res = await Registry.startServedModel({ model: modelA });
+    expect(res.model?.errorKind).toBe("unknown");
+  });
+
+  test("权重还在下载中：不看原文，直接说清楚（llama.cpp 的原文分不出这一种）", async () => {
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    DOWNLOADS.push({
+      fileName: "a.gguf",
+      status: "downloading",
+      received: 3,
+      total: 100,
+      percent: 3,
+    });
+
+    const res = await Registry.startServedModel({ model: modelA });
+    expect(res.model?.errorKind).toBe("download-incomplete");
+    // 原文照旧留着（排查要看），但前面加一句人能直接照做的
+    expect(res.model?.error).toContain("还在下载中");
+    expect(res.model?.error).toContain("3%");
+    expect(res.model?.error).toContain("model loading error");
+  });
+
+  test("下载已经完成 / 失败的任务不算「还在下」", async () => {
+    FAILING.set(modelA, "Process exited with code 1");
+    DOWNLOADS.push({ fileName: "a.gguf", status: "completed", received: 100, total: 100, percent: 100 });
+    expect((await Registry.startServedModel({ model: modelA })).model?.errorKind).toBe("unknown");
+    await Registry.stopAllServed();
+
+    FAILING.set(modelA, "Process exited with code 1");
+    DOWNLOADS.length = 0;
+    DOWNLOADS.push({ fileName: "b.gguf", status: "downloading", received: 1, total: 100, percent: 1 });
+    // 下的是别的文件（同名才算），不能张冠李戴
+    expect((await Registry.startServedModel({ model: modelA })).model?.errorKind).toBe("unknown");
   });
 });

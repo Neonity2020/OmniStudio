@@ -45,6 +45,15 @@ export type DownloadOptions = {
 
 /** 单个文件并发连接数：8 路在 ModelScope 上会偶发 500，4 路更稳。 */
 const DEFAULT_PARTS = 4;
+/**
+ * 对同一个站的**总**并发连接上限（同时下载的文件数 × 每个文件的分片数）。
+ *
+ * 分片数此前只在「单个文件」这一层被调到 4，但下载管理器同时跑 2 个文件，
+ * 于是对 ModelScope 的实际并发是 8 —— 正好是那个会偶发 500 的档位，用户侧
+ * 表现就是「小文件一个个报 Download failed: 500」。真正的约束必须落在总量上：
+ * 由 `partsBudgetFor()` 按当前并发文件数分摊，任何时刻总连接数不超过这个值。
+ */
+const GLOBAL_CONNECTIONS = 4;
 /** 小于该大小不分片，直接单流。 */
 const PARALLEL_MIN_TOTAL = 4 * 1024 * 1024;
 /** 每片最少字节：文件越大片越多，但不超过并发上限。 */
@@ -99,6 +108,15 @@ export function concurrentFileLimit(): number {
 export function partCountFor(total: number, override?: number): number {
   const parts = override ?? envInt("OMNI_DOWNLOAD_PARTS", DEFAULT_PARTS);
   return Math.max(1, Math.min(parts, Math.ceil(total / PART_MIN_BYTES)));
+}
+
+/**
+ * 每个文件能分到几条连接：按当前同时在下的文件数分摊全局预算。
+ * 2 个文件 → 每个 2 片（合计 4）；1 个文件 → 4 片。总量恒定，不会随并发文件数放大。
+ */
+export function partsBudgetFor(concurrentFiles: number): number {
+  const budget = envInt("OMNI_DOWNLOAD_CONNECTIONS", GLOBAL_CONNECTIONS);
+  return Math.max(1, Math.floor(budget / Math.max(1, concurrentFiles)));
 }
 
 function sidecarPath(destPath: string): string {

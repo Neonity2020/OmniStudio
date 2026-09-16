@@ -22,7 +22,7 @@ import { Input } from "@ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useServerStore } from "@stores/server";
 import { useModelDownloadStore } from "@stores/model-download";
-import { MODEL_PRESETS, matchQuant, safeRepoId, type InferenceEngine } from "@/shared/modelscope";
+import { matchQuant, safeRepoId, type InferenceEngine } from "@/shared/modelscope";
 import {
   DEFAULT_CONTEXT_TOKENS,
   fitModelsForMachine,
@@ -38,8 +38,6 @@ import { MachineCard, MachineHint, engineReasonText } from "./machine-card";
 import { SetupHeader, ModeCard, LocalStartStep } from "./shared";
 
 type LocalStep = "mode" | "engine" | "model" | "start";
-
-const DEFAULT_MLX_REPO = "pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit";
 
 const ENGINE_LABEL: Record<InferenceEngine, string> = {
   "llama.cpp": "llama-server",
@@ -74,7 +72,8 @@ function recommendationLine(args: {
   if (args.modelLabel) head.push(args.modelLabel);
   const detail: string[] = [];
   if (args.variant) detail.push(args.variant);
-  if (args.totalBytes) detail.push(`约占 ${formatBytesSi(args.totalBytes, { gbDecimals: 1 })} 内存`);
+  if (args.totalBytes)
+    detail.push(`约占 ${formatBytesSi(args.totalBytes, { gbDecimals: 1 })} 内存`);
   return detail.length > 0 ? `${head.join(" + ")}（${detail.join(" · ")}）` : head.join(" + ");
 }
 
@@ -127,7 +126,7 @@ const ENGINE_CHOICES: EngineChoice[] = [
     sub: "Apple Silicon",
     desc: (env) =>
       env.platform === "darwin"
-        ? "Apple 官方 MLX 引擎（mlx-lm），在 Apple Silicon 上直接运行 MLX 模型（如 DeepSeek V4.1 Flash MLX）"
+        ? "Apple 官方 MLX 引擎（mlx-lm），在 Apple Silicon 上直接跑千问等 HF 仓库"
         : "MLX 引擎仅支持 macOS（Apple Silicon）",
     installHint: () => "pip install -U mlx-lm",
   },
@@ -173,7 +172,6 @@ export function LocalFlow({
   const [engine, setEngine] = useState<InferenceEngine>("llama.cpp");
   const [modelId, setModelId] = useState<string>(SETUP_MODELS[0]!.id);
   const [customHfModel, setCustomHfModel] = useState("");
-  const [mlxPresetRepo, setMlxPresetRepo] = useState<string>(DEFAULT_MLX_REPO);
   const [quants, setQuants] = useState<Record<string, string>>(
     Object.fromEntries(SETUP_MODELS.map((m) => [m.id, m.defaultQuant])),
   );
@@ -219,13 +217,10 @@ export function LocalFlow({
   }, [hardware, engineRec]);
 
   // 首屏那一句「推荐什么」：引擎 + 模型档位 + 估算占用。
+  // 三个引擎的口径都齐了（MLX 与 vLLM 一样按 bf16 safetensors 估算），不再有"MLX 只能
+  // 报一个写死的模型名"那条特例 —— 那句写死的话正是"32GB 机器上也被推 DeepSeek"的来源。
   const firstRunRecommendation = useMemo(() => {
     if (!engineRec) return undefined;
-    if (engineRec.engine === "mlx") {
-      // MLX 的模型由 mlx-lm 首次启动时下载，权重体积不在引导页的数据里。
-      const preset = MODEL_PRESETS.find((p) => p.engine === "mlx" && p.repo === DEFAULT_MLX_REPO);
-      return recommendationLine({ engine: "mlx", modelLabel: preset?.label ?? "MLX 模型" });
-    }
     const model = SETUP_MODELS.find((m) => m.id === recommendedModel?.id);
     return recommendationLine({
       engine: engineRec.engine,
@@ -310,7 +305,9 @@ export function LocalFlow({
         if (cancelled) return;
         const picked =
           engine === "llama.cpp"
-            ? files.filter((f) => f.kind === "gguf" && f.isWeight && matchQuant(f.name, activeQuant))
+            ? files.filter(
+                (f) => f.kind === "gguf" && f.isWeight && matchQuant(f.name, activeQuant),
+              )
             : files.filter((f) => !/\.(md|png|jpe?g|webp|gitignore|txt)$/i.test(f.name));
         setPlan({
           repo,
@@ -366,9 +363,11 @@ export function LocalFlow({
   };
 
   const handleStartLocal = async () => {
-    // MLX：无需文件下载，写入部署模型 repo 后由 mlx-lm 自动拉取。
+    // MLX：无需文件下载，写入部署模型 repo 后由 mlx-lm 自动拉取（走 HF 缓存 / 镜像）。
+    // 仓库就是模型表里那条 HF safetensors —— 与 vLLM / SGLang 同一份数据。
     if (engine === "mlx") {
-      const repo = isCustom ? customHfModel.trim() : mlxPresetRepo;
+      const mlxModel = SETUP_MODELS.find((m) => m.id === modelId);
+      const repo = isCustom ? customHfModel.trim() : (mlxModel?.hfRepo ?? SETUP_MODELS[0]!.hfRepo);
       await rpcClient.updateSettings({
         settings: {
           SERVER_MODE: "local",
@@ -420,9 +419,7 @@ export function LocalFlow({
   const planTotals = planTasks.reduce((s, t) => s + (t.total ?? 0), 0);
   const planReceived = planTasks.reduce((s, t) => s + (t.received ?? 0), 0);
   const planPercent = planTotals > 0 ? Math.floor((planReceived / planTotals) * 100) : null;
-  const planBusy = planTasks.some((t) =>
-    ["queued", "downloading", "paused"].includes(t.status),
-  );
+  const planBusy = planTasks.some((t) => ["queued", "downloading", "paused"].includes(t.status));
   const planFailed = planTasks.some((t) => t.status === "failed");
   const planSize = plan ? plan.files.reduce((s, f) => s + f.size, 0) : 0;
 
@@ -448,12 +445,8 @@ export function LocalFlow({
           "根据你的机器环境推荐，默认 llama.cpp；以后随时可在设置中切换。",
         )}
       {step === "model" &&
-        header(
-          "Choose a model",
-          "安装一个 Qwen 对话模型即可开始使用；选择后会自动下载部署。",
-        )}
-      {step === "start" &&
-        header("Start server", `正在准备启动 ${ENGINE_LABEL[engine]}。`)}
+        header("Choose a model", "安装一个 Qwen 对话模型即可开始使用；选择后会自动下载部署。")}
+      {step === "start" && header("Start server", `正在准备启动 ${ENGINE_LABEL[engine]}。`)}
 
       {step === "mode" && (
         <div className="flex flex-col gap-4">
@@ -509,89 +502,93 @@ export function LocalFlow({
           ) : (
             <>
               <div className="flex flex-col gap-3">
-                {ENGINE_CHOICES.filter((c) => c.id !== "mlx" || env.platform === "darwin").map((choice) => {
-                  const selected = engine === choice.id;
-                  const isReady = engineReady(choice.id, env);
-                  // 「推荐」跟着本机硬件走（Apple 芯片 / 大显存 NVIDIA / 装了 mlx-lm），不再是写死的 llama.cpp。
-                  // 探测不到硬件（旧主进程 / 探测失败）时退回老口径：llama.cpp 仍然是兼容性最好的默认。
-                  const isRecommended = engineRec
-                    ? engineRec.engine === choice.id
-                    : choice.id === "llama.cpp";
-                  const pickEngine = () => {
-                    setEngine(choice.id);
-                    setEngineTouched(true);
-                  };
-                  return (
-                    <div
-                      key={choice.id}
-                      // 测试与排障用：一行引擎卡片对应一个引擎 id（断言"这一行有没有按钮"）
-                      data-engine={choice.id}
-                      data-engine-ready={isReady ? "1" : "0"}
-                      role="button"
-                      tabIndex={0}
-                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
-                        selected
-                          ? "border-primary bg-primary/5"
-                          : "border-border hover:border-muted-foreground/40"
-                      }`}
-                      onClick={pickEngine}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") pickEngine();
-                      }}
-                    >
+                {ENGINE_CHOICES.filter((c) => c.id !== "mlx" || env.platform === "darwin").map(
+                  (choice) => {
+                    const selected = engine === choice.id;
+                    const isReady = engineReady(choice.id, env);
+                    // 「推荐」跟着本机硬件走（Apple 芯片 / 大显存 NVIDIA / 装了 mlx-lm），不再是写死的 llama.cpp。
+                    // 探测不到硬件（旧主进程 / 探测失败）时退回老口径：llama.cpp 仍然是兼容性最好的默认。
+                    const isRecommended = engineRec
+                      ? engineRec.engine === choice.id
+                      : choice.id === "llama.cpp";
+                    const pickEngine = () => {
+                      setEngine(choice.id);
+                      setEngineTouched(true);
+                    };
+                    return (
                       <div
-                        className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md ${
-                          selected ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
+                        key={choice.id}
+                        // 测试与排障用：一行引擎卡片对应一个引擎 id（断言"这一行有没有按钮"）
+                        data-engine={choice.id}
+                        data-engine-ready={isReady ? "1" : "0"}
+                        role="button"
+                        tabIndex={0}
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
+                          selected
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-muted-foreground/40"
                         }`}
+                        onClick={pickEngine}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") pickEngine();
+                        }}
                       >
-                        {choice.id === "llama.cpp" ? (
-                          <TerminalSquareIcon className="size-4" />
-                        ) : (
-                          <CpuIcon className="size-4" />
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{choice.label}</span>
-                          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                            {choice.sub}
-                          </span>
-                          {isRecommended && (
-                            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                              推荐
-                            </span>
+                        <div
+                          className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md ${
+                            selected
+                              ? "bg-primary/10 text-primary"
+                              : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          {choice.id === "llama.cpp" ? (
+                            <TerminalSquareIcon className="size-4" />
+                          ) : (
+                            <CpuIcon className="size-4" />
                           )}
                         </div>
-                        <p className="mt-0.5 text-xs text-muted-foreground">
-                          {choice.desc(env)}
-                        </p>
-                        {isRecommended && engineRec && (
-                          <p className="mt-1 text-[11px] text-primary/80">
-                            {engineReasonText(engineRec, env.hardware)}
-                          </p>
-                        )}
-                        {!isReady && <p className="mt-1 text-[11px] text-muted-foreground/70">未就绪</p>}
-                        {/* 没装好就地装：不用让用户去终端里复制命令（探测到的引擎状态由
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium">{choice.label}</span>
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                              {choice.sub}
+                            </span>
+                            {isRecommended && (
+                              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                                推荐
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 text-xs text-muted-foreground">{choice.desc(env)}</p>
+                          {isRecommended && engineRec && (
+                            <p className="mt-1 text-[11px] text-primary/80">
+                              {engineReasonText(engineRec, env.hardware)}
+                            </p>
+                          )}
+                          {!isReady && (
+                            <p className="mt-1 text-[11px] text-muted-foreground/70">未就绪</p>
+                          )}
+                          {/* 没装好就地装：不用让用户去终端里复制命令（探测到的引擎状态由
                             setup-env 查询刷新，装完这一行自己会变成 ✓）。手动命令留在按钮旁边。 */}
-                        {!isReady && (
-                          <EngineInstaller
-                            engine={choice.id}
-                            support={env.installSupport[choice.id]}
-                            manualHint={choice.installHint(env)}
-                            managedInstalling={env.installing === choice.id}
-                            onInstalled={() => envQuery.refetch()}
-                          />
+                          {!isReady && (
+                            <EngineInstaller
+                              engine={choice.id}
+                              support={env.installSupport[choice.id]}
+                              manualHint={choice.installHint(env)}
+                              managedInstalling={env.installing === choice.id}
+                              onInstalled={() => envQuery.refetch()}
+                            />
+                          )}
+                          {isReady && <InstalledBadge version={env.installedVersions[choice.id]} />}
+                        </div>
+                        {isReady ? (
+                          <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />
+                        ) : (
+                          <XCircleIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />
                         )}
-                        {isReady && <InstalledBadge version={env.installedVersions[choice.id]} />}
                       </div>
-                      {isReady ? (
-                        <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />
-                      ) : (
-                        <XCircleIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  },
+                )}
               </div>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={() => setStep("mode")}>
@@ -611,53 +608,11 @@ export function LocalFlow({
 
       {step === "model" && (
         <div className="flex flex-col gap-3">
-          {hardware && engine !== "mlx" && <MachineHint hardware={hardware} />}
-          {engine === "mlx"
-            ? MODEL_PRESETS.filter((p) => p.engine === "mlx" && p.app === "chat").map((p) => {
-                const mlxSelected = mlxPresetRepo === p.repo;
-                // MLX 预设没有体积信息（模型由 mlx-lm 首次启动时下载），做不了内存估算，
-                // 所以标的是应用默认的那一个 —— 与首屏那句推荐指向同一个仓库。
-                const mlxRecommended = p.repo === DEFAULT_MLX_REPO;
-                return (
-                  <div
-                    key={p.repo}
-                    role="button"
-                    tabIndex={0}
-                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
-                      mlxSelected
-                        ? "border-primary bg-primary/5"
-                        : "border-border hover:border-muted-foreground/40"
-                    }`}
-                    onClick={() => setMlxPresetRepo(p.repo)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") setMlxPresetRepo(p.repo);
-                    }}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{p.label}</span>
-                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                          MLX
-                        </span>
-                        {mlxRecommended && (
-                          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                            推荐
-                          </span>
-                        )}
-                      </div>
-                      <p className="mt-0.5 text-xs text-muted-foreground">{p.description}</p>
-                      <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">{p.repo}</p>
-                    </div>
-                    {mlxSelected && <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />}
-                  </div>
-                );
-              })
-            : SETUP_MODELS.map((model) => {
+          {hardware && <MachineHint hardware={hardware} />}
+          {SETUP_MODELS.map((model) => {
             const selected = modelId === model.id;
             const repo =
-              engine === "llama.cpp"
-                ? `${model.ggufRepo}:${quants[model.id]}`
-                : model.hfRepo;
+              engine === "llama.cpp" ? `${model.ggufRepo}:${quants[model.id]}` : model.hfRepo;
             const sizeBytes =
               engine === "llama.cpp"
                 ? model.quants.find((q) => q.name === quants[model.id])?.size
@@ -710,10 +665,10 @@ export function LocalFlow({
                   </p>
                   {variantFit && (
                     <p className="mt-0.5 text-[11px] text-muted-foreground/70">
-                      估算占用 {formatBytesSi(variantFit.estimate.totalBytes, { gbDecimals: 1 })}（权重{" "}
-                      {formatBytesSi(variantFit.estimate.weightsBytes, { gbDecimals: 1 })} + KV 缓存{" "}
-                      {formatBytesSi(variantFit.estimate.kvCacheBytes, { gbDecimals: 1 })}，按{" "}
-                      {DEFAULT_CONTEXT_TOKENS / 1024}K 上下文）
+                      估算占用 {formatBytesSi(variantFit.estimate.totalBytes, { gbDecimals: 1 })}
+                      （权重 {formatBytesSi(variantFit.estimate.weightsBytes, { gbDecimals: 1 })} +
+                      KV 缓存 {formatBytesSi(variantFit.estimate.kvCacheBytes, { gbDecimals: 1 })}
+                      ，按 {DEFAULT_CONTEXT_TOKENS / 1024}K 上下文）
                     </p>
                   )}
                 </div>
@@ -773,15 +728,13 @@ export function LocalFlow({
               {engine === "llama.cpp"
                 ? "Enter a HuggingFace GGUF model, e.g. user/Model-GGUF:Q4_K_M"
                 : engine === "mlx"
-                  ? "Enter a HuggingFace MLX model repo, e.g. pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit"
+                  ? "Enter a HuggingFace repo loadable by mlx-lm, e.g. Qwen/Qwen3.5-9B"
                   : "Enter a HuggingFace safetensors model, e.g. Qwen/Qwen3.5-4B"}
             </span>
           </button>
           {isCustom && (
             <Input
-              placeholder={
-                engine === "llama.cpp" ? "user/Model-GGUF:Q4_K_M" : "Qwen/Qwen3.5-4B"
-              }
+              placeholder={engine === "llama.cpp" ? "user/Model-GGUF:Q4_K_M" : "Qwen/Qwen3.5-4B"}
               value={customHfModel}
               onChange={(e) => setCustomHfModel(e.target.value)}
               className="h-8 text-sm"
@@ -825,9 +778,7 @@ export function LocalFlow({
                 <div className="flex items-start gap-3 rounded-lg border px-4 py-3">
                   <AlertTriangleIcon className="mt-0.5 size-5 shrink-0 text-amber-500" />
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium">
-                      {ENGINE_LABEL[engine]} 未就绪
-                    </p>
+                    <p className="text-sm font-medium">{ENGINE_LABEL[engine]} 未就绪</p>
                     {/* 引导的最后一跳也不该把人推回终端：这里同样给一键安装（手动命令在按钮旁边）。 */}
                     <EngineInstaller
                       engine={engine}
@@ -883,11 +834,7 @@ export function LocalFlow({
                   <ArrowLeftIcon data-icon="inline-start" />
                   Back
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPlanNonce((n) => n + 1)}
-                >
+                <Button variant="outline" size="sm" onClick={() => setPlanNonce((n) => n + 1)}>
                   <RefreshCwIcon data-icon="inline-start" />
                   重试
                 </Button>
@@ -925,14 +872,10 @@ export function LocalFlow({
               ) : planBusy || planPercent != null ? (
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>
-                      {planFailed
-                        ? "下载失败"
-                        : planBusy
-                          ? "下载中…"
-                          : "等待下载…"}
+                    <span>{planFailed ? "下载失败" : planBusy ? "下载中…" : "等待下载…"}</span>
+                    <span className="tabular-nums">
+                      {planPercent != null ? `${planPercent}%` : ""}
                     </span>
-                    <span className="tabular-nums">{planPercent != null ? `${planPercent}%` : ""}</span>
                   </div>
                   <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
                     <div

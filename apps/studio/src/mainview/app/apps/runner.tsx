@@ -65,17 +65,20 @@ function capabilityGapText(
     .join("、");
 }
 
-/** 缺哪个能力就去设置页的哪一栏（都是"模型云服务"，与 CloudModelSelect 的跳转一致）。 */
-const CAPABILITY_SETTINGS_TAB: Record<MiniAppCapability, string> = {
-  image: "network",
-  imageEdit: "network",
-  chat: "network",
-  asr: "network",
+/** 云端能力的落点：云端模型（厂商密钥与默认模型都在那儿）。 */
+const CLOUD_SETTINGS = { tab: "cloud" } as const;
+
+/** 缺哪个能力就去设置页的哪一栏（都是「云端模型」，与 CloudModelSelect 的跳转一致）。 */
+const CAPABILITY_SETTINGS_TAB: Record<MiniAppCapability, { tab: string; sub?: string }> = {
+  image: CLOUD_SETTINGS,
+  imageEdit: CLOUD_SETTINGS,
+  chat: CLOUD_SETTINGS,
+  asr: CLOUD_SETTINGS,
   // 本地抠图的权重在小应用里就能下，本来不该走到"去设置"这一步；真要走也送它去
-  // 模型云服务页（那里能配云端修图当替代路径）。类型要求每个 key 都在，别删。
-  bgRemove: "network",
+  // 模型云服务（那里能配云端修图当替代路径）。类型要求每个 key 都在，别删。
+  bgRemove: CLOUD_SETTINGS,
   // 纯本机能力（马赛克）永远就绪，不会出现在 missing 里；留着 key 只为满足类型。
-  local: "network",
+  local: CLOUD_SETTINGS,
 };
 
 export function MiniAppRunner({
@@ -174,7 +177,8 @@ export function MiniAppRunner({
           const result = await rpcClient.getMiniAppCapabilities(undefined);
           return result.capabilities;
         },
-        openSettings: (tab) => setRoute({ path: "settings", tab: tab ?? "network" }),
+        openSettings: (tab) =>
+          tab ? setRoute({ path: "settings", tab }) : setRoute({ path: "settings", ...CLOUD_SETTINGS }),
         onSaved: (info) => setSaved(info),
         // 录音只有宿主能做到（iframe 是不透明源，navigator.mediaDevices 不存在）：
         // 小应用只说 start / stop，音频在宿主采集完再交回去。
@@ -208,7 +212,10 @@ export function MiniAppRunner({
     setTimeout(() => post({ channel: MINIAPP_CHANNEL, kind: "event", event: "ready", payload }), 0);
   }, [app.id, post]);
 
-  const openSettings = () => setRoute({ path: "settings", tab: CAPABILITY_SETTINGS_TAB[missing[0]!] });
+  const openSettings = () => {
+    const target = CAPABILITY_SETTINGS_TAB[missing[0]!];
+    setRoute({ path: "settings", tab: target.tab, sub: target.sub });
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

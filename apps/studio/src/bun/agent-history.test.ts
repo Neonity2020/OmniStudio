@@ -11,6 +11,7 @@ import {
   MAX_HISTORY_TOOL_RESULT_CHARS,
   pairToolEvents,
   planRegenerate,
+  planRevertToMessage,
 } from "./agent-history";
 
 const meta = { model: "test-model", provider: "omni-studio", api: "openai-completions" };
@@ -243,5 +244,42 @@ describe("planRegenerate", () => {
 
   test("同一段历史连跑两次结果一致（纯函数，不留状态）", () => {
     expect(planRegenerate(rows, 4)).toEqual(planRegenerate(rows, 4));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 「回退到这里」的删除边界（OW-12）
+//
+// 与 planRegenerate 同一类问题：边界错一次的代价在界面上看不出来 ——
+// 用户点「保留到这里」却发现那条回答也没了，或者点「回到这条提问」却发现
+// 那条提问还留在历史里（改一改再发，库里就有两遍）。
+// ---------------------------------------------------------------------------
+describe("planRevertToMessage", () => {
+  const rows = [
+    { id: 1, role: "user" },
+    { id: 2, role: "assistant" },
+    { id: 3, role: "user" },
+    { id: 4, role: "assistant" },
+    { id: 5, role: "user" },
+  ];
+
+  test("落在助手消息上：保留这条，删它后面的（keepTarget = true）", () => {
+    expect(planRevertToMessage(rows, 2)).toEqual({ doomed: [3, 4, 5], keepTarget: true });
+    expect(planRevertToMessage(rows, 4)).toEqual({ doomed: [5], keepTarget: true });
+  });
+
+  test("落在用户消息上：连它一起删（那条提问要回填输入框重打）", () => {
+    expect(planRevertToMessage(rows, 3)).toEqual({ doomed: [3, 4, 5], keepTarget: false });
+    expect(planRevertToMessage(rows, 1)).toEqual({ doomed: [1, 2, 3, 4, 5], keepTarget: false });
+  });
+
+  test("最后一条助手消息：没有可删的（调用方据此报「没什么可回退的」）", () => {
+    const last = [...rows, { id: 6, role: "assistant" }];
+    expect(planRevertToMessage(last, 6).doomed).toEqual([]);
+  });
+
+  test("角色写的是别的值（tool / 空）时按助手处理：保守地保留目标那条", () => {
+    const odd = [{ id: 1, role: "user" }, { id: 2, role: null }, { id: 3, role: "user" }];
+    expect(planRevertToMessage(odd, 2)).toEqual({ doomed: [3], keepTarget: true });
   });
 });

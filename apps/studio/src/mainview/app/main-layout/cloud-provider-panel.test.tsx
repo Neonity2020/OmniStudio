@@ -79,23 +79,36 @@ const selectCalls: { type: string; value: string; providerId?: string }[] = [];
 /** 让单个用例能改「拉取模型列表」的返回（成功 / 失败两种路径都要能跑到）。 */
 let remoteResult: { ok: boolean; models: string[]; error?: string } = { ok: true, models: REMOTE };
 
+// 服务商列表：默认一家内置厂商（国内主流厂商装完就列在这儿，地址由应用维护）。
+// 个别用例换成"内置 + 自定义"两行，用来盯住「自定义才可改地址、可删除」。
+const BUILTIN_PROVIDER = {
+  id: "siliconflow",
+  name: "SiliconFlow",
+  vendor: "硅基流动",
+  baseUrl: "https://api.siliconflow.cn/v1",
+  apiKey: "sk-test",
+  models: HAVE_ROWS,
+  createdAt: 0,
+  updatedAt: 0,
+};
+const CUSTOM_PROVIDER = {
+  id: "custom-1700000000000",
+  name: "我的中转",
+  vendor: "自定义",
+  baseUrl: "https://relay.example/v1",
+  apiKey: "sk-relay",
+  models: [{ id: "gpt-5" }],
+  createdAt: 1,
+  updatedAt: 1,
+};
+let providerList: { providers: unknown[]; activeId: string | null } = {
+  providers: [BUILTIN_PROVIDER],
+  activeId: null,
+};
+
 mock.module("@lib/rpc", () => ({
   rpcClient: {
-    cloudProviderList: async () => ({
-      providers: [
-        {
-          id: "siliconflow",
-          name: "SiliconFlow",
-          vendor: "硅基流动",
-          baseUrl: "https://api.siliconflow.cn/v1",
-          apiKey: "sk-test",
-          models: HAVE_ROWS,
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      ],
-      activeId: null,
-    }),
+    cloudProviderList: async () => providerList,
     getSettings: async () => ({ settings: { SERVER_MODE: "remote", VLLM_MODEL_NAME: "" } }),
     listRemoteModels: async () => remoteResult,
     cloudProviderUpdate: async (params: { id: string; models?: { id: string }[] }) => {
@@ -416,4 +429,54 @@ test("逐个添加：点「+」只把那个模型加进去，已有条目不丢"
   expect(updates[0]!.models?.map((m) => m.id)).toEqual([...HAVE, "FunAudioLLM/CosyVoice2-0.5B"]);
 
   await view.unmount();
+});
+
+test("内置厂商：地址只读、不给删除按钮 —— 用户要做的只有填 Key", async () => {
+  const view = await renderPanel();
+
+  // 国内主流厂商装完就列在这儿（不用先去「添加服务商」），地址直接显示出来
+  expect(view.text).toContain("SiliconFlow");
+  expect(view.text).toContain("https://api.siliconflow.cn/v1");
+  // 地址是只读文本，不是输入框：一个可编辑的地址栏会让人以为"这里该填点什么"
+  expect(view.container.querySelector('[data-provider-base="locked"]')).not.toBeNull();
+  expect(view.container.querySelector('[data-provider-base="editable"]')).toBeNull();
+  // 详情里唯一的输入框是 API 密钥 —— 这就是"只需要配置 Key"
+  const passwordInputs = [...view.container.querySelectorAll("input")].filter(
+    (i) => i.type === "password",
+  );
+  expect(passwordInputs).toHaveLength(1);
+  // 「获取密钥」直达控制台；内置厂商不给删除（删了下次读取还会原样入驻）
+  expect(view.text).toContain(zh("cloud.getKey"));
+  expect(view.container.querySelector("[data-provider-delete]")).toBeNull();
+
+  await view.unmount();
+});
+
+test("自定义服务商：单开一栏、地址可改、可删除", async () => {
+  providerList = { providers: [BUILTIN_PROVIDER, CUSTOM_PROVIDER], activeId: null };
+  try {
+    const view = await renderPanel();
+
+    // 左栏分栏：内置厂商按目录分栏，自定义单独一栏
+    expect(view.text).toContain(zh("cloud.section.aggregator"));
+    expect(view.text).toContain(zh("cloud.section.custom"));
+
+    // 切到自定义那一行
+    const row = [...view.container.querySelectorAll<HTMLElement>('[role="button"]')].find((el) =>
+      el.textContent?.includes("我的中转"),
+    );
+    expect(row).toBeDefined();
+    await act(async () => {
+      row!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // 自定义地址可改、可删（内置那两条规矩不该顺手锁死自建网关 / 中转）
+    expect(view.container.querySelector('[data-provider-base="editable"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-provider-delete="custom-1700000000000"]')).not.toBeNull();
+
+    await view.unmount();
+  } finally {
+    providerList = { providers: [BUILTIN_PROVIDER], activeId: null };
+  }
 });

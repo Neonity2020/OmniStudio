@@ -68,7 +68,7 @@
 ### 模型服务
 
 - **首次引导** — 内置 Qwen3.5 4B / 9B / 35B-A3B 与 Qwen3.6 27B 一键模型，选中后自动下载并部署，选完即用；也支持手动输入 HuggingFace GGUF 自定义模型。
-- **云端模型服务** — 内置 20 家主流 OpenAI 兼容厂商预设（OmniLabs、DeepSeek、通义千问、智谱 GLM、Kimi、豆包、文心一言、腾讯混元、MiniMax、讯飞星火、零一万物、阶跃星辰、硅基流动、OpenRouter、OpenAI、Anthropic、Gemini 等）；配置以「厂商列表 / 配置详情 / 模型」三栏呈现，多厂商并存、单一点击激活，激活厂商自动写回网关与 `omi` CLI 读取的槽位；支持连通检测与在线拉取模型列表，「默认模型」页集中指定各用途的默认模型。
+- **云端模型服务** — 内置 20 家主流 OpenAI 兼容厂商预设（OmniLabs、DeepSeek、通义千问、智谱 GLM、Kimi、豆包、文心一言、腾讯混元、MiniMax、讯飞星火、零一万物、阶跃星辰、硅基流动、OpenRouter、OpenAI、Anthropic、Gemini 等）；配置以「厂商列表 / 配置详情 / 模型」三栏呈现，多厂商并存、单一点击激活，激活厂商自动写回网关与 `omi` CLI 读取的槽位；支持连通检测与在线拉取模型列表；「设置 → 云端模型」里集中指定各用途的默认模型。
 - **三引擎统一运行时** — llama.cpp（默认：GGUF 本地文件或 HuggingFace，GPU 卸载、KV 缓存量化、多模态 mmproj）、vLLM、SGLang 统一抽象、热切换；也可直连任意 OpenAI 兼容端点（远程模式）。
 - **统一网关** — 本地单一端点按模型名路由到本地推理服务或云端 API，同时提供 Chat Completions / Responses / Anthropic Messages 三套协议（含双向工具调用）；可选 API Key 鉴权，内置交互式 OpenAPI 文档，端点 `/v1`、`/health`、`/metrics` 设置页一键复制；另提供 `/mcp` 与 `/v1/memories` 对外暴露知识库与共享记忆。
 

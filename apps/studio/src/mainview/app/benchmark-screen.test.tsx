@@ -65,7 +65,7 @@ const startCalls: {
   contexts?: number[];
   cacheModes?: string[];
   genLength?: number;
-  batchSize?: number;
+  batchSizes?: number[];
 }[] = [];
 
 /** 导出的报告（断言"点一下真的把整份报告交出去了"）。 */
@@ -189,7 +189,7 @@ mock.module("@lib/rpc", () => ({
     getBenchmarkRecord: async () => ({ record: mockRecord() }),
     getEvalSuites: async () => ({ suites: [] }),
     startBenchmark: async (params: unknown) => {
-      startCalls.push(params as { contexts?: number[]; cacheModes?: string[]; genLength?: number; batchSize?: number });
+      startCalls.push(params as { contexts?: number[]; cacheModes?: string[]; genLength?: number; batchSizes?: number[] });
       return { runId: "run-test" };
     },
     getBenchmarkRun: async () => ({ run: null }),
@@ -300,6 +300,8 @@ async function renderScreen() {
     selectedChips: () => chipLabels((l) => /^[\d.]+[kM]?$/.test(l), true),
     cacheChips: () => chipLabels((l) => CACHE_LABELS.includes(l)),
     selectedCacheChips: () => chipLabels((l) => CACHE_LABELS.includes(l), true),
+    /** 并发档 chip 也走圆角样式，用 ×N 的形状与档位 / 缓存区分开。 */
+    batchChips: () => chipLabels((l) => /^×\d+$/.test(l)),
     clickChip: async (label: string) => {
       const chip = [...container.querySelectorAll("button.rounded-full")].find(
         (b) => b.textContent?.trim() === label,
@@ -320,6 +322,34 @@ async function renderScreen() {
       await act(async () => {
         setter?.call(input, text);
         input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+    },
+    /** 往并发档输入框里填值（与自定义档位同一个套路）。 */
+    fillBatch: async (text: string) => {
+      const input = container.querySelector("#benchBatch") as HTMLInputElement | null;
+      if (!input) throw new Error("找不到并发档输入框");
+      const setter = Object.getOwnPropertyDescriptor(dom.HTMLInputElement.prototype, "value")?.set;
+      await act(async () => {
+        setter?.call(input, text);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+    },
+    /**
+     * 找某个输入框旁边那个「添加」按钮。
+     * 档位与并发各有一个同名按钮，只能按容器定位 —— `clickByText` 拿到的会是第一个。
+     */
+    clickAddFor: async (inputId: string) => {
+      const input = container.querySelector(inputId);
+      const button = input?.parentElement?.querySelector("button");
+      if (!button) throw new Error(`找不到 ${inputId} 旁边的添加按钮`);
+      await act(async () => {
+        button.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
       });
       await act(async () => {
         await Promise.resolve();
@@ -418,21 +448,62 @@ test("自定义档位：200k 能加进来并被选中，超过 1M 只给提示�
   const screen = await renderScreen();
   try {
     await screen.fillCustom("200k");
-    await screen.clickByText("添加");
+    await screen.clickAddFor("#benchCtxCustom");
     // k 按二进制算：200k = 204800 tokens
     expect(screen.chips()).toContain("200k");
     expect(screen.selectedChips()).toContain("200k");
 
     // 超出上限（1M）不静默夹紧：提示范围，不把用户填的 2m 悄悄改成 1M
     await screen.fillCustom("2m");
-    await screen.clickByText("添加");
+    await screen.clickAddFor("#benchCtxCustom");
     expect(screen.chips()).not.toContain("2M");
     expect(screen.text()).toContain("档位范围");
 
     // 认不出来的输入同样只提示
     await screen.fillCustom("abc");
-    await screen.clickByText("添加");
+    await screen.clickAddFor("#benchCtxCustom");
     expect(screen.text()).toContain("可带 k / m 后缀");
+  } finally {
+    await screen.cleanup();
+  }
+});
+
+test("并发档位：默认只扫 ×1，可以一次填多个（1,2,4）并原样传下去", async () => {
+  const screen = await renderScreen();
+  try {
+    // 默认一个并发档：老行为（单并发压测）不变
+    expect(screen.batchChips()).toEqual(["×1"]);
+
+    // 支持逗号分隔一次填多个；升序去重后按 chip 展示
+    await screen.fillBatch("4, 2,1,2");
+    await screen.clickAddFor("#benchBatch");
+    expect(screen.batchChips()).toEqual(["×1", "×2", "×4"]);
+
+    startCalls.length = 0;
+    await screen.clickByText("开始测试");
+    expect(startCalls).toHaveLength(1);
+    expect(startCalls[0]!.batchSizes).toEqual([1, 2, 4]);
+
+    // 点 chip 取消一档（但至少留一档）：主进程空集会回落到 [1]，界面别显示成"一个都没勾"
+    await screen.clickChip("×4");
+    expect(screen.batchChips()).toEqual(["×1", "×2"]);
+  } finally {
+    await screen.cleanup();
+  }
+});
+
+test("并发档位超出 64 只提示不夹紧，认不出的输入同样只提示", async () => {
+  const screen = await renderScreen();
+  try {
+    await screen.fillBatch("100");
+    await screen.clickAddFor("#benchBatch");
+    expect(screen.batchChips()).toEqual(["×1"]);
+    expect(screen.text()).toContain("并发范围 1 ~ 64");
+
+    await screen.fillBatch("abc");
+    await screen.clickAddFor("#benchBatch");
+    expect(screen.batchChips()).toEqual(["×1"]);
+    expect(screen.text()).toContain("填正整数");
   } finally {
     await screen.cleanup();
   }

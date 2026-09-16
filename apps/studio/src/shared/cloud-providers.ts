@@ -46,6 +46,20 @@ export type CloudVideoApi = "" | "minimax" | "seedance";
  */
 export type CloudMusicApi = "" | "stepfun" | "minimax";
 
+/**
+ * 预设的分栏：内置厂商目录按这个分组列出来（设置页与引导页共用同一套）。
+ * 顺序即列表顺序：官方 → 国内大厂 → 聚合平台 → 海外。
+ */
+export type CloudPresetSection = "official" | "cn" | "aggregator" | "global";
+
+/** 分栏顺序（列表按此排序；不在表里的排最后）。 */
+export const CLOUD_PRESET_SECTIONS: readonly CloudPresetSection[] = [
+  "official",
+  "cn",
+  "aggregator",
+  "global",
+];
+
 /** 服务商预设元信息。 */
 export type CloudPreset = {
   id: string;
@@ -55,6 +69,8 @@ export type CloudPreset = {
   vendor: string;
   /** OpenAI 兼容接口 Base URL，已含 /v1 等路径前缀 */
   baseUrl: string;
+  /** 列表分栏（见 CLOUD_PRESET_SECTIONS）。 */
+  section: CloudPresetSection;
   /** 该服务商常见对话模型 ID（预填模型列表用） */
   models: string[];
   /**
@@ -67,6 +83,11 @@ export type CloudPreset = {
   modelTypes?: Record<string, CloudModelType>;
   /** 简短备注（免费额度 / 需要额外操作等） */
   note?: string;
+  /**
+   * 控制台里创建 / 复制 API Key 的页面（「获取密钥」按钮直达）。
+   * 没写就退化成 baseUrl 的 origin —— 那是 API 域名，通常是文档首页而不是密钥页。
+   */
+  apiKeyUrl?: string;
   /** 品牌主色（#rrggbb），列表徽章底色。 */
   color: string;
   /** 生视频接口协议（只有提供生视频能力的厂商才有）。 */
@@ -78,19 +99,12 @@ export type CloudPreset = {
 /**
  * MiniMax 生视频模型（video-gen 与预设共用，避免两处写死两份）。
  *
- * 用的是 MiniMax 公开接口里的真实模型 id：Hailuo 系（2.3 / 02）支持
- * duration 6/10 秒与 resolution 档位；T2V-01 / I2V-01 那代没有这两个参数，
- * 且 I2V-* 必须带首帧图（video-gen 里按模型名决定发不发这些字段）。
- * 以前这里写的 "MiniMax-H3" 是 OmniLabs 那边自造的名字，MiniMax 侧不认。
+ * 只有 v2 接口（`/v2/video_generation`）在售的这两个：H3 支持 768P / 2K 与 4~15 秒，
+ * H3-Max 支持 480P / 768P 与 5~15 秒，两者都吃首帧图（图生视频）。
+ * Hailuo 系（2.3 / 02）与 T2V / I2V 那代属于 v1 接口 —— 拿它们提交新模型，上游只回
+ * `2013 invalid params, 该模型请使用 /v2/video_generation 接口`，所以不再列出。
  */
-export const MINIMAX_VIDEO_MODELS = [
-  "MiniMax-Hailuo-2.3",
-  "MiniMax-Hailuo-02",
-  "T2V-01",
-  "T2V-01-Director",
-  "I2V-01",
-  "I2V-01-Director",
-];
+export const MINIMAX_VIDEO_MODELS = ["MiniMax-H3", "MiniMax-H3-Max"];
 
 /** 火山方舟 Seedance 生视频模型。 */
 export const SEEDANCE_VIDEO_MODELS = [
@@ -117,8 +131,12 @@ export const STEPFUN_MUSIC_MODELS = ["stepaudio-3-music-preview"];
 export const MINIMAX_MUSIC_MODELS = ["music-3.0", "music-2.6", "music-cover"];
 
 /**
- * 云服务商预设：国内主流原厂 + 国外三大原厂（OpenAI / Anthropic / Google）
- * + 聚合商。含聚合商：中转/聚合也是合法的云服务来源。
+ * 云服务商预设：这就是**内置厂商目录** —— 安装后整份列在「设置 → 云端模型」里，
+ * 用户只需要填 Key（地址由应用维护、界面上不可改）。
+ *
+ * 分两类来源：国内主流原厂 + 自家多模态平台，以及聚合商与国外三大原厂
+ * （中转/聚合也是合法的云服务来源）。新增一家 = 这里加一条 `section` 分明的预设，
+ * 不需要动界面与数据库。
  */
 export const CLOUD_PRESETS: readonly CloudPreset[] = [
   {
@@ -126,6 +144,7 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "OmniLabs",
     vendor: "OmniLabs 多模态平台",
     baseUrl: "https://omnilabs.vibeadmin.cn/v1",
+    section: "official",
     models: [],
     note: "统一接入 TTS / ASR / LLM / OCR，32+ 开源模型、44 个免费大模型",
     color: "#6366f1",
@@ -135,6 +154,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "DeepSeek",
     vendor: "深度求索",
     baseUrl: "https://api.deepseek.com/v1",
+    section: "cn",
+    apiKeyUrl: "https://platform.deepseek.com/api_keys",
     models: ["deepseek-chat", "deepseek-reasoner"],
     note: "deepseek-chat 指向最新版，官方 API 性价比高",
     color: "#2563eb",
@@ -144,6 +165,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "通义千问 (Qwen)",
     vendor: "阿里云百炼",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    section: "cn",
+    apiKeyUrl: "https://bailian.console.aliyun.com/?apiKey=1",
     models: ["qwen-max", "qwen-plus", "qwen-turbo", "qwen-long", "qwen-flash"],
     note: "阿里云百炼，qwen-plus/turbo 有免费额度",
     color: "#f59e0b",
@@ -153,6 +176,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "智谱 GLM",
     vendor: "智谱 AI",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    section: "cn",
+    apiKeyUrl: "https://open.bigmodel.cn/usercenter/apikeys",
     models: ["glm-4.5", "glm-4-plus", "glm-4-flash", "glm-4-air"],
     note: "注册送 tokens，GLM-4-Flash 免费",
     color: "#0ea5e9",
@@ -162,6 +187,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "Kimi",
     vendor: "月之暗面",
     baseUrl: "https://api.moonshot.cn/v1",
+    section: "cn",
+    apiKeyUrl: "https://platform.moonshot.cn/console/api-keys",
     models: ["kimi-latest", "moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"],
     color: "#111827",
   },
@@ -170,6 +197,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "豆包 (Doubao)",
     vendor: "字节跳动火山引擎",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    section: "cn",
+    apiKeyUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
     models: [
       "doubao-seed-1-6-250618",
       "doubao-1-5-pro-32k-250115",
@@ -185,6 +214,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "文心一言",
     vendor: "百度千帆",
     baseUrl: "https://qianfan.baidubce.com/v2",
+    section: "cn",
+    apiKeyUrl: "https://console.bce.baidu.com/iam/#/iam/apikey/list",
     models: ["ernie-4.5-turbo-128k", "ernie-4.5-8k", "ernie-3.5-8k", "ernie-speed-8k"],
     color: "#2932e1",
   },
@@ -193,6 +224,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "腾讯混元",
     vendor: "腾讯云",
     baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
+    section: "cn",
+    apiKeyUrl: "https://console.cloud.tencent.com/hunyuan/api-key",
     models: ["hunyuan-turbos-latest", "hunyuan-turbo-latest", "hunyuan-pro", "hunyuan-lite"],
     color: "#0052d9",
   },
@@ -201,9 +234,11 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "MiniMax",
     vendor: "MiniMax 稀宇科技",
     baseUrl: "https://api.minimax.chat/v1",
+    section: "cn",
+    apiKeyUrl: "https://platform.minimaxi.com/user-center/basic-information/interface-key",
     models: ["MiniMax-M1", "MiniMax-Text-01", ...MINIMAX_VIDEO_MODELS, ...MINIMAX_MUSIC_MODELS],
     modelTypes: Object.fromEntries(MINIMAX_MUSIC_MODELS.map((id) => [id, "music" as const])),
-    note: "对话走 OpenAI 兼容接口；生视频走 MiniMax 自己的 /v1/video_generation 与 /v1/query/video_generation（海外站把地址换成 https://api.minimax.io/v1）；生音乐走 /v1/music_generation。音乐接口对 2026-08-20 之后的新账号已停售，老账号与转售方仍可用",
+    note: "对话走 OpenAI 兼容接口；生视频走 MiniMax 自己的 /v2/video_generation 与 /v2/query/video_generation/{task_id}（海外站把地址换成 https://api.minimax.io/v1）；生音乐走 /v1/music_generation。音乐接口对 2026-08-20 之后的新账号已停售，老账号与转售方仍可用",
     color: "#e11d48",
     videoApi: "minimax",
     musicApi: "minimax",
@@ -213,6 +248,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "讯飞星火",
     vendor: "科大讯飞",
     baseUrl: "https://spark-api-open.xf-yun.com/v1",
+    section: "cn",
+    apiKeyUrl: "https://console.xfyun.cn/services/bmx1",
     models: ["4.0Ultra", "generalv3.5", "generalv3", "lite"],
     note: "需开通开放平台并启用对应服务",
     color: "#8b5cf6",
@@ -222,6 +259,7 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "商汤商量",
     vendor: "商汤科技 SenseNova",
     baseUrl: "https://api.sensenova.cn/compatible-mode/v1",
+    section: "cn",
     models: ["SenseNova-V6-5", "SenseChat-5", "SenseChat-Turbo"],
     note: "日日新平台 OpenAI 兼容接口",
     color: "#be123c",
@@ -231,6 +269,7 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "百川大模型",
     vendor: "百川智能",
     baseUrl: "https://api.baichuan-ai.com/v1",
+    section: "cn",
     models: ["Baichuan4-Turbo", "Baichuan4-Air", "Baichuan4"],
     note: "搜索增强 + 超长上下文（192k）",
     color: "#7c3aed",
@@ -240,6 +279,7 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "天工 Skywork",
     vendor: "昆仑万维",
     baseUrl: "https://api.tiangong.cn/v1",
+    section: "cn",
     models: ["Sky-Chat-3.0", "Skywork-13B"],
     note: "接口地址/模型以天工模型开放平台最新文档为准",
     color: "#0284c7",
@@ -249,6 +289,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "零一万物",
     vendor: "01.AI",
     baseUrl: "https://api.lingyiwanwu.com/v1",
+    section: "cn",
+    apiKeyUrl: "https://platform.lingyiwanwu.com/apikeys",
     models: ["yi-large", "yi-lightning"],
     color: "#10b981",
   },
@@ -257,6 +299,8 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "阶跃星辰",
     vendor: "StepFun",
     baseUrl: "https://api.stepfun.com/v1",
+    section: "cn",
+    apiKeyUrl: "https://platform.stepfun.com/interface-key",
     /**
      * 对话 + 语音两条线：StepAudio 3 的 TTS / ASR / 实时语音三件套都挂在这一个厂商行下，
      * 语音页、ASR 页、通话页各自按用途取自己的模型（`providerModelsOfType`）。
@@ -292,37 +336,12 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     musicApi: "stepfun",
   },
   {
-    id: "openai",
-    name: "OpenAI",
-    vendor: "GPT 系列",
-    baseUrl: "https://api.openai.com/v1",
-    models: ["gpt-5", "gpt-5-mini"],
-    note: "需海外网络环境与境外支付方式",
-    color: "#10a37f",
-  },
-  {
-    id: "anthropic",
-    name: "Anthropic Claude",
-    vendor: "Claude 系列",
-    baseUrl: "https://api.anthropic.com/v1",
-    models: ["claude-sonnet-4", "claude-opus-4", "claude-haiku-4"],
-    note: "官方 OpenAI SDK 兼容层（chat completions 核心功能）；需海外网络环境",
-    color: "#d97757",
-  },
-  {
-    id: "gemini",
-    name: "Google Gemini",
-    vendor: "Google AI",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    models: ["gemini-2.5-pro", "gemini-2.5-flash"],
-    note: "官方 OpenAI 兼容端点；需海外网络环境",
-    color: "#4285f4",
-  },
-  {
     id: "siliconflow",
     name: "硅基流动",
     vendor: "SiliconFlow",
     baseUrl: "https://api.siliconflow.cn/v1",
+    section: "aggregator",
+    apiKeyUrl: "https://cloud.siliconflow.cn/account/ak",
     models: ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen3-235B-A22B-Instruct", "deepseek-ai/DeepSeek-R1"],
     note: "聚合多家开源模型，很多免费/低价",
     color: "#64748b",
@@ -332,15 +351,93 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "OpenRouter",
     vendor: "第三方聚合",
     baseUrl: "https://openrouter.ai/api/v1",
+    section: "aggregator",
+    apiKeyUrl: "https://openrouter.ai/keys",
     models: ["openai/gpt-5", "anthropic/claude-sonnet-4", "google/gemini-2.5-pro"],
     note: "汇聚主流模型，需充值/绑卡",
     color: "#0f172a",
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    vendor: "GPT 系列",
+    baseUrl: "https://api.openai.com/v1",
+    section: "global",
+    apiKeyUrl: "https://platform.openai.com/api-keys",
+    models: ["gpt-5", "gpt-5-mini"],
+    note: "需海外网络环境与境外支付方式",
+    color: "#10a37f",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic Claude",
+    vendor: "Claude 系列",
+    baseUrl: "https://api.anthropic.com/v1",
+    section: "global",
+    apiKeyUrl: "https://console.anthropic.com/settings/keys",
+    models: ["claude-sonnet-4", "claude-opus-4", "claude-haiku-4"],
+    note: "官方 OpenAI SDK 兼容层（chat completions 核心功能）；需海外网络环境",
+    color: "#d97757",
+  },
+  {
+    id: "gemini",
+    name: "Google Gemini",
+    vendor: "Google AI",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    section: "global",
+    apiKeyUrl: "https://aistudio.google.com/app/apikey",
+    models: ["gemini-2.5-pro", "gemini-2.5-flash"],
+    note: "官方 OpenAI 兼容端点；需海外网络环境",
+    color: "#4285f4",
   },
 ];
 
 export function getPreset(id: string): CloudPreset | undefined {
   return CLOUD_PRESETS.find((p) => p.id === id);
 }
+
+/**
+ * 内置厂商目录里的位置（预设数组下标）：列表按它排序，让设置页的分栏顺序
+ * 与目录一致（按创建时间排的话，同一批入驻的行谁在前是随机的）。
+ */
+export function presetOrder(id: string): number {
+  const index = CLOUD_PRESETS.findIndex((p) => p.id === id);
+  return index < 0 ? Number.MAX_SAFE_INTEGER : index;
+}
+
+/** 预设的「获取密钥」入口：没有显式配置时退回 API 域名的根（至少是官网）。 */
+export function presetApiKeyUrl(preset: CloudPreset): string {
+  if (preset.apiKeyUrl) return preset.apiKeyUrl;
+  try {
+    return new URL(preset.baseUrl).origin;
+  } catch {
+    return "";
+  }
+}
+
+/** 地址比较用的归一形式（忽略大小写与结尾斜杠）。 */
+function normalizeBaseForCompare(base: string): string {
+  return base.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+/**
+ * 这行的地址是不是「内置厂商的官方地址」——是则由应用维护，界面上只读、写库被拒。
+ *
+ * **地址被改过的预设行不算**：老版本允许改地址，用户可能已经把它指向自己的中转
+ * （或官方换过域名后他先改了）。那一行的地址是他自己填的，必须继续可改 ——
+ * 否则升级后他既改不回来、也用不了「恢复官方地址」。
+ */
+export function isBuiltinBaseUrl(provider: { id: string; baseUrl: string }): boolean {
+  const preset = getPreset(provider.id);
+  if (!preset) return false;
+  return normalizeBaseForCompare(preset.baseUrl) === normalizeBaseForCompare(provider.baseUrl);
+}
+
+/** 该行是不是内置厂商（id 落在预设目录里；自定义服务商是 `custom-*`）。 */
+export function isBuiltinProvider(provider: { id: string }): boolean {
+  return getPreset(provider.id) !== undefined;
+}
+
 
 /**
  * 预设的模型清单 → 落库用的模型条目（把 `modelTypes` 里的显式用途带上）。
@@ -507,6 +604,25 @@ export function providerConfigured(provider: Pick<CloudProviderInfo, "baseUrl" |
   if (!base) return false;
   const key = provider.apiKey.trim();
   return key !== "" || isLocalBaseUrl(base);
+}
+
+/**
+ * 服务商列表顺序：激活行最前，其余按内置目录顺序（同一批入驻的行 createdAt 相同，
+ * 按时间排等于随机），自定义服务商排在最后、按创建时间。
+ */
+export function sortProviders(
+  providers: readonly CloudProviderInfo[],
+  activeId: string | null,
+): CloudProviderInfo[] {
+  return [...providers].sort((a, b) => {
+    if (a.id === activeId) return -1;
+    if (b.id === activeId) return 1;
+    const aBuiltin = isBuiltinProvider(a);
+    const bBuiltin = isBuiltinProvider(b);
+    if (aBuiltin !== bBuiltin) return aBuiltin ? -1 : 1;
+    const order = presetOrder(a.id) - presetOrder(b.id);
+    return order !== 0 ? order : a.createdAt - b.createdAt;
+  });
 }
 
 /** 自定义服务商的徽章底色：按名称散列到一组低调的品牌色。 */

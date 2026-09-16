@@ -154,6 +154,67 @@ describe("buildBenchmarkReportHtml", () => {
     expect(html).toContain("98%");
   });
 
+  test("并发矩阵：配置行写全并发档、逐并发一张表，缓存对比不跨并发", () => {
+    const matrix = speedResult({
+      params: { genLength: 128, batchSizes: [1, 4], contexts: [8192], cacheModes: ["cold", "warm"] },
+      rows: [
+        {
+          contextLength: 8192,
+          promptTokens: 8192,
+          batchSize: 1,
+          ttftMs: 800,
+          tpotMs: 12,
+          tps: 20,
+          aggTps: 20,
+          prefillTps: 10240,
+          tokens: 128,
+          totalMs: 6000,
+          ok: 1,
+          fails: 0,
+          cache: "cold",
+        },
+        {
+          contextLength: 8192,
+          promptTokens: 8192,
+          batchSize: 4,
+          ttftMs: 3200,
+          tpotMs: 40,
+          tps: 7,
+          aggTps: 26,
+          prefillTps: 10240,
+          tokens: 512,
+          totalMs: 24000,
+          ok: 4,
+          fails: 0,
+          cache: "cold",
+        },
+      ],
+      summary: {
+        avgTps: 13.5,
+        peakTps: 20,
+        avgTtftMs: 2000,
+        bestTtftMs: 800,
+        peakAggTps: 26,
+        peakPrefillTps: 10240,
+        totalTokens: 640,
+        basis: "cold",
+        byBatch: [
+          { batchSize: 1, rows: 1, avgTps: 20, peakTps: 20, peakAggTps: 20, avgTtftMs: 800, avgTpotMs: 12 },
+          { batchSize: 4, rows: 1, avgTps: 7, peakTps: 7, peakAggTps: 26, avgTtftMs: 3200, avgTpotMs: 40 },
+        ],
+      },
+    });
+    const html = buildBenchmarkReportHtml({ result: matrix, t, lang: "zh" });
+    // 配置行把并发列表写出来（不是只写一个数）
+    expect(html).toContain("128 tok × 1 / 4");
+    // 逐并发表：跨并发混算的平均值旁边必须有分组数字
+    expect(html).toContain(t("benchmark.summary.byBatch"));
+    expect(html).toContain(t("benchmark.summary.mixedBatch"));
+    expect(html).toContain("×4");
+    // 明细表每行标出自己的并发（表里已有该列）
+    expect(html).toContain(t("benchmark.col.batch"));
+  });
+
   test("评测报告换成总分 + 分科目，不出速度表", () => {
     const html = buildBenchmarkReportHtml({ result: evalResult(), t, lang: "zh" });
     expect(html).toContain("55.5%");

@@ -25,6 +25,7 @@ export type BackupScopeId =
   | "skills"
   | "memory"
   | "notes"
+  | "music-playlists"
   | "knowledge"
   | "media";
 
@@ -92,6 +93,14 @@ export const BACKUP_SCOPES: BackupScopeDef[] = [
     id: "notes",
     group: "core",
     tables: ["miniapp_notes"],
+    defaultOn: true,
+  },
+  {
+    // 歌单是用户手编的结构（哪首歌在哪个歌单、什么顺序），音频没了还能重生成，
+    // 编排没了只能重来 —— 与 notes 同理默认备份；音频本体仍归下面的 media 作用域。
+    id: "music-playlists",
+    group: "core",
+    tables: ["music_playlists", "music_playlist_items"],
     defaultOn: true,
   },
   {

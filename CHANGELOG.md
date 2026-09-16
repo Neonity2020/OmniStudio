@@ -18,12 +18,118 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **网关新增 `POST /v1/embeddings`**：外部客户端（OpenAI SDK / Continue / LangChain 等）可以经网关取嵌入，鉴权与 Origin/Host 防线与其他 `/v1/*` 完全一致；没有运行中的嵌入实例时返回 503 并给出可操作引导（「先在模型页启动嵌入类别的模型，或在知识库设置里配置嵌入服务地址」）。路由同时登记进 `endpoints` 列表与 `openApiSpec`（`/docs`、`/openapi.json` 同步可见）。
 - **模型类别可改，分类不再被平台弱标签压过**：HF 仓库常给嵌入模型挂 `conversational` / `text-generation` 这类宽泛标签，而分类器是「标签优先」，于是 `WeMM-Embedding-9B` 这类模型被归成对话模型（实测该仓库 tags 确实含 `conversational`）。现在名字判定为嵌入时不再被**弱对话标签**压过（`text-to-image` 等强标签仍优先）；模型详情页新增类别下拉（chat / embedding / rerank / tts / asr / image / video，仅市场下载的模型可改，改完写 `.vllm-meta.json` 并回读确认落盘）；知识库的嵌入模型选择器改为只列**运行中嵌入实例**提供的模型，没有嵌入实例时显示空态与引导，而不是列出聊天端口上名字带 embedding 的模型。
 
+- **Agent 会话可以「回退到这里」（OW-12）**：消息操作条上多一个动作，落在**用户消息**上是「回到这条提问」——连它一起删，正文回填输入框，改一改再发；落在**助手消息**上是「保留到这里」——保留这条回答，只删它后面的内容，对应"这个回答对了、后面几轮跑偏了"这个最常见的诉求。删除前弹确认框，并写明**只动对话不动工作区文件**（要还原这轮改过的文件用旁边的「撤销本轮」）。删除边界抽成纯函数 `planRevertToMessage()`：这条规则错一次的代价是"用户想保留的那条回答被删了"，界面上看不出来，只有单测盯得住（4 条用例含角色异常值的保守处理）。删消息的同时清掉 `agent_events`，并重置会话实例，避免残留的工具轨迹影响下一轮。
+
+- **引擎启动失败从"一行错误原文"变成"一句能照做的建议"（LIE-05）**：新增 `shared/engine-errors.ts` 把失败分八类 —— 缺依赖 / 显存不足 / 磁盘满 / 端口被占 / 权重缺失或没下完 / 架构或量化不支持 / 权限被拒 / 认不出来。分类是纯函数，主进程在失败时就算好（`ServedModelInfo.errorKind`、`getServerStatus().errorKind`），界面按类型给下一步（`engine.error.hint.<kind>`，中英各八条）：端口被占指路去控制台卸载实例，显存不足指路调小上下文或换小量化，权限被拒提醒 macOS 的隔离属性。**顺带把"三处各判各的"收成一处**：原先 webview 里另有四个正则（只认得 llama.cpp 那一句 `unknown model architecture`），聊天、控制台、模型页因此可能对同一个错误给出不同说法；现在统一走同一张规则表，`.hint.arch` / `.hint.engine` 两条死词条随之删除。26 项单测（八类各有用例、缺依赖优先于显存、警告行不误判、不误伤正常文本）。
+  - **第九类「权重还在下载中」只能由上下文判定**：实机撞到的场景 —— 配的模型正在下载（9.5GB 预分配的稀疏文件 + 四个 `.part` 分片），启动时 llama.cpp 只回一句 `exiting due to model loading error`，光看原文分不出来（架构不认识也是这句），于是界面显示"认不出来，见原文"，用户会去查架构、换量化、重下模型，全是白费。现在启动失败时先查下载队列（`downloadManager.list()` 里这个文件是不是 downloading / queued / paused），是就直接说"权重还在下载中（X%），现在加载必然失败"，并且这类算模型侧失败 —— 配了备选链的话会换一个下完的先用起来。原文留在 `detail.raw`，日志与界面说同一句话。
+
+- **推理服务器空闲自动卸载（PERF-01）**：连续一段时间没有请求就把模型服务停掉，把显存让出来 —— 生图 worker 的那套（`IMG_MLX_IDLE_MINUTES`）现在做到了推理服务器层，设置页「服务生命周期」里配（`SERVER_IDLE_UNLOAD_MINUTES`，**默认 0 = 关闭**：默认打开会让"昨晚还跑着的模型今天不见了"变成一个用户无法解释的意外）。判据是三个活动来源：应用内推理调用（挂在用量账本这一个收口上，聊天 / Agent / 翻译 / OCR / 网关全覆盖）、实例输出是否还在变化（外部工具直连端点时唯一看得见的信号）、llama.cpp 的 `/slots` `is_processing`（唯一一个精确的「正在忙」信号 —— 只有它有这么个口子）。卸载动作进 app.log。**故意没做题述的「在飞请求计数」**：一个请求就是一条可能很长的 SSE 流，要正确计数就得在正常结束 / 客户端断开 / 引擎报错每条路径上都减回去，漏一条就变成永久性的「再也不会卸载」—— 读数不准的闸门比没有更危险。局限改为如实写在设置页上（外部长请求中间不打印任何东西时可能被误杀），窗口默认关着。
+
+- **默认模型起不来时回退到备选模型（PERF-03）**：控制台多一张「备选模型」卡片（从已下载的对话模型里挑、可排序、可移出），设置项是 `SERVER_FALLBACK_MODELS`。两条规矩写在实现里：**只有模型侧失败才回退**（架构不支持 / 权重没下完 / 显存不够）—— 端口被占、缺依赖、权限不足换哪个模型都一样，回退只会把真正的失败原因盖住，用户看到的是"备选也起不来"；**回退不静默** —— 写 app.log（`served_model.fallback.used` / `.skipped` / `.exhausted`）并进通知中心，因为是后台自动发生的模型变更，用户必须知道现在在用哪个。整条链都失败时，错误里两边的失败原因都在。7 项单测。
+
+- **TopK 与重复惩罚提为界面参数（ENG-04）**：`SERVER_TOP_K`（默认 40，与 llama.cpp 自己的默认值一致）与 `SERVER_REPEAT_PENALTY`（默认 1.12，与各 profile 现行值一致），llama.cpp 启动参数发 `--top-k` / `--repeat-penalty`，本地模型页的启动参数面板里可改。优先级是"设置优先、模型档案兜底"，空串表示没设过 —— 设置页显示的就是实际发出去的那份。
+
+- **日志脱敏从"只看字段名"补到"也看内容"（FUT-03）**：老实现只把 `{apiKey: "…"}` 这种规整体换成 `***`，而真正泄漏密钥的路径基本都不长这样 —— `curl -H "Authorization: Bearer sk-…"` 这样的命令行、`?api_key=…` 这样的 URL、`api_key=…` 这样的环境变量转储，字段名分别是 `command` / `url` / `args`，谁也没写在名单里。现在 `redactSecrets()` 认这些形状：Authorization / x-api-key 头、裸 `Bearer`、`sk-`/`osk-`/`hf_`/`ghp_`/`glpat-`/`xoxb-` 等固定前缀、`api_key=` / `?token=` / `--password` 赋值形态、URL 里的 userinfo；`logEvent` 的 `message` 也过一遍（原文常把整条命令行抄进来）。规则都要求一个明确的密钥形状，宁可漏掉一个"长得不像密钥的密钥"，也不把整份日志变成 `***` —— 因此同类里也有"不误伤"的用例（`prompt_tokens=1024`、模型路径、`token=abc` 这种短值）。字段名名单另补了 `access_key` / `secret_key` / `credential` 等别名（裸 `key` 故意不收：`{ key: "SERVER_TEMP" }` 这种调试字段很常见）。14 项单测。
+
+- **应用日志终于能在应用里看了（OPS-01 / OPS-02）**：`app.log` 以前只能 `omi logs` 或在文件系统里翻 —— 设置 → 数据 → 控制台（`ConsoleScreen`）的下半屏现在是一个统一的日志区，顶部一个来源切换器：**应用日志**（结构化条目表：时间 / 级别 / 来源 / 事件 / 正文，`detail` 点开看 JSON）+ **每个已启动实例的实时输出**（推理服务器 stdout，沿用原来的终端渲染）。应用日志还能**翻轮转文件**（`app-*.log`，带时间与体积，倒序），跟随最新时每秒轮询一次、只取新条目（`memoryOnly` + `since`），日志再大也不会把主进程拖住。**最近 100 / 500 / 2000 条**是两类来源共用的档位：应用日志走 `limit`（主进程"取最新 N 条再排序"），实例输出按行裁（仍受 ANSI 渲染上限约束）。安全性上，文件名只能取 `appLogFiles()` 列出的 basename，越界名字直接拒绝并记 `app_log.file.rejected`（`../../omni-studio.db`、绝对路径都有用例）。ROADMAP 里原来指的 `server-logs.tsx` 早已随多实例改造删除，这次是按现状补的。
+
+- **基准测试可以一次扫完 batch × ctx（OPS-03）**：原来一趟只跑一个固定并发数，想比较 1/2/4 并发就得手工跑三遍、还得自己对齐上下文档位。现在并发与上下文、缓存场景一样是多档位（`batchSizes[]`，UI 上是 chips + 逗号批量输入，CLI 是 `--batches 1,2,4`，`--batch N` 仍是简写），扫描顺序 ctx × 并发 × 缓存，进度按三维相乘计数。汇总按并发档分开给（`summary.byBatch`），跨档的平均值在界面与报告里明确标注口径 —— 不同并发下的 tps 本来就不是一回事，混在一起平均等于没有意义；缓存对比也按 `ctx@batch` 分组，不会把 4 并发的冷启动和 1 并发的热缓存画进同一列。早停（上下文溢出 / 超时）带上撞墙的那个并发档。报告里加「按并发」表。
+
+
+### Changed / 变更
+
+
+- **模型那六个菜单按"一个问题一条"重排：模型库（页签：模型市场 / 本地已下载 / 我收藏的模型）、运行模型、云端模型、模型引擎**。此前 `模型云服务`、`默认模型`、`本地模型`、`引擎`、`模型库`、`在线模型市场` 并排挂在设置页的「模型」分组里，同一件事要在两三个页面之间来回跳：下载模型去「在线模型市场」，看下载结果去「模型库」，改启动参数去「本地模型」，给某个功能换模型去「默认模型」。
+  - **模型库只管"有哪些模型、从哪儿下"**（`mainview/app/model-library/`）：三个页签左右切换 —— **模型市场**（原「在线模型市场」：平台切换 ModelScope / Hugging Face、格式过滤、检索，没搜过时给官方推荐清单）、**本地已下载**（默认页签，含来源 / 分类筛选与每行的运行 / 激活 / 收藏 / 删除 / 复制启动命令）、**我收藏的模型**。运行与配置不在这页里。
+  - **空态说人话**：一个本地模型都没有时，本地已下载页直说「本地还没有模型」，按钮直接切到隔壁的模型市场页签 —— 新装的应用就停在这个状态，空表格等于什么都没说。收藏页有自己的空态，不复读"本地还没有模型"。
+  - **已下载页故意不按引擎过滤**：GGUF 在 vLLM 下、MLX 权重在 llama.cpp 下照样列出来（行上标「将自动切换引擎」）—— 严格过滤会让切一次引擎就有一批模型"凭空消失"，而它们其实照样能跑。
+  - **收藏页同样跨引擎**，并把来源筛选那一行收起来（跨来源的一份清单，按来源再切一次是噪音）。
+  - **运行模型**（原「本地模型」改名，`app/local-models/index.tsx`）：模型引擎选择、启动参数、启动条、默认模型与目录 —— 只管"怎么跑"，模型清单不重复摆一份（那是模型库的事）。一个模型都没有时给一条去模型库的路。
+  - **云端模型**（原「模型云服务」改名，`CloudProviderPanel` + `DefaultModelsPanel`）：厂商目录、密钥、各用途默认模型。默认模型卡片里 4/6 张本来就是云厂商选择器，没有启用厂商就是空的，放同页才配得起来。
+  - **模型引擎**（原「引擎」改名）：引擎本体的安装 / 升级 / 卸载，页内与文案里的「引擎」一并改成「模型引擎」。
+  - **旧标签 id 全部映射，不留空白页**：`network` / `defaults` → 云端模型，`model` → 运行模型，`store` → 模型库，`market` → 模型库的市场页签，`cli navigate` 的 `models` → 模型库；小应用 `omni.openSettings("network")`（两个 HTML 里写死的）因此不用改。顺手把 `navigate` 拓宽到带 `tab` / `sub`：`omi start --cloud` 与 `omi models` 现在真的落在云端模型页上（此前只跳"设置"，提示文案却写着"设置 → 云端"）。
+  - **"去哪儿配"的文案全改成新路径**（65 处 `设置 → 模型云服务` → `设置 → 云端模型`，含主进程 20 来条错误消息：生图 / 生视频 / 生音乐 / OCR / 实时语音 / 打包媒体能力检查，以及 `cloud.where`、`omi` 的 CLI 帮助与 `docs/omi-cli.md`、`omni-doctor` 的排查表）—— 报错指路指到一个已经不存在的菜单，比不指更糟；医生技能排查表左列是"匹配错误原文"，跟着改是为了它继续匹配得上。
+  - **回归**：`model-library/index.test.tsx`（页签横向、顺序与默认值正确，空态按钮切到市场页签、市场页渲染检索界面、已下载页跨引擎、收藏页只列收藏）、`settings.test.tsx`（导航就是这一份、旧 id 落在对应页面与页签、每页宽度仍走同一个 `PageShell`）。删除 `models-screen.tsx` / `market-screen.tsx`，`model-library/{index,market-tab,downloaded-tab,favorites-tab}.tsx` 接手；`local-models/index.tsx` 现在导出运行模型页。
+
+
 ### Fixed / 修复
+
 
 - **多模态嵌入「假成功」拦截：HTTP 200 但 embedding 全空 → 明确报错，不再静默产出零向量**：实测发现 llama.cpp（v0.4.1/b10964，当前最新）对**多模态嵌入尚未支持的模型**（如 WeMM-Embedding-9B——上游 [ggml-org/llama.cpp#27938](https://github.com/ggml-org/llama.cpp/issues/27938) 仍是 open 的功能请求）的行为是：mmproj 正常加载、图像正常编码进 token、请求以 200 返回，**但 embedding 字段全 null**——null 进 `Float32Array` 静默变 0，维度校验照过，零向量入库后检索永不命中（比直接报错恶劣得多的静默损坏）。现在 `callEmbeddingsMultimodal` 的响应解析在源头拒绝两类假成功：任一元素为 null / 非有限数（空向量），或转换后全零（零向量，合法嵌入向量必非零）；错误信息明确指向「该嵌入模型可能不支持多模态输入，请检查该库的模态勾选与嵌入模型」。用户侧结论同步：**WeMM 在 llama.cpp 下图片直嵌暂不可用**（文本嵌入正常，可继续当文本嵌入模型用），图片直嵌请用已验证可用的 GME 类模型（GME-Qwen2-VL + mmproj，实测返回真实向量且跨模态检索命中）；音视频直嵌在 llama.cpp 生态当前没有任何模型可用（WeMM 官方也明确 "Audio input is not supported"）。
 - **升级到多模态版本后新建知识库点击无响应（迁移被伪造时间戳静默跳过）**：0029 之前的迁移在 drizzle journal 里记的是**伪造的未来时间戳**（递增整数序列，最大 ≈2026-09-22），而 drizzle 迁移器判断「是否需要应用」只比较 `已应用行的最大 created_at < 待应用迁移的 when`、**从不校验 hash** —— 0029（多模态六列，真实生成时间 ≈2026-09-14）比库里的伪造值还早，每次启动都被判定「已应用过」而静默跳过，`embed_image` 等列永远建不出；`createKb` 的 INSERT 撞上 `no such column` 报错，而建库弹窗的 mutation 只有成功分支、RPC 拒绝时界面零反馈 —— 表现即「点击新建按钮毫无反应」（测试没拦住是因为测试库全新、按数组顺序全量应用，只有带着历史迁移记录的真实库才会踩中时间戳比较）。修复三件套：① journal 的 28 个伪造 `when` 全部归真为基于 git 提交时间的严格递增序列（解除「未来假时间戳 > 新迁移真实时间戳」的陷阱，0029 的真实值保留为全序列最大）；② `db/index.ts` 迁移前**时间戳自愈**——按 hash 把既有库 `__drizzle_migrations.created_at` 对齐到归真值（幂等，修好一台即修好所有升级上来的库，日志记 `db.migrate.timestamps_normalized`）；③ 建库弹窗补上失败反馈（红色错误文案，弹窗保持打开），RPC 失败不再静默。回归测试用「全新库 → 人工摆回中毒状态（六列撤掉 + 0029 记录删除 + 时间戳改回伪造值）→ 再启动」端到端锁定自愈链路，并做了摘修复必红的变异验证。
 - **启动嵌入模型不再写脏聊天模型配置（防串层补全）**：第一轮修复让嵌入**实例**不触碰聊天活动状态（`SERVED_ACTIVE_ID` / 活动端口），但模型页启动按钮的前置步骤仍会对嵌入模型调用 `setActiveModel`，把 `LOCAL_MODEL_PATH` / `LOCAL_MODEL_NAME` / `CHAT_MODEL` 三把聊天配置键写成嵌入模型——`omi model --list` 会给嵌入模型标 ● 活动，冷启动 auto-start 按这三把键找目标时只拉起嵌入实例、聊天无模型可用。现在三层防线：① `setActiveModel` 加**类别守卫**（嵌入 / 重排目标直接拒绝且零写入，模型库 / CLI / 控制通道所有入口通吃）；② UI 定点放行（本地模型页启动按钮对嵌入行跳过前置激活、直接按路径起嵌入实例；「激活」按钮对嵌入行隐藏，聊天启动条与 OCR VLM 选择器不再列嵌入 / 重排模型）；③ **启动自愈** `healDriftedChatConfig`——老版本写脏的库在 auto-start 之前检测并清掉三把键（仅判嵌入，保守处理），落一条 `chat_config.heal_drifted` 日志。
 - **嵌入实例处理长文档必崩（物理 batch 太小触发 GGML 断言）**：llama.cpp 在 `--embeddings` 下会强制 `n_batch = n_ubatch`（不显式传值时压到 512），而物理 batch 就是单次能喂进模型的 token 上限 —— 超过它的请求在 `--pooling last` 时触发 GGML 断言**直接崩进程**（退出码 5，日志只留一句 `Process exited with code 5`），`--pooling mean` 时返回 500。知识库导入的 markdown 文档轻松超过 512 token，表现就是「一导入就崩 → 网关报嵌入服务未运行 → KB 下拉为空」。服务端错误原文点明了这一层：`input (631 tokens) is too large to process. increase the physical batch size (current batch size: 512)`。现在嵌入模式改为 `--batch-size` = `--ubatch-size` = `ctx-size`（塞得进上下文的文本就一定嵌得进去，不留静默上限），聊天路径仍是聊天调优的 256/64。
+
+- **凭据落盘加密只覆盖了三个设置键，其余同样是凭据的键都在明文躺着（FUT-02）**：`ENCRYPTED_KEYS` 从 3 个扩到 15 个 —— 各家云厂商的语音 / ASR / OCR / 生图 / 视频 / 联网搜索 / 记忆向量 Key、Skills 仓库的 PAT、备份远端的访问密钥。判定标准只有一条：**这个值落到别人手里，他就等于能替你花钱或替你写代码**。知识库的 `embedding_api_key` / `rerank_api_key` 两列是同一类东西，之前只因为"写在另一个表里"而漏在名单外，现在同样 AES-256-GCM 落盘，读取统一收在 `getKb` / `listKnowledgeBases` 两个出口解密，解不开（换了机器 / 换了数据目录）按未配置处理并留一条日志 —— 否则一个解不开的密文会被当成密钥原样发给上游，换回 401 还看不出原因。老库里的明文逐行写穿（读到就顺手加密写回）：没做成"启动时扫一遍"，是因为那需要一张"跑过没跑过"的标志，而标志一旦为真，之后新增的明文行就再也轮不到被加密。加密名单改成从导出的唯一真源派生，测试直接遍历它，加键的人不必记得同步测试。**仍未做**：macOS Keychain / 系统凭据库（钥匙与锁目前同屋：`<数据目录>/secrets.key`，0600）。
+
+- **模型下载按「整个模型」统计与展示，并给下载并发定了总上限**。用户侧的诉求原话是「放在一个里面去下载、显示整体的进度」——整仓库模型的十几个分片 + config + tokenizer 本来就必须一起下完才能加载，逐个文件列进度既看不出模型整体下了多少，界面还被十几条进度条和「排队中 · 前面还有 N 个」淹没。
+  - **聚合只发生在展示层**：任务仍是文件级的（断点续传、分片重试、`.part` 旁路数据全不动），新增 `groupDownloadsByRepo()` 把同一仓库的任务合成一条，`summarizeModelDownload()` 按**整模型**算百分比 —— 已完成的文件计入分子分母，12 个下完 9 个显示 75%，而不是「剩下 3 个的 0%」。
+  - **模型详情页**：整模型一张进度卡（`9/12 个文件 · 1.2 GB / 3.5 GB · 12 MB/s · 约 3 分钟`）+ 一个主操作，失败时是**一次重试全部失败文件**的一个按钮；文件清单退回成"这个模型里有什么"的清单（文件名 / 格式 / 大小 / 装没装），逐文件的进度条、速度、剩余时间、排队位置、暂停与重试全部撤掉。
+  - **GGUF 例外**：同一个仓库里 `.gguf` 是几十个能独立跑的量化，合并会把「下了 3B-Q4 和 7B-Q8」显示成「同一模型 50%」，因此每个量化各占一行。
+  - **陈旧任务去重**：`start()` 在旧任务已结束时会新建一条，于是磁盘上会同时留着「那次失败的那条」和「后来下好的那条」。不去重时整模型聚合会把它俩都算进去：文件数虚高，且一条陈旧的 failed 会让模型**永远顶着「失败」**，尽管文件其实早已下好（实测数据：13 个文件里 3 个是这种重复）。现在同一文件只留进展最靠前的那条。
+  - **并发有了总上限**：分片数此前只在"单个文件"这一层被压到 4，而队列同时跑 2 个文件，对站点的实际并发是 **8** —— 正是代码注释里记着的「会偶发 500」的档位。`partsBudgetFor()` 按同时在下的文件数分摊一份全局预算（`OMNI_DOWNLOAD_CONNECTIONS` 默认 4），总连接数恒定、不随并发文件数放大。
+  - **实机复现与验证**：日志里 12 个失败全是 `mlx-community/K2-Horizon-7B-Uno-oQ6e` 的小文件（单流路径）、失败时间集中在 09:57–09:58、每条 `retries` 都用尽；用同一批 URL 实测 8 路并发全部 200，说明是突发并发触发的服务端瞬时 500 而非地址问题（唯一大于 4MB、走多分片路径的 `tokenizer.json` 当时没失败）。改完后经控制通道对同三个文件真机重下**全部成功**，列表里另有一个 9.5GB GGUF 下完。边界照实说：500 是瞬时的，本次只是降低触发概率、并把"一次点掉全部失败"变简单，不是根除。
+  - 回归：`download-view.test.ts`（整模型聚合 / 分组 / GGUF 不合并 / 陈旧任务去重 / 状态优先级）、`downloader.test.ts`（并发预算按文件数分摊且总量不超上限）、`download-panel.test.tsx`（按模型聚合后的列表结构，保留原先那条滚动容器防回归）、`model-detail/index.test.tsx`（渲染真实详情页：整页只有一条进度条、无逐文件「排队中」、一个「下载整仓库（N 个文件）」入口一次排完整个模型）。
+
+：`ENCRYPTED_KEYS` 从 3 个扩到 15 个 —— 各家云厂商的语音 / ASR / OCR / 生图 / 视频 / 联网搜索 / 记忆向量 Key、Skills 仓库的 PAT、备份远端的访问密钥。判定标准只有一条：**这个值落到别人手里，他就等于能替你花钱或替你写代码**。知识库的 `embedding_api_key` / `rerank_api_key` 两列是同一类东西，之前只因为"写在另一个表里"而漏在名单外，现在同样 AES-256-GCM 落盘，读取统一收在 `getKb` / `listKnowledgeBases` 两个出口解密，解不开（换了机器 / 换了数据目录）按未配置处理并留一条日志 —— 否则一个解不开的密文会被当成密钥原样发给上游，换回 401 还看不出原因。老库里的明文逐行写穿（读到就顺手加密写回）：没做成"启动时扫一遍"，是因为那需要一张"跑过没跑过"的标志，而标志一旦为真，之后新增的明文行就再也轮不到被加密。加密名单改成从导出的唯一真源派生，测试直接遍历它，加键的人不必记得同步测试。**仍未做**：macOS Keychain / 系统凭据库（钥匙与锁目前同屋：`<数据目录>/secrets.key`，0600）。
+
+- **设置 → 引擎：所有本地运行时收进一页统一管理（状态 / 升级 / 卸载）**。此前"装了什么、占多大、怎么卸"散在四个功能页里：引导页装 llama.cpp / vLLM / SGLang / MLX，语音页装 whisper.cpp 与 audio.cpp，OCR 页装 PaddleOCR 与 Tesseract，图片页装 mflux —— 而且**没有一处能卸载**（vLLM / SGLang / MLX / PaddleOCR / mflux 的 venv 全是只进不出，卸不掉就只能去数据目录里手删）。现在十个引擎（文本推理四个 + whisper.cpp / audio.cpp / PaddleOCR / Tesseract / mflux / cloudflared）各占一行，显示运行状态、版本、路径、占用，并提供安装 / 升级 / 卸载 / 打开目录：
+  - **身份收成一份**（`shared/local-engines.ts`）：id、分类（文本推理 / 语音 / OCR / 图像 / 网络工具）、说明与用途、手动安装与卸载命令。文本推理那四个沿用 `InferenceEngine` 的 id，不再起第二个名字；新增一个引擎 = 一个 `LOCAL_ENGINE_SPECS` 条目 + `bun/engine-catalog.ts` 里一个适配器，页面的分组、按钮与文案都从这两处派生。
+  - **三种状态对应三种可做的操作**：*未安装* → 安装；*应用自己装的*（managed，托管目录在）→ 升级 / 重新下载 + 卸载；*系统里那份*（PATH / brew / conda）→ 只能"装一份应用自管的"（托管版本优先使用），卸载按钮不给 —— 应用装的那份与系统那份混在一起，就是"点了没反应"和"把系统里的东西删了"两类事故的源头。
+  - **卸载之前先停服务**：推理服务（`model-servers`）、whisper-server、OCR / 生图 worker 都持有那个二进制或解释器，删文件只是让它们在下一次请求里莫名其妙地失败。唯一例外是 cloudflared：隧道正连着公网，静默停掉比拒绝更意外，所以隧道在跑时直接拒绝并指路「远程访问」页。
+  - **模型权重不跟着引擎走**：卸载只删引擎本身，已下载的权重一律保留（PaddleOCR 的 venv 与模型同目录，逐个删 venv 而留下 `models/`），换引擎不必把几十 GB 重下一遍；每行给一个「管理模型 →」跳到对应的功能页。
+  - **升级 = 带着 `upgrade` 再走一遍安装**：pip 引擎走 `pip install --upgrade`（此前"装过就跳过"的短路让升级根本跑不起来，`python-engine` 现在认 `upgrade`），llama.cpp 拉官方最新 `b<构建号>`，whisper.cpp / audio.cpp / cloudflared 版本钉在代码里，按钮据此叫「升级」或「重新下载」，语义写在状态里（`upgradeKind`）而不是界面里猜。
+  - **进度只有一条链路**：复用引导页那套 `engineInstallLog` / `engineInstallPhase` 推送（事件里的引擎 id 拓宽成 `LocalEngineId`），其余安装器自己的日志由 `startEngineLogBridge()` 桥接进来，界面只订阅一条流、切走再回来进度还在；安装与卸载同一时刻只放一个（pip 与 `rm -rf` 撞在一起只会互相踩），终态时自动重查状态。
+  - **回归**：`shared/local-engines.test.ts`（id 与 `InferenceEngine` 对齐、托管目录不重复、文案键中英齐全）、`bun/engine-catalog.test.ts`（托管识别与版本、卸载删对目录并报出释放量、系统引擎拒绝卸载、`canInstall` 与 `engineInstallSupport` 判定一致、目录占用）、`runtimes/proc.test.ts`（`probeCommand`：退出码 0 才算过 + 与 `waitExit` 的差别）、`mainview/app/main-layout/engines-tab.test.tsx`（十种引擎全列出并分组、只有托管安装给卸载、已安装给「升级 / 重新下载」且请求带 `upgrade`、系统安装给「安装托管版」、卸载先确认再说清目录、失败原因落在行上），设置导航与页面宽度两条既有用例同步更新。
+
+
+- **引擎"装没装"的检测只看退出码 —— 之前是把"进程退出了"当成"装好了"**。vLLM / SGLang / MLX 的 `checkBinary` 用 `waitExit`（它回答的是"进程退出了吗"，给 SIGTERM → SIGKILL 分级用的）去探测 `python3 -m vllm --help` / `import sglang` / `import mlx_lm`——这些命令在没有对应包时**以退出码 1 立刻结束**，照样被判成"退出了"→ 返回 found。于是**任何装了 python3 的机器**（实测这台开发机）vLLM / SGLang 双双报"已安装"、引导页与引擎页都显示一个跑不起来的引擎"就绪"。新增 `runtimes/proc.ts` 的 `probeCommand`（退出码 0 才通过、超时不通过、不留挂起的子进程），三个 runtime 与 Llama 的停机路径各归各位；`proc.test.ts` 补了 `probeCommand` 四条用例（含一条直接证明它与 `waitExit` 的差别）。
+- **引擎管理页的"应用自己装的那份"判定只看托管路径，不看 runtime 报的 mode**：vLLM / SGLang / MLX 的 `checkBinary` 对"系统里能 import 的那个 python"也报 `mode: "python"`（与托管 venv 同值），老判断会把这台机器整成"应用已安装"，并给一个**会删错目录**的卸载按钮（或把系统那份当托管删了）。现在 managed 只看 `<dataDir>/engines/<id>` 下的 venv / 二进制在不在，系统 python 一律算 `system` / `missing`；`engine-catalog.test.ts` 加了"无托管 venv 绝不报告 managed"的用例。
+
+
+- **`omi launch chatgpt --restore`：把 ~/.codex 还原到改写前**。`omi launch chatgpt` 改写的是 ChatGPT 桌面端（也就是原来的 Codex）与 codex CLI 共用的 `~/.codex/config.toml` —— 属于"动了别人的配置"，此前却没有回头路：备份躺在 `~/.codex/backup-omni/` 里，要让用户自己把文件拷回去。现在一条命令还原：有备份就整份换回（实测与改写前逐字节一致），安装前本来没有 config.toml 时只摘掉本工具写入的顶部键与 `[model_providers.omni]` 区块 —— 桌面端自己也会往这个文件里写 plugins / marketplaces，整份删掉会把它的设置一起带走。首次写入时多记一份 `backup-omni/manifest.json`（`originalExisted`），还原走哪一支靠它判断。
+
+- **国内主流厂商的入口全列在「模型云服务」里，用户只需要填一个 API Key**（参照 Cherry Studio 的云服务页）：以前得先点「添加服务商」，在弹出的预设网格里挑一家，再去右栏补 Key —— 内置厂商现在**安装即整份入驻**（`ensureBuiltinProviders`），选一家、粘 Key、打开开关就完了。
+  - **接口地址由应用维护，界面上不给填**：内置厂商的 OpenAI 兼容地址是固定的（`https://api.deepseek.com/v1` 之类），给个输入框只会被填错，而填错之后这一家就永远调不通、用户手里还没有改回来的入口。现在右栏那一行是只读文本（锁标记 + 一句"要自建网关 / 走中转请用自定义服务商"），写库这一层也拦一道（`updateCloudProvider` 拒绝改内置地址）—— 控制面、将来的导入路径都绕不过去。**老行例外**：地址与预设不一致的（老版本允许改，用户可能指过自己的中转）不锁，继续可改，并多一个「恢复官方地址」。
+  - **内置厂商不能删**：删掉下一次读取还会原样入驻，只会让人以为"删干净了"。不想用就停用（关掉开关）。
+  - **默认带着各家最新 / 常用模型**：预设清单照旧（`CLOUD_PRESETS`）落进厂商行，装上就有模型可选；服务商上新后点「获取模型列表」拉当前全量再逐个添加。每家的「获取密钥」现在直达控制台的密钥页（`apiKeyUrl`），不用自己翻官网找。
+  - **左栏按来源分栏**：官方 / 国内厂商 / 聚合平台 / 海外厂商 / 自定义 —— 一屏 20 多家，不分栏找不着。行内给"待配置"角标（只认没填 Key 的），默认选中激活行 → 第一个配好的行 → 第一行，不会一进来就停在空行上。
+  - **引导页填的 Key 就是云服务页里的那份**：URL 模式原先只写 `VLLM_API_BASE` / `VLLM_API_KEY` 老槽位，用户在引导页填过的 Key 到了设置页仍显示"没配过"，得重填第二遍；现在收尾走新的 `cloudProviderConfigure`（内置厂商用预设行、自定义按地址复用同一行，校验密钥后启用 + 激活，激活再把三个槽位写回）。引导页顺带给「获取密钥」直达链接。
+  - 回归：`bun/cloud-providers.test.ts` 六条（整份入驻 + 目录顺序、改地址被拒、内置不可删、地址被改过的行不锁、configure 落表并激活、自定义地址复用同一行），`cloud-provider-panel.test.tsx` 两条（内置厂商只读 + 不给删 / 自定义可改可删），`setup-screen/remote-flow.test.tsx` 三条（地址只读且只填 Key、自定义带地址落库、失败时显示原因且不进应用）。
+
+
+- **`omi launch chatgpt` 写出的模型目录客户端根本不认 —— 整份 config.toml 解析失败**。Codex 的目录项里 `base_instructions` 与 `model_messages.instructions_template` 至少要有一个，两个都没有时客户端直接报 `failed to parse model_catalog_json …: model \`X\` is missing both base_instructions and model_messages.instructions_template`，于是 `~/.codex/config.toml` 整体作废（`codex doctor` 的 config 项直接红）。提示词也不再由我们抄一份：跑一次客户端自带的 `codex debug models`（本机约 20ms）拿它**当前版本**的模板写进目录项，客户端升级就自动跟着走；读不到时退回一小段兜底提示词。顺带把目录项补齐成桌面端自带的形状（`visibility: "list"` 选择器里才可见、`shell_type`、`supported_in_api`、`effective_context_window_percent` 等），上下文窗口改成**真实值**（本地模型取 `serverContextWindow`，即 `SERVER_CTX_SIZE` 按 `--parallel` 均分后的单请求窗口；此前一律写 128k，模型只服务 64k 时会在长会话里硬报错）。
+- **改写 `~/.codex/config.toml` 时旧 provider 区块的正文会留在上一个区块里**。丢弃 `[model_providers.omni]` 只丢了节头，`name` / `base_url` / `experimental_bearer_token` 三行原地留下 —— 落在前一个区块（实测是 `[desktop]`）名下，上一轮的网关密钥就这么一直留在配置里，而且每改写一次多留一份。现在整段丢弃；补了幂等用例（同一份配置改写三次，第四次结果与第三次逐字节相同）。
+- **`omi launch codex` 一个鉴权头都不发，网关开着密钥时必然 401**。自定义 provider 必须自己声明 `env_key`，Codex 只对内置的 openai provider 自动读 `OPENAI_API_KEY`（本地起回显服务器实测：不写 `env_key` → 请求里没有 `Authorization`，写了 → `Bearer …`）。profile 里补上 `env_key = "OPENAI_API_KEY"`，与启动时注入的环境变量对上。
+- 回归：`cli/commands/launch.test.ts` 从 6 条扩到 21 条（TOML 手术边界：顶部键插入位置、原地替换不重复、旧区块正文不残留、会劫持流量的残留键被删、`--restore` 摘除后桌面端区块保留；目录项两处提示词与 `visibility`；`pickInstructionsTemplate` 的取值与兜底；profile 的 `env_key`）。
+
+- **引导页 URL 模式：选「自定义」之后就走不下去了**。第一步的「下一步」按 `canProceedToCredentials` 判断"自定义必须已填地址"，而地址输入框在**下一步**才出现 —— 于是选了自定义，按钮永远是灰的，除了「跳过」没有别的出口。现在这一步不做前置校验（地址与模型名在下一步校验，那里才是它们出现的地方），回归用例见 `setup-screen/remote-flow.test.tsx` 的自定义那条。
+
+- **四个侧栏列表补上「删除」与「下载」**：生图 / 视频 / 音乐 / OCR 的左侧记录列表此前只能点进去看 —— 想删一条得先切到「全部历史」页（OCR 是详情页）再删，下载更是只挂在生成结果卡片上，侧栏里看得见却动不了。现在每行悬浮（或键盘聚焦到该行）时，第二行右侧出现两个图标按钮：
+  - **删除**：四个列表口径一致，先弹确认框（图片/视频/音乐提示「文件和生成记录都会被删除」，OCR 提示「识别结果、页面图片和记录都会被删除」），确认后调用各自既有的 delete RPC —— 主进程侧本来就会顺手清掉磁盘上的成品文件。删掉的正好是当前聚焦/打开的那条时，选中会一起收回去，右侧不会停在一条已经不存在的记录上（OCR 则退回列表页）。
+  - **下载**：图片与视频走 `saveImageToDownloads`（落进系统「下载」目录），音乐走 `AudioDownloadButton`（目录选择框 + 重名自动加序号，与音乐页其余下载入口一致）。没有成品的行（生成中 / 失败）只出删除按钮，不给一个点了必然失败的下载。
+  - 按钮放在第二行（时间 / 状态那一行）右侧：这一行本来右边就是空的，不挤占提示词或歌名的宽度；实测两行提示词的行高 66px、单行 51px，操作区与提示词零重叠。
+  - **顺带修掉「静默保存」**：`saveImageToDownloads` 过去只回 `{ok}`（存到哪了调用方不知道），新按钮因此说不出「已保存到 …」；现在回传落盘路径，配合统一的保存反馈（转圈 → 打勾 + tooltip 显示路径 → 失败变红）—— 音乐那边早就因为「点了没反应」改成目录选择框了，图片/视频这次把反馈补齐。
+  - 复用与实现：新增 `components/record-actions.tsx`（`MediaDownloadButton` / `RecordDeleteButton` / `RecordDeleteDialog`），`AudioDownloadButton` 改为它的薄封装，四个列表共用一套反馈与确认框；OCR 行的删除用 `SidebarMenuAction`（基类的 `peer-data-[size=default]/menu-button:top-1.5` 会压掉普通工具类的 `top`，所以不要另外调位置）。新增词条 `common.download` / `common.downloadFailed` / `ocr.docs.deleteTitle` / `ocr.docs.deleteDesc`（中英各一份）。回归：`mainview/app/media-record-lists.test.tsx` 八条（四个列表的删除 + 确认 + 聚焦收回 + 下载命名 + 无成品不出下载）。
+
+
+- **三条界面词条根本没进词典，界面上直接把 key 显示出来了**：`chat.noLocalModel`（本地模型未启动时输入框上方那条横幅）、`common.close`（撤销弹窗的关闭按钮）、`settings.gateway.keys.delete`（网关密钥行的删除）——`t()` 找不到词条时按约定回落成 key 本身，于是用户看到的是 `chat.noLocalModel` 这种字符串。三处补齐中英两份，并顺手把"引用的词条都在词典里"扫了一遍：2034 个引用现在一个不缺（扫描方式：抽出 `t("…")` 逐个 `translate()` 比对）。
+
+- **引导页的三个阻塞性毛病（推荐不对 / 跳过跳不过去 / 模型列表滚不动）**：
+
+  - **推荐模型改成千问，不再固定推 DeepSeek**：MLX 引擎过去只有两个 DeepSeek 大 MoE 预设、又拿不到体积，界面只好把其中一个**写死**标成"推荐"—— 32GB 的机器上照样推它，等于没推。现在 MLX 与 vLLM / SGLang 同一口径（`SETUP_MODELS` 那份千问表，mlx-lm 直接加载 HF safetensors，按整仓库 bf16 估算），推荐跟着本机内存走：32GB 的 Mac 上推 Qwen3.5 4B（9B 的 bf16 在 24GB 预算里是"偏紧"，仍列在表里可自选），35B / 27B 的 bf16 如实标「超出内存」。引导页里再也不会出现 DeepSeek。
+  - **「跳过」永远跳得过去**：以前 `handleComplete` 只有一个 `await updateSettings(...)`，写不进去就毫无反应；更糟的是**读设置那条路本身会抛**（见下一条），于是引导页永远走不完。现在写 `SETUP_COMPLETE` 失败只记一条 `setup.complete_failed` 日志，照样放行；外层 `App` 也在点了跳过之后**直接进主界面**，不再等设置读回来。两条路径都有回归用例。
+  - **这一页能滚了**：整页用的是 `min-h-screen` + 自适应高度 + `overflow-y-auto`，而 `body` 是 `overflow: hidden` —— 它只会长得比窗口更高、被 body 裁掉，且没有任何滚动条：模型列表一长，下面的「下一步」「跳过」就永远够不着（这也正是"选完模型点不到下一步"的现场）。现在滚动容器把高度锁在视口上（`h-full overflow-y-auto`），内层用 `min-h-full` 保持内容短时仍然居中。
+  - 回归：`setup-screen/index.test.tsx`（跳过无条件生效 + 写失败进日志 + 滚动容器高度受限）、`app/index.test.tsx`（读设置报错时点跳过仍进主界面）、`setup-screen/constants.test.ts` 与 `local-flow.test.tsx` 各加一条 32GB + mlx-lm 的用例（推千问、且"DeepSeek"不出现在页面文本里）。
+
+- **恢复别人的备份之后进不去系统：读设置不再被"外来密文"炸掉**。备份归档里**不含** `secrets.key`，所以跨机（或跨数据目录）恢复之后，`settings` / `cloud_providers` / `gateway_keys` 里会躺着一堆本机钥匙解不开的 `v1:` 密文；而 `decryptSecret` 是**抛错**的，`getAllSettings()` 会逐行解密 —— 于是启动路上的第一个调用（`getSettings`，前端据此判断"配置好了没有"）直接 reject，界面永远停在引导页：**点跳过也没用**（它写完 `SETUP_COMPLETE`，界面还要再读一次设置）。现在读路径统一走新的 `tryDecryptSecret`（不抛，给 `{ok:false,error}`）：解不开的键按**空值**处理（语义就是"这台机器上没有这个凭据"），并在 `app.log` 里留一条 `settings.decrypt.failed` / `cloud_provider.decrypt.failed` / `gateway_key.decrypt.failed` 警告（同一个键一次进程只报一条，避免读设置的热路径刷屏），其余键照常读出、用户重填一次密钥即可恢复。写路径仍用会抛的 `decryptSecret` —— 坏密文绝不能当明文用出去。回归：`bun/secrets.test.ts` 新增两条（`tryDecryptSecret` 的形状，以及"用另一把钥匙加密的密文"进库后 `getAllSettings` 不抛、只有那个键变空、日志里有一条、重填后恢复）。
+
+- **MiniMax 生视频改走 v2 —— v1 那套上游已经不认了**：拿 H3 系列提交，上游只回 `2013 invalid params, 该模型请使用 /v2/video_generation 接口`，而 v2 是官方现行接口（在售模型 `MiniMax-H3` / `MiniMax-H3-Max`），请求体、查询路径、响应形状三样全变了。现在只实现 v2，不再做 v1/v2 双形状兜底（两套并存的代价是每次请求都要猜哪套能用，而猜错的那次会把"参数/模型名不对"这种误导性错误甩给用户）：
+  - **提交** `POST /v2/video_generation`：`model` + **`content` 数组**（文本项，首帧图是 `{type:"image_url", image_url:{url}, role:"first_frame"}`）+ 必填的 `resolution` / `duration`，纯文生视频还要给具体 `ratio`（`adaptive` 只在带图 / 参考素材时合法）。v1 的 `prompt` 字符串与 `first_frame_image` 字段不再出现。
+  - **轮询** `GET /v2/query/video_generation/{task_id}`：状态是 `queued` / `running` / `succeeded` / `failed` / `cancelled`，失败原因读 `task.error.message`（带内部码）。**成片地址直接取 `task.content.url`** —— 不再走 `/v1/files/retrieve` 换链，也不再拿 file_id 去拼一个并不存在的下载路径（那一步此前是 404 的常客）。
+  - **错误识别从「HTTP 200 + `base_resp.status_code`」换成 v2 的 OpenAI 风格信封**（`{type:"error", error:{message, http_code}}` 配 4xx/5xx）：401 照旧走"宽限 3 分钟再判死"，其余 4xx 把上游原话与状态码一起透到界面与 `app.log`；「返回的是网页（HTML）」「路由不存在（404 + 非 JSON）」两条地址类诊断保留（提交与轮询各自指出唯一那条路径）。
+  - **模型清单换成 v2 在售的两个**（预设与视频页同步）；**时长与分辨率按模型收敛后再发**：H3 是 768P / 2K + 4~15 秒，H3-Max 是 480P / 768P + 5~15 秒 —— H3-Max 上选 2K 会落到 768P、选 4 秒会抬到 5 秒，库里记的与真正发出去的一致。视频页跟着换档位：分辨率 768P / 2K / 480P，时长从 6s / 10s 两个按钮改成 4–15 秒滑块（v2 逐秒可选，"有固定档位的协议才给按钮"那套逻辑随之删掉）。
+  - 回归：`bun/video-gen.test.ts` 按 v2 契约重写（提交形状、首帧图项、按模型收敛、一次查询即拿地址、401 / 5xx / 路由 404 / 任务不存在四条轮询分支），`scripts/video-gen-smoke.ts` 的 mock 上游换成 v2 路由，omni-doctor 播放手册里的错误原文与模型 id 同步更新。
 
 - **CI 从 0.0.9 起一直是红的（本地却全绿）：runner 装的 bun 是 1.3.9，而 `--parallel` 是 1.4 才有的开关**。1.3.x 上 `bun test --parallel` **不报未知参数、直接忽略**，于是回到"共享 worker + `mock.module` 跨文件泄漏"的老症状（`bunfig.toml` 里记过的那一类：safeJoin / 备份 / 密钥加密 / 笔记 / 内置技能…全在毫不相干的文件里红），CI 80 红、本地 0 红，差别只在运行时版本 —— 版本来自 `package.json` 的 `packageManager`，而 runner 按它装 1.3.9。修法是把版本钉到 1.4.2（开发机实际在用的），并在 `bunfig.toml` 写明"升级运行时时先确认 `bun test --help` 里还有 `--parallel`"。同一提交在 1.3.9 下 80 红 / 1.4.2 下全绿，已双向验证。
 

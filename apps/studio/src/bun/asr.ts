@@ -284,7 +284,7 @@ export function getASRProviderConfig(): ASRProviderConfig {
 
 /**
  * 保存三方 ASR 配置：语音页 / 实时翻译只选「厂商 + 模型」，地址 / 密钥属于服务商
- * （在「设置 → 模型云服务」里维护并启用），这里不再接收 base / apiKey。
+ * （在「设置 → 云端模型」里维护并启用），这里不再接收 base / apiKey。
  */
 export function saveASRProviderConfig(cfg: {
   providerId?: string;

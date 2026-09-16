@@ -94,6 +94,14 @@ mock.module("@lib/rpc", () => ({
       exceptions: [],
     }),
     testProxy: async () => ({ ok: true, url: "", source: "none" }),
+    // 引擎页：空清单就够（这个测试只看导航与页面宽度，引擎行自己有 engines-tab.test.tsx）。
+    listLocalEngines: async () => ({ engines: [] }),
+    // 模型库 / 运行模型要用到的清单：都返回空，空态本身在 model-library 的用例里钉。
+    listInstalledModels: async () => ({ models: [] }),
+    getModelDirs: async () => ({ dirs: [] }),
+    listChatModels: async () => ({ models: [] }),
+    cloudProviderList: async () => ({ providers: [] }),
+    searchMarketModels: async () => ({ models: [], total: 0, totalExact: true, hasMore: false }),
   },
 }));
 
@@ -144,18 +152,17 @@ async function renderSettings() {
   };
 }
 
-test("设置导航就是这一份：通用（代理）在偏好分组里，没有「性能」「记忆」这类重复入口", async () => {
+test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云端模型 / 模型引擎，没有「性能」「记忆」这类重复入口", async () => {
   const { text, cleanup } = await renderSettings();
   const nav = document.querySelector("nav[aria-label]");
   expect(nav).not.toBeNull();
   const labels = [...nav!.querySelectorAll("button")].map((b) => b.textContent?.trim());
   expect(labels).toEqual([
     "概览",
-    "模型云服务",
-    "默认模型",
-    "本地模型",
     "模型库",
-    "在线模型市场",
+    "运行模型",
+    "云端模型",
+    "模型引擎",
     "网关",
     "远程访问",
     "集成",
@@ -174,6 +181,66 @@ test("设置导航就是这一份：通用（代理）在偏好分组里，没�
   // 删掉的页面没有留下把 i18n key 原样渲染出来的残留。
   expect(text).not.toContain("settings.prefs.");
   await cleanup();
+});
+
+/**
+ * 旧标签 id 不能变成空白页。
+ *
+ * 模型组这轮改过名也挪过位置（本地模型 → 运行模型、模型云服务 → 云端模型、在线模型市场
+ * 收进模型库），外部跳转还在用旧 id：小应用 `omni.openSettings("network")`、CLI navigate
+ * 的 `models`、各式错误回退。这里钉住它们各自落到今天的那一页。
+ */
+test("旧标签 id 仍落在对应页面（network → 云端模型，model → 运行模型，market → 模型市场页签）", async () => {
+  const { cleanup } = await renderSettings();
+  const { useRouter } = await import("@stores/router");
+
+  const routeTo = async (legacy: string) => {
+    await act(async () => {
+      useRouter.getState().setRoute({ path: "settings", tab: legacy });
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  const activeNav = () => {
+    const nav = document.querySelector("nav[aria-label]");
+    return [...(nav?.querySelectorAll("button") ?? [])]
+      .find((b) => b.className.includes("text-primary"))
+      ?.textContent?.trim();
+  };
+  const selectedTab = () =>
+    [...document.querySelectorAll('[data-slot="tabs-trigger"]')]
+      .find((el) => el.getAttribute("aria-selected") === "true")
+      ?.textContent?.trim()
+      .replace(/\s*\d+$/, "");
+
+  try {
+    // 模型云服务 / 默认模型 → 云端模型（厂商面板渲染出来了）
+    for (const legacy of ["network", "defaults"]) {
+      await routeTo(legacy);
+      expect({ legacy, nav: activeNav() }).toEqual({ legacy, nav: zh("cloud.title") });
+      expect(document.body.textContent ?? "").toContain(zh("defaults.title"));
+    }
+    // 本地模型 → 运行模型（引擎选择 + 空态指路模型库）
+    await routeTo("model");
+    expect(activeNav()).toBe(zh("run.title"));
+    expect(document.body.textContent ?? "").toContain(zh("library.localEmpty"));
+    // 模型库（store）→ 默认页签「本地已下载」
+    await routeTo("store");
+    expect(activeNav()).toBe(zh("library.title"));
+    expect(selectedTab()).toBe(zh("library.tab.downloaded"));
+    // 在线模型市场 → 模型库的市场页签
+    await routeTo("market");
+    expect(activeNav()).toBe(zh("library.title"));
+    expect(selectedTab()).toBe(zh("library.tab.market"));
+  } finally {
+    // 复位：路由是全局 store，留着会把后面的用例按在模型库里；断言失败也要收掉 DOM，
+    // 否则后面每个用例都叠着一份残留的设置页。
+    await act(async () => {
+      useRouter.getState().setRoute({ path: "settings", tab: "stats" });
+    });
+    await cleanup();
+  }
 });
 
 test("点「通用」进得去代理卡：模式、本地网络开关、采样都在", async () => {
@@ -226,9 +293,9 @@ test("每个标签页的内容容器宽度一致（都走 PageShell 的单一宽
   const { cleanup } = await renderSettings();
   const nav = document.querySelector("nav[aria-label]");
 
-  // 挑的是改造前宽度各不相同的页面：概览/本地模型/模型库是 3xl，默认模型 5xl，
-  // 使用统计 6xl，通用这类行式页面 2xl，控制台完全没有宽度上限。
-  for (const label of ["概览", "默认模型", "本地模型", "模型库", "使用统计", "通用", "控制台"]) {
+  // 挑的是改造前宽度各不相同的页面：概览/模型库是 3xl，使用统计 6xl，通用这类行式页面 2xl，
+  // 控制台完全没有宽度上限；运行模型（原「本地模型」）与模型引擎（原「引擎」）也算。
+  for (const label of ["概览", "模型库", "运行模型", "云端模型", "模型引擎", "使用统计", "通用", "控制台"]) {
     const button = [...nav!.querySelectorAll("button")].find(
       (b) => b.textContent?.trim() === label,
     );
@@ -251,7 +318,7 @@ test("每个标签页的内容容器宽度一致（都走 PageShell 的单一宽
   await cleanup();
 });
 
-test("原「性能」页的参数在本地模型页都有入口（删页面不丢设置）", async () => {
+test("原「性能」页的参数在「模型库 → 运行模型」里都有入口（删页面不丢设置）", async () => {
   const { PARAM_FIELDS, PIPELINE_FIELDS } = await import("../local-models/params");
   const keys = new Set([
     ...Object.values(PARAM_FIELDS).flat().map((f) => f.key),

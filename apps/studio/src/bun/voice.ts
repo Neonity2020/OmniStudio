@@ -194,7 +194,7 @@ export function getTTSProviderConfig(): TTSProviderConfig {
 
 /**
  * 保存三方 TTS 配置：语音页只选「厂商 + 模型」，地址 / 密钥属于服务商
- * （在「设置 → 模型云服务」里维护并启用），这里不再接收 base / apiKey。
+ * （在「设置 → 云端模型」里维护并启用），这里不再接收 base / apiKey。
  *
  * 返回本次生效的音色：换厂商后原先那个"别家的占位音色"（alloy 之类）会被落成新厂商的
  * 默认值，页面得显示这个值 —— 否则界面上写着 alloy、实际发出去的是厂商默认音色，

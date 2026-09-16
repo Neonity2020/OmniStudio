@@ -302,14 +302,19 @@ export const CLI_SECTIONS: CliSection[] = [
     descEn: "Run a throughput benchmark for the active model (or a cloud provider model); results land in the app's benchmark history.",
     entries: [
       {
-        cmd: "omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1] [--cache cold,partial,warm]",
-        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位（128 ~ 1M，认 8k / 1m 这种后缀），--gen / --batch 调生成长度与并发，--cache 选缓存场景（cold 冷启不命中 / partial 部分命中 / warm 完全命中，默认三种都测）。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
-        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes (128 to 1M, k / m suffixes accepted), --gen / --batch tune generation length and concurrency, --cache picks the prompt-cache scenarios (cold miss / partial hit / warm hit; all three by default). Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
+        cmd: "omi benchmark [model] [--contexts 1024,4096] [--batches 1,2,4] [--gen 128] [--cache cold,partial,warm]",
+        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位（128 ~ 1M，认 8k / 1m 这种后缀），--batches 一次扫多个并发档（--batch N 是单个的简写），--gen 调生成长度，--cache 选缓存场景（cold 冷启不命中 / partial 部分命中 / warm 完全命中，默认三种都测）。扫描按 档位 × 并发 × 缓存 全组合展开，末尾按并发分开给出数字（不同并发的吞吐不可比）。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
+        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes (128 to 1M, k / m suffixes accepted), --batches sweeps several concurrency levels at once (--batch N is the single-value shorthand), --gen tunes generation length, --cache picks the prompt-cache scenarios (cold miss / partial hit / warm hit; all three by default). The sweep expands every context × concurrency × cache combination, and the summary breaks the numbers down per concurrency level (throughput across levels is not comparable). Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
         examples: [
           {
             cmd: "omi benchmark --contexts 1024,4096,8192 --gen 128",
             zh: "只测 1K / 4K / 8K 三档，每次生成 128 token。",
             en: "Benchmark 1K / 4K / 8K only, generating 128 tokens per request.",
+          },
+          {
+            cmd: "omi benchmark --contexts 32k --batches 1,2,4,8 --cache cold",
+            zh: "并发扫描：同一档位下扫 ×1 / ×2 / ×4 / ×8，得到「单流变慢多少、聚合快多少」的曲线。",
+            en: "Concurrency sweep: measure ×1 / ×2 / ×4 / ×8 at one context size to see how much per-stream speed drops while aggregate throughput rises.",
           },
           {
             cmd: "omi benchmark --contexts 8k,32k,128k,1m --gen 64",
@@ -477,7 +482,7 @@ export const CLI_SECTIONS: CliSection[] = [
           { zh: "本地模型走本地推理服务器，云端 id 走云端 API；网关负责 Anthropic ↔ OpenAI 协议翻译。", en: "Local models go to the local server, cloud ids to the cloud API; the gateway translates Anthropic ↔ OpenAI." },
           {
             zh:
-              "`--model` 的云端 id 按「模型云服务」里**所有已启用**厂商匹配（与 GUI 模型选择器同一份清单）。" +
+              "`--model` 的云端 id 按「设置 → 云端模型」里**所有已启用**厂商匹配（与 GUI 模型选择器同一份清单）。" +
               "模型不属于当前默认厂商时，会自动把默认厂商切过去并打印一行提示 —— 网关只往默认厂商发云端请求；" +
               "厂商没启用时直接指出是哪一家，而不是报一句「未找到模型」。",
             en:
@@ -492,6 +497,11 @@ export const CLI_SECTIONS: CliSection[] = [
           { cmd: "omi launch claude --opus <模型> --haiku <模型>", zh: "Claude Code 三个档位分别指定模型。", en: "Give Claude Code's three tiers separate models." },
           { cmd: "omi launch codex --model qwen3-4b-q4_k_m", zh: "按服务名指定模型。", en: "Pick the model by served name." },
           { cmd: "omi launch opencode", zh: "opencode 走内联 provider 配置，不改用户的全局配置。", en: "opencode uses inline provider config, leaving global config untouched." },
+          {
+            cmd: "omi launch chatgpt  ·  omi launch chatgpt --restore",
+            zh: "把当前模型接进 ChatGPT 桌面端（Codex）并打开客户端；--restore 还原 ~/.codex。",
+            en: "Wire the current model into the ChatGPT desktop app (Codex) and open it; --restore puts ~/.codex back.",
+          },
         ],
       },
       {
@@ -504,8 +514,13 @@ export const CLI_SECTIONS: CliSection[] = [
           "opencode uses OPENCODE_CONFIG_CONTENT; openclaw writes ~/.openclaw/openclaw.json; hermes writes ~/.hermes/config.yaml; pi writes ~/.pi/agent/*.json; copilot uses environment variables.",
         notes: [
           {
-            zh: "chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml），然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。",
-            en: "chatgpt rewrites ~/.codex/config.toml (backed up to ~/.codex/backup-omni/config.toml on first write) and opens the desktop app; quit ChatGPT fully (⌘Q) so it re-reads the config.",
+            zh:
+              "chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml）并写 models.json，" +
+              "然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。" +
+              "`omi launch chatgpt --restore` 还原到改写前。",
+            en:
+              "chatgpt rewrites ~/.codex/config.toml (backed up to ~/.codex/backup-omni/config.toml on first write) plus models.json, then opens the desktop app; " +
+              "quit ChatGPT fully (⌘Q) so it re-reads the config. `omi launch chatgpt --restore` puts the original config back.",
           },
           {
             zh: "每次启动的模型 / 端点记录在 ~/.omni/launcher/<工具>.json，方便排查。",

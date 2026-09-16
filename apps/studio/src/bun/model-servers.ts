@@ -3,6 +3,8 @@ import { createServer } from "node:net";
 
 import * as Settings from "./db/settings";
 import { EMBEDDING_PORT_BASE, ENGINE_PORT_KEYS, engineSupportsEmbeddings } from "../shared/engines";
+import { classifyStartupError, type StartupErrorKind } from "../shared/engine-errors";
+import { downloadManager, type DownloadTask } from "./download-manager";
 import { getModelProfile } from "../shared/model-profiles";
 import { dirModelKind, modelNameForPath, resolveRuntimeTarget } from "./model-scan";
 import { listInstalledModels, servedNameForModelPath, slugModelFileName } from "./model-store";
@@ -103,6 +105,9 @@ export function getActiveEmbeddingPort(): number | null {
 function emitChangeNow() {
   changeTimer = null;
   syncActivePort();
+  // 实例集合 / 状态变了就顺手对一次空闲定时器：它是唯一知道「该不该留着定时器」的地方，
+  // 挂在别处（启动、卸载、设置变更）就总要漏掉一条路径。
+  syncIdleTimer();
   const snapshot = getServedModels();
   for (const cb of changeListeners) {
     try {
@@ -130,6 +135,183 @@ export function onServedModelLog(cb: (id: string, text: string) => void): () => 
   return () => {
     logListeners.delete(cb);
   };
+}
+
+// ---------------------------------------------------------------------------
+// 空闲卸载（PERF-01）
+// ---------------------------------------------------------------------------
+
+/**
+ * 「一段时间没人用就把这个模型服务停掉」。
+ *
+ * 动机是显存：本地模型一加载就占着 VRAM/RAM 不放，用户白天试过三四个模型、
+ * 晚上只剩一个在用，另外几个白占着显存。`IMG_MLX_IDLE_MINUTES` 那套在生图
+ * worker 上已经跑了很久，这里把同一件事做到推理服务器层。
+ *
+ * 默认关闭（`SERVER_IDLE_UNLOAD_MINUTES = 0`）：默认打开会把「昨晚还跑着的模型
+ * 今天不见了」变成一个用户无法解释的意外。
+ *
+ * 判据是「最近一次活动」而不是「最近一次启动」。活动有三个来源：
+ *   1. 应用内的推理调用（`recordUsage` / `recordUsageEvent` 都会回来打点，
+ *      后者是网关那一路的收口 —— 外部 agent 的请求也在这里被看见）；
+ *   2. 实例自己的输出有没有变化（引擎每处理一次请求都会打印点什么）；
+ *   3. llama.cpp 的 `/slots` 里有没有 `is_processing`（唯一一个精确的「正在忙」信号，
+ *      因为只有它有这么个口子）。
+ *
+ * 这里**没有**在飞请求计数：「一个请求 = 一个可能持续很久的 SSE 流」，要正确计数就得
+ * 在每一条流的每一个结束路径（正常结束 / 客户端断开 / 引擎报错）上都减回去，
+ * 漏一条就是永久性的"再也不会卸载"。与其放一个读数不准的闸门，不如把局限说清楚 ——
+ * 一个超过整个空闲窗口、中间又不打印任何东西的长请求会被误杀，设置页的说明写明了
+ * 这一点，窗口默认关着，由用户决定值不值得冒。
+ */
+const IDLE_MIN_TICK_MS = 5_000;
+const IDLE_MAX_TICK_MS = 30_000;
+
+type Activity = {
+  lastAt: number;
+  /** 上一次看到的输出尾部；变了就说明引擎还在干活（外部客户端的请求只有这个信号）。 */
+  lastOutputSig: string;
+};
+
+const activity = new Map<string, Activity>();
+let idleTimer: ReturnType<typeof setInterval> | null = null;
+let idleTimerTick = 0;
+
+function activityOf(id: string): Activity {
+  let entry = activity.get(id);
+  if (!entry) {
+    entry = { lastAt: Date.now(), lastOutputSig: "" };
+    activity.set(id, entry);
+  }
+  return entry;
+}
+
+/** 空字符串 / 非法值都当作「关闭」。 */
+function idleUnloadMinutes(): number {
+  const raw = Number(Settings.getSetting("SERVER_IDLE_UNLOAD_MINUTES"));
+  return Number.isFinite(raw) && raw > 0 ? raw : 0;
+}
+
+/** 日志缓冲会被裁剪到 200k，所以只看长度在长时间运行后会失真 —— 带上尾部一起比。 */
+function outputSignature(runtime: Runtime): string {
+  const logs = runtime.getLogs();
+  return `${logs.length}:${logs.slice(-200)}`;
+}
+
+/**
+ * 把「某个模型 id 有活动」记到对应实例上。
+ *
+ * 传进来的通常是请求里的 model id（llama.cpp / vLLM / SGLang 是别名，
+ * MLX 是解析后的绝对路径），也就是实例的 `servedName`；认不出来时记到**活动实例**上 ——
+ * 宁可多留一个进程，也不要在用户正用着的时候把服务停掉。
+ */
+export function markServedActivity(modelOrId: string): void {
+  const id = resolveActivityTarget(modelOrId);
+  if (!id) return;
+  const entry = activityOf(id);
+  entry.lastAt = Date.now();
+}
+
+function resolveActivityTarget(modelOrId: string): string | null {
+  const raw = (modelOrId || "").trim();
+  if (!raw) return getActiveServedId();
+  if (entries.has(raw)) return raw;
+  for (const [id, entry] of entries) {
+    if (entry.info.servedName === raw) return id;
+  }
+  for (const [id, entry] of entries) {
+    if (entry.info.modelRef === raw || entry.info.label === raw) return id;
+  }
+  return getActiveServedId();
+}
+
+/** 在跑的实例一个都没有时不必留着定时器（CLI 场景下它会拖着进程不退）。 */
+function syncIdleTimer() {
+  const anyRunning = [...entries.values()].some((entry) => entry.info.status === "running");
+  if (!anyRunning || idleUnloadMinutes() <= 0) {
+    stopIdleTimer();
+    return;
+  }
+  const windowMs = idleUnloadMinutes() * 60_000;
+  const tick = Math.max(IDLE_MIN_TICK_MS, Math.min(IDLE_MAX_TICK_MS, Math.floor(windowMs / 4)));
+  // 窗口改了（用户刚把 10 分钟调成 1 分钟）就按新节奏重开，否则要等重启才生效。
+  if (idleTimer && idleTimerTick === tick) return;
+  stopIdleTimer();
+  idleTimer = setInterval(() => {
+    void unloadIdleServers();
+  }, tick);
+  idleTimerTick = tick;
+  // 别让这个定时器把进程钉住（CLI / 测试里尤其重要）。
+  idleTimer.unref?.();
+}
+
+function stopIdleTimer() {
+  if (!idleTimer) return;
+  clearInterval(idleTimer);
+  idleTimer = null;
+  idleTimerTick = 0;
+}
+
+/** 探测引擎自己是否正在处理请求（只有 llama.cpp 有 /slots 这个口子）。 */
+async function engineSaysBusy(entry: Entry): Promise<boolean> {
+  if (entry.info.engine !== "llama.cpp") return false;
+  try {
+    const res = await fetch(`http://127.0.0.1:${entry.info.port}/slots`, {
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!res.ok) return false;
+    const slots = (await res.json()) as Array<{ is_processing?: boolean }>;
+    return Array.isArray(slots) && slots.some((slot) => slot?.is_processing === true);
+  } catch {
+    // 探不到就当不忙：真正的忙碌还有在飞计数与输出变化两道兜着。
+    return false;
+  }
+}
+
+/**
+ * 跑一轮空闲检查，返回被卸载的实例 id（测试与日志用）。
+ *
+ * `now` 可注入，测试才能在不睡的提前下把时间推到窗口之后。
+ */
+export async function unloadIdleServers(now = Date.now()): Promise<string[]> {
+  const minutes = idleUnloadMinutes();
+  if (minutes <= 0) return [];
+  const windowMs = minutes * 60_000;
+  const unloaded: string[] = [];
+
+  for (const [id, entry] of [...entries]) {
+    if (entry.info.status !== "running" || entry.stopping) continue;
+    const stat = activityOf(id);
+    // 输出变了 = 引擎还在动。这是外部客户端唯一的可见信号，所以它算活动，
+    // 和 markServedActivity 走同一条时钟；只推「安静时间」而不管空闲时钟的话，
+    // 一个每 9 分钟被打一次的实例会在第 11 分钟被判空闲。
+    const sig = outputSignature(entry.runtime);
+    if (stat.lastOutputSig === "") {
+      // 第一次看到这个实例：只记基线。不然「启动后一直没人用」也要白等一个窗口。
+      stat.lastOutputSig = sig;
+    } else if (sig !== stat.lastOutputSig) {
+      stat.lastOutputSig = sig;
+      stat.lastAt = now;
+      continue;
+    }
+    if (now - stat.lastAt < windowMs) continue;
+    if (await engineSaysBusy(entry)) continue;
+
+    const idleMinutes = Math.round((now - stat.lastAt) / 60_000);
+    logEvent({
+      level: "info",
+      source: "server",
+      event: "served_model.idle_unloaded",
+      message: `空闲 ${idleMinutes} 分钟，自动卸载 ${entry.info.label}`,
+      detail: { id, engine: entry.info.engine, port: entry.info.port, model: entry.info.modelRef },
+    });
+    await stopServedModel(id);
+    activity.delete(id);
+    unloaded.push(id);
+  }
+
+  syncIdleTimer();
+  return unloaded;
 }
 
 /** 稳定 id：引擎 + 加载目标。同一模型换个引擎算另一个实例，避免端口/参数打架。 */
@@ -374,6 +556,58 @@ function clearActiveIf(id: string) {
   if (Settings.getSetting("SERVED_ACTIVE_ID") === id) Settings.updateSettings({ SERVED_ACTIVE_ID: "" });
 }
 
+/**
+ * 失败原因与类型一起写。
+ *
+ * 只有原文的话界面只能照抄一行 `CUDA out of memory`；类型才让界面说得出
+ * 「上下文调小或换更小的量化」。写成一个入口是因为这里有四个失败分支
+ * （状态回调 / start 返回失败 / start 抛异常 / 后续崩溃），漏掉一个就会出现
+ * 「有错误没建议」的实例。
+ */
+function setServedError(info: ServedModelInfo, message: string) {
+  const download = pendingDownloadFor(info);
+  if (download) {
+    // 这一条**只能**由上下文判定：llama.cpp 对「文件没下完」和「架构不认识」说的是
+    // 同一句 `exiting due to model loading error`（实测 Q8_0 下到 3% 时就是这个报错），
+    // 光看原文分不出来。而应用自己知道下载队列里还挂着这个文件 —— 那就直说，
+    // 否则用户会去查架构、换量化、重下模型，全是白费。
+    info.error = `权重还在下载中（${formatDownloadProgress(download)}），现在加载必然失败：${message}`;
+    info.errorKind = "download-incomplete";
+    return;
+  }
+  info.error = message;
+  info.errorKind = classifyStartupError(message);
+}
+
+/** 正在下载 / 排队 / 暂停的任务里有没有这个模型（按文件名匹配，跨进程重启也认）。 */
+function pendingDownloadFor(info: ServedModelInfo): DownloadTask | null {
+  const fileName = info.modelRef.split(/[\\/]/).pop() ?? "";
+  if (!fileName) return null;
+  try {
+    return (
+      downloadManager.list().find(
+        (task) =>
+          task.fileName === fileName &&
+          (task.status === "queued" || task.status === "downloading" || task.status === "paused"),
+      ) ?? null
+    );
+  } catch {
+    // 下载队列读不出来（设置表异常）不该把启动失败的记录也弄丢：按原文分类即可。
+    return null;
+  }
+}
+
+function formatDownloadProgress(task: DownloadTask): string {
+  if (task.percent != null && Number.isFinite(task.percent)) return `${Math.floor(task.percent)}%`;
+  if (task.total) return `${Math.floor((task.received / task.total) * 100)}%`;
+  return "进度未知";
+}
+
+function clearServedError(info: ServedModelInfo) {
+  info.error = undefined;
+  info.errorKind = undefined;
+}
+
 function attachListeners(entry: Entry) {
   const { info, runtime } = entry;
 
@@ -395,18 +629,29 @@ function attachListeners(entry: Entry) {
       info.pid = runtime.getPid();
       if (status === "running") {
         entry.info.startedAt = Date.now();
-        entry.info.error = undefined;
+        clearServedError(entry.info);
       }
       if (status === "error") {
-        entry.info.error = runtime.getLastError() || "Server failed to start";
+        const message = runtime.getLastError() || "Server failed to start";
+        setServedError(entry.info, message);
         // 启动之后才挂掉的（OOM / 权重损坏 / 端口被抢）走这条：
         // 此时日志缓冲里最后一屏就是根因，先记下错误行本身。
+        // 记的是 `info.error`（可能被上下文补过一句结论，比如"权重还在下载中"）——
+        // 日志与界面说同一句话，排查的人不必再自己推一遍；原文留在 detail.raw。
         logEvent({
           level: "error",
           source: "server",
           event: "served_model.crashed",
-          message: entry.info.error,
-          detail: { id: info.id, engine: info.engine, port: info.port, model: info.modelRef },
+          message: entry.info.error ?? message,
+          detail: {
+            raw: message,
+            id: info.id,
+
+            engine: info.engine,
+            port: info.port,
+            model: info.modelRef,
+            kind: entry.info.errorKind,
+          },
         });
       }
       // 自己退出（进程挂了 / 被外部杀掉）：条目留着让 UI 显示原因；
@@ -523,6 +768,8 @@ export async function startServedModel(params: StartParams): Promise<StartServed
   entries.set(id, entry);
   reservedPorts.delete(port);
   attachListeners(entry);
+  // 以启动时刻作为空闲计时的起点：从没被用过的实例也要能在窗口之后被卸载。
+  markServedActivity(id);
   emitChange();
 
   try {
@@ -530,26 +777,36 @@ export async function startServedModel(params: StartParams): Promise<StartServed
     info.pid = runtime.getPid();
     if (!result.ok) {
       info.status = "error";
-      info.error = result.error || "Failed to start server";
+      const message = result.error || "Failed to start server";
+      setServedError(info, message);
       logEvent({
         level: "error",
         source: "server",
         event: "served_model.start.failed",
-        message: info.error,
-        detail: { id, engine, port: info.port, model: info.modelRef, trigger: "startServedModel" },
+        message: info.error ?? message,
+        detail: {
+          raw: message,
+          id,
+          engine,
+          port: info.port,
+          model: info.modelRef,
+          trigger: "startServedModel",
+          kind: info.errorKind,
+        },
       });
       emitChangeNow();
       return { ok: false, error: info.error, model: getServedModel(id) };
     }
   } catch (e) {
     info.status = "error";
-    info.error = e instanceof Error ? e.message : String(e);
+    const message = e instanceof Error ? e.message : String(e);
+    setServedError(info, message);
     logEvent({
       level: "error",
       source: "server",
       event: "served_model.start.threw",
-      message: info.error,
-      detail: { id, engine, port: info.port, model: info.modelRef, error: e },
+      message,
+      detail: { id, engine, port: info.port, model: info.modelRef, error: e, kind: info.errorKind },
     });
     emitChangeNow();
     return { ok: false, error: info.error, model: getServedModel(id) };
@@ -650,6 +907,17 @@ export function getServedModelError(id: string): string {
   const entry = entries.get(id);
   if (!entry) return "";
   return entry.info.error ?? entry.runtime.getLastError();
+}
+
+/**
+ * 条目上记的失败类型（没有错误时为 undefined）。
+ *
+ * 回退链靠它决定「换一个模型有没有用」：条目上没记过（比如等启动结果超时，
+ * 错误是调用方临时拼的）就现算一次，规则表是同一张。
+ */
+export function getServedModelErrorKind(id: string): StartupErrorKind | undefined {
+  const error = getServedModelError(id);
+  return error ? classifyStartupError(error) : undefined;
 }
 
 export function clearServedModelLogs(id: string): void {

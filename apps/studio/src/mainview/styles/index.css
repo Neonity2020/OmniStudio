@@ -333,6 +333,69 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* 音乐 — 正在播放的跳动条 + 封面唱片旋转                                */
+/* ------------------------------------------------------------------ */
+@keyframes music-eq {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.music-eq {
+  transform-origin: 50% 100%;
+  animation: music-eq 0.9s ease-in-out infinite;
+}
+
+@keyframes music-disc {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 黑胶转盘：8s 一圈 —— 真唱机是 1.8s，但屏幕上转那么快像加载图标；
+   再慢（最初的 16s）一眼看上去又像没在动。
+   暂停用 animation-play-state 停在当前角度，而不是回到 0deg：重播一次整个转回去太跳。 */
+.music-disc {
+  animation: music-disc 8s linear infinite;
+}
+.music-disc[data-paused="true"] {
+  animation-play-state: paused;
+}
+
+/* 播放中在唱片背后慢慢呼吸的一圈光晕：不抢眼，但一眼能看出"在放"。 */
+@keyframes music-halo {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.2;
+    transform: scale(1.045);
+  }
+}
+.music-halo {
+  animation: music-halo 3.6s ease-in-out infinite;
+}
+
+/* 单曲播放页的浮入：从下方轻轻推上来（网易云那个页面也是升起来的）。 */
+@keyframes music-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.music-page-in {
+  animation: music-page-in 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ------------------------------------------------------------------ */
 /* 实时语音 — GPT-4o 风格语音球（随声音律动的蓝色光球）                  */
 /* ------------------------------------------------------------------ */
 @keyframes orb-halo {

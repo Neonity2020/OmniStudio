@@ -10,6 +10,16 @@
 > 主屏 `app/music/index.tsx`，主进程 `bun/music-gen.ts`（云端按厂商协议分派：
 > StepFun 异步提交 + 轮询 / MiniMax 同步长请求；本地引擎为预留位），记录表 `music_records`。
 > 下表保留审计当时（13 个）的编号与结论，新菜单尚未走本文档的梳理流程。
+>
+> **增量说明（2026-09-16）**：设置页的「模型」分组重排成 4 条，一条一个问题 ——
+> **模型库**（`app/model-library/`，横向页签：模型市场 / 本地已下载 / 我收藏的模型，默认本地已下载）、
+> **运行模型**（原「本地模型」，`app/local-models/index.tsx`）、**云端模型**（原「模型云服务」，
+> `main-layout/cloud-provider-panel.tsx` + `default-models-panel.tsx`）、**模型引擎**（原「引擎」，
+> `main-layout/engines-tab.tsx`）。「默认模型」与「在线模型市场」两个菜单不再单独存在
+> （分别并进云端模型与模型库的市场页签）。`TAB_DEFS` 里的旧 id 与新 id 都认：外部跳转的
+> `network` / `defaults` → 云端模型，`model` → 运行模型，`store` / `market` → 模型库（后者带市场页签），
+> 映射在 `settings.tsx` 的 `LEGACY_TABS`。本节下文里这两个条目的编号与
+> `store` / `model` / `market` 标签名都是审计当时的写法。
 
 ## 菜单总表
 

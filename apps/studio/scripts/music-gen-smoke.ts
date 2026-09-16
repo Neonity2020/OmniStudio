@@ -364,7 +364,7 @@ async function main() {
     });
     check("本地后端不假装成功", !!r.error && !r.record, r.error ?? "（竟然成功了）");
     check("错误说明是预留位", (r.error ?? "").includes("预留"), r.error ?? "");
-    check("错误指向云端可用的做法", (r.error ?? "").includes("模型云服务"), r.error ?? "");
+    check("错误指向云端可用的做法", (r.error ?? "").includes("云端模型"), r.error ?? "");
 
     const models = MusicGen.listMusicGenModels({ backend: "local" });
     check("本地后端给不出模型清单且说明原因", models.models.length === 0 && !!models.error, models.error ?? "");
@@ -388,12 +388,40 @@ async function main() {
     // 参数校验失败与"本地后端未接入"都在落库前就返回了，不占创作记录。
     check("失败 2 条", failedRows.length === 2, String(failedRows.length));
 
+    // ---------- 歌单接线 ----------
+    // "新歌自动进默认歌单"与"删作品时清掉歌单成员关系"是两处跨模块的接线，
+    // 断了只看创作记录是发现不了的（歌单里会少歌 / 留空位）。
+    const Playlists = await import("../src/bun/music-playlists");
+    const defaultPlaylist = Playlists.listMusicPlaylists().find((p) => p.builtin);
+    check("默认歌单存在", !!defaultPlaylist);
+    const inDefault = Playlists.listMusicPlaylistRecordIds(defaultPlaylist!.id);
+    check(
+      "新生成的作品自动进默认歌单",
+      list.every((r) => inDefault.includes(r.id)),
+      `歌单 ${inDefault.length} 首 / 记录 ${list.length} 条`,
+    );
+    check(
+      "歌单曲目与创作记录一一对应（没有悬空条目）",
+      inDefault.length === list.length,
+      `歌单 ${inDefault.length} / 记录 ${list.length}`,
+    );
+    // 曲目行按歌单顺序拼装，且悬空 id 会被丢掉（这里全部有效，所以数量应相等）。
+    const tracks = MusicGen.listMusicPlaylistRecords(defaultPlaylist!.id);
+    check(
+      "歌单曲目页能取到完整记录行且顺序与歌单一致",
+      tracks.length === inDefault.length && tracks.every((r, i) => r.id === inDefault[i]),
+    );
+
     const target = done[0]!;
     const ref = target.audioUrl!.replace(MEDIA_BASE, "");
     const abs = path.join(getImagesBaseDir(), ref);
     MusicGen.deleteMusicRecord(target.id);
     check("删除后文件清理", !existsSync(abs));
     check("删除后列表减少", MusicGen.listMusicRecords().length === list.length - 1);
+    check(
+      "删除后歌单里也没有它",
+      !Playlists.listMusicPlaylistRecordIds(defaultPlaylist!.id).includes(target.id),
+    );
   }
 
   stepfun.stop(true);

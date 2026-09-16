@@ -1,5 +1,5 @@
 import { MODEL_PROFILES } from "@/shared/model-profiles";
-import { CLOUD_PRESETS } from "@/shared/cloud-providers";
+import { CLOUD_PRESETS, presetApiKeyUrl } from "@/shared/cloud-providers";
 import type { ModelCandidates } from "@/shared/hardware";
 import type { InferenceEngine } from "@/shared/modelscope";
 
@@ -10,8 +10,8 @@ export const REMOTE_PROFILES = [
 
 /**
  * 引导界面「URL 模式」的服务商列表：单一数据源在 shared/cloud-providers.ts
- * （与「模型云服务」页共用），末尾追加「自定义」占位项。
- * 选择服务商后只需填入 API Key，Base URL 自动带出（仍可手动修改）；
+ * （与「模型云服务」页共用同一份内置目录），末尾追加「自定义」占位项。
+ * 选择服务商后只需填入 API Key，Base URL 自动带出且**不可修改**；
  * 列表末尾的“自定义”才需要手动输入完整 URL。
  */
 export type RemoteProvider = {
@@ -26,6 +26,8 @@ export type RemoteProvider = {
   models: string[];
   /** 简短备注（免费额度 / 需要额外操作等） */
   note?: string;
+  /** 控制台创建 API Key 的页面（引导页「获取密钥」直达）。 */
+  apiKeyUrl?: string;
 };
 
 export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
@@ -36,6 +38,7 @@ export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
     baseUrl: p.baseUrl,
     models: [...p.models],
     note: p.note,
+    apiKeyUrl: presetApiKeyUrl(p),
   })),
   {
     id: "custom",
@@ -170,11 +173,16 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
 
 /**
  * 把引导页的模型表翻译成内存估算需要的形状（权重档位 + 架构常数）。
- * MLX 预设只有仓库名、没有体积信息，返回空 —— 那条路上不显示「约占多少内存」，
- * 好过编一个数字出来。
+ *
+ * 两条口径：**llama.cpp** 按 GGUF 量化档（4B 上 Q4_K_M 只有 2.7GB）；**vLLM / SGLang /
+ * MLX** 直接吃 bf16 safetensors，没有量化档可挑，只有"整仓库"这一档。
+ *
+ * MLX 以前返回空数组（理由是"预设只有仓库名、没有体积信息"）—— 而它当时唯一的两个
+ * 预设是两个 DeepSeek 大 MoE，界面上因此永远把那一个标成"推荐"，32GB 的机器也被推
+ * 一个装不下的模型。现在 MLX 和 vLLM 走同一份千问模型表（HF safetensors，mlx-lm
+ * 直接加载），推荐就跟着内存走了。
  */
 export function setupModelCandidates(engine: InferenceEngine): ModelCandidates[] {
-  if (engine === "mlx") return [];
   return SETUP_MODELS.map((model) => ({
     id: model.id,
     paramsB: model.paramsB,
@@ -182,7 +190,7 @@ export function setupModelCandidates(engine: InferenceEngine): ModelCandidates[]
     variants:
       engine === "llama.cpp"
         ? model.quants.map((q) => ({ name: q.name, sizeBytes: q.size }))
-        : // vLLM / SGLang 直接吃 bf16 safetensors，没有量化档位可挑。
+        : // bf16 safetensors 的整仓库体积（与 vLLM / SGLang 同一口径）
           [{ name: "BF16", sizeBytes: model.hfSizeBytes }],
     defaultQuant: engine === "llama.cpp" ? model.defaultQuant : "BF16",
   }));

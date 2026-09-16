@@ -6,7 +6,7 @@ import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
-import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
+import { MAX_LOG_CHARS, killProcessTree, probeCommand, pumpServerOutput, spawnServerProcess } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
@@ -95,15 +95,10 @@ export class VllmRuntime implements Runtime {
     // Check for python -m vllm
     const pythonPath = Bun.which("python3") ?? Bun.which("python");
     if (pythonPath) {
-      try {
-        const proc = Bun.spawn([pythonPath, "-m", "vllm", "--help"], {
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        const exited = await waitExit(proc, 5000);
-        if (exited) return { found: true, path: pythonPath, mode: "python" };
-      } catch {
-        // not available
+      // 退出码为 0 才算数（`python3 -m vllm --help` 在没有 vllm 时退出码 1）：
+      // 只判"进程退出了"会让任何一台装了 python3 的机器都报"已安装"。
+      if (await probeCommand([pythonPath, "-m", "vllm", "--help"], 5000)) {
+        return { found: true, path: pythonPath, mode: "python" };
       }
     }
 

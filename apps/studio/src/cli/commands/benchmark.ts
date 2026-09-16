@@ -6,7 +6,15 @@ import { printTable } from "../format";
 import { pickNumbered } from "../tui";
 import { resolveDataDir } from "../data-dir";
 import { modelNameFromRef } from "../../shared/modelscope";
-import { cacheComparison, fmtCtx, parseCacheModes, parseContexts, type BenchmarkCacheMode } from "../../shared/benchmark";
+import {
+  batchSizesFromParams,
+  cacheComparison,
+  fmtCtx,
+  parseBatchSizes,
+  parseCacheModes,
+  parseContexts,
+  type BenchmarkCacheMode,
+} from "../../shared/benchmark";
 import type {
   BenchmarkRecordRow,
   BenchmarkRunState,
@@ -81,7 +89,7 @@ async function listProviders(): Promise<{ providers: ProviderLite[]; activeId: s
 async function resolveProvider(arg: string | boolean): Promise<ProviderLite | null> {
   const { providers, activeId } = await listProviders();
   if (providers.length === 0) {
-    console.error("还没有云服务商，请先在应用「设置 → 网络」里添加。");
+    console.error("还没有云服务商，请先在应用「设置 → 云端模型」里启用一家。");
     return null;
   }
 
@@ -125,27 +133,28 @@ function printRowLine(r: SpeedBenchRow) {
   const cache = r.cache ? `${CACHE_LABEL[r.cache]} ` : "";
   // 没测出来的档位也打一行（红字 + 原因）：档位扫描的结论常常就在"墙在哪一档"。
   if (r.ok === 0) {
-    console.log(`  \x1b[31m✗ ${fmtCtx(r.contextLength)} ${cache} 失败\x1b[0m  ${r.error ?? ""}`);
+    console.log(`  \x1b[31m✗ ${fmtCtx(r.contextLength)} ×${r.batchSize} ${cache} 失败\x1b[0m  ${r.error ?? ""}`);
     return;
   }
   const fails = r.fails > 0 ? ` \x1b[31m失败 ${r.fails}\x1b[0m` : "";
   const truncated = r.truncated ? ` \x1b[33m输入被截断（${r.promptTokens} tok）\x1b[0m` : "";
   console.log(
-    `  ✓ ${fmtCtx(r.contextLength)} ${cache} ttft ${r.ttftMs}ms  tpot ${r.tpotMs}ms  tps \x1b[36m${r.tps}\x1b[0m  聚合 ${r.aggTps}  prefill ${r.prefillTps}${fails}${truncated}`,
+    `  ✓ ${fmtCtx(r.contextLength)} ×${r.batchSize} ${cache} ttft ${r.ttftMs}ms  tpot ${r.tpotMs}ms  tps \x1b[36m${r.tps}\x1b[0m  聚合 ${r.aggTps}  prefill ${r.prefillTps}${fails}${truncated}`,
   );
 }
 
-/** 缓存对比：同档位下"冷启 → 部分命中 → 完全命中"的 TTFT 变化。 */
+/** 缓存对比：同一 档位 × 并发 下"冷启 → 部分命中 → 完全命中"的 TTFT 变化。 */
 function printCacheComparison(rows: SpeedBenchRow[]) {
   const entries = cacheComparison(rows).filter(
     (c) => (c.cold ? 1 : 0) + (c.partial ? 1 : 0) + (c.warm ? 1 : 0) > 1,
   );
   if (entries.length === 0) return;
-  console.log("\n缓存命中对比（倍数 = 冷启 TTFT ÷ 命中 TTFT）");
+  console.log("\n缓存命中对比（倍数 = 冷启 TTFT ÷ 命中 TTFT，同一并发内比较）");
   printTable(
-    ["上下文", "冷启(ms)", "部分命中(ms)", "完全命中(ms)", "部分×", "命中×", "服务端复用"],
+    ["上下文", "并发", "冷启(ms)", "部分命中(ms)", "完全命中(ms)", "部分×", "命中×", "服务端复用"],
     entries.map((c) => [
       fmtCtx(c.contextLength),
+      `×${c.batchSize}`,
       c.cold ? String(c.cold.ttftMs) : "-",
       c.partial ? String(c.partial.ttftMs) : "-",
       c.warm ? String(c.warm.ttftMs) : "-",
@@ -167,16 +176,18 @@ function printCacheComparison(rows: SpeedBenchRow[]) {
 function printResult(state: BenchmarkRunState) {
   const statusText =
     state.status === "done" ? "\x1b[32m完成\x1b[0m" : state.status === "cancelled" ? "已取消" : `\x1b[31m失败\x1b[0m`;
+  const batchSizes = batchSizesFromParams(state.params);
   // 老记录里可能存着 MLX 的路径型请求 id：终端里也一律显示模型名。
   console.log(
-    `\n${statusText}  ${modelNameFromRef(state.model)}  [${targetLabel(state)}]  ${state.params.genLength} tok × 并发 ${state.params.batchSize}`,
+    `\n${statusText}  ${modelNameFromRef(state.model)}  [${targetLabel(state)}]  ${state.params.genLength} tok · 并发 ${batchSizes.map((b) => `×${b}`).join(" / ")}`,
   );
   if (state.error) console.log(`错误：${state.error}`);
   if (state.stopped) {
+    const at = `${fmtCtx(state.stopped.contextLength)}${state.stopped.batchSize != null ? ` ×${state.stopped.batchSize}` : ""}`;
     console.log(
       state.stopped.reason === "context-overflow"
-        ? `注意：${fmtCtx(state.stopped.contextLength)} 档超出服务端上下文窗口，更大的档位已跳过。`
-        : `注意：${fmtCtx(state.stopped.contextLength)} 档请求超时，更大的档位只会更慢，已跳过。`,
+        ? `注意：${at} 档超出服务端上下文窗口，更大的档位已跳过。`
+        : `注意：${at} 档请求超时，更大的档位只会更慢，已跳过。`,
     );
   }
 
@@ -187,12 +198,29 @@ function printResult(state: BenchmarkRunState) {
     console.log(
       `平均 ${s.avgTps} tok/s · 峰值 ${s.peakTps} · 最佳 TTFT ${s.bestTtftMs}ms · 峰值并发 ${s.peakAggTps} · 峰值 prefill ${s.peakPrefillTps} · 共 ${s.totalTokens.toLocaleString()} tok${basis}`,
     );
+    // 不同并发的吞吐不可比：扫了多个并发就按并发分开再列一遍（上面的均值是混算的）。
+    if (s.byBatch && s.byBatch.length > 1) {
+      console.log("按并发对比（上面的平均值是跨并发混算的）");
+      printTable(
+        ["并发", "平均TPS", "峰值TPS", "峰值聚合TPS", "平均TTFT(ms)", "平均TPOT(ms)", "档位"],
+        s.byBatch.map((b) => [
+          `×${b.batchSize}`,
+          String(b.avgTps),
+          String(b.peakTps),
+          String(b.peakAggTps),
+          String(b.avgTtftMs),
+          String(b.avgTpotMs),
+          String(b.rows),
+        ]),
+      );
+    }
   }
   if (state.rows.length > 0) {
     printTable(
-      ["上下文", "缓存", "输入tok", "TTFT(ms)", "TPOT(ms)", "TPS", "聚合TPS", "Prefill", "输出tok", "成功"],
+      ["上下文", "并发", "缓存", "输入tok", "TTFT(ms)", "TPOT(ms)", "TPS", "聚合TPS", "Prefill", "输出tok", "成功"],
       state.rows.map((r) => [
         fmtCtx(r.contextLength),
+        `×${r.batchSize}`,
         r.cache ? CACHE_LABEL[r.cache] : "-",
         String(r.promptTokens),
         String(r.ttftMs),
@@ -240,7 +268,7 @@ async function startRun(params: {
   model: string;
   providerId?: string;
   genLength?: number;
-  batchSize?: number;
+  batchSizes?: number[];
   contexts?: number[];
   cacheModes?: BenchmarkCacheMode[];
 }): Promise<RunHandle | { error: string }> {
@@ -308,7 +336,14 @@ export async function cmdBenchmark(parsed: ParsedArgs): Promise<void> {
   }
 
   const genLength = Number(optString(parsed.options, "gen")) || undefined;
-  const batchSize = Number(optString(parsed.options, "batch")) || undefined;
+  // --batches 一次扫多个并发档（`--batches 1,2,4`）；--batch N 是单个的简写。
+  const batchesRaw = optString(parsed.options, "batches");
+  const singleBatch = optString(parsed.options, "batch");
+  const batchSizes = batchesRaw !== undefined
+    ? parseBatchSizes(batchesRaw)
+    : singleBatch !== undefined
+      ? parseBatchSizes(singleBatch)
+      : undefined;
   // --contexts 接受裸数字与 k / m 后缀：`--contexts 8k,32k,1m`（上限 1M，超了会被夹住）。
   const contextsRaw = optString(parsed.options, "contexts");
   const contexts = contextsRaw ? parseContexts(contextsRaw) : undefined;
@@ -318,13 +353,14 @@ export async function cmdBenchmark(parsed: ParsedArgs): Promise<void> {
 
   const target = provider ? `${provider.name} · ${model || "默认模型"}` : model || "当前活动模型";
   const cacheLabel = cacheModes ? `，缓存 ${cacheModes.map((m) => CACHE_LABEL[m]).join("/")}` : "";
-  console.log(`基准测速 → ${target}${contexts ? `（${contexts.map(fmtCtx).join(" / ")}）` : ""}${cacheLabel}`);
+  const batchLabel = batchSizes ? `，并发 ${batchSizes.map((b) => `×${b}`).join(" / ")}` : "";
+  console.log(`基准测速 → ${target}${contexts ? `（${contexts.map(fmtCtx).join(" / ")}）` : ""}${batchLabel}${cacheLabel}`);
 
   const started = await startRun({
     model,
     providerId: provider?.id,
     genLength,
-    batchSize,
+    batchSizes,
     contexts,
     cacheModes,
   });
@@ -362,9 +398,10 @@ export async function cmdBenchmark(parsed: ParsedArgs): Promise<void> {
       for (; printedRows < state.rows.length; printedRows++) printRowLine(state.rows[printedRows]!);
       if (state.status !== "running") break;
       if (isTTY) {
-        const { done, total, phase, currentContext } = state.progress;
+        const { done, total, phase, currentContext, currentBatch } = state.progress;
         const phaseText = phase === "warmup" ? "预热" : "测量";
-        process.stdout.write(`\r\x1b[2m[${done}/${total}] ${currentContext ? fmtCtx(currentContext) : ""} ${phaseText}…\x1b[0m   `);
+        const at = currentContext ? `${fmtCtx(currentContext)}${currentBatch ? ` ×${currentBatch}` : ""}` : "";
+        process.stdout.write(`\r\x1b[2m[${done}/${total}] ${at} ${phaseText}…\x1b[0m   `);
         progressShown = true;
       }
       await sleep(800);

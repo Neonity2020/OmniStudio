@@ -24,6 +24,8 @@ export const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SERVER_UBATCH_SIZE", labelKey: "models.params.ubatch" },
     { key: "SERVER_TEMP", labelKey: "models.params.temp", step: "0.1" },
     { key: "SERVER_TOP_P", labelKey: "models.params.topP", step: "0.05" },
+    { key: "SERVER_TOP_K", labelKey: "models.params.topK" },
+    { key: "SERVER_REPEAT_PENALTY", labelKey: "models.params.repeatPenalty", step: "0.01" },
     { key: "SERVER_GPU_LAYERS", labelKey: "models.params.gpuLayers" },
     {
       key: "SERVER_CACHE_TYPE_K",
@@ -63,6 +65,16 @@ export const PIPELINE_FIELDS: ParamNumberField[] = [
   { key: "MAX_VLLM_RETRIES", labelKey: "models.params.retries" },
   { key: "MAX_VLLM_FAILURE_RETRIES", labelKey: "models.params.failureRetries" },
   { key: "PAGE_CONCURRENCY", labelKey: "models.params.pageConcurrency" },
+];
+
+/**
+ * 服务生命周期参数（与引擎无关，四种本地引擎共用一条）。
+ *
+ * 放在这里而不是按引擎列，是因为它管的是「进程还要不要活着」，跟引擎怎么启动无关；
+ * 塞进 vLLM / SGLang 那几列反而会说出一个假事实 —— 好像只有那个引擎会空闲卸载。
+ */
+export const LIFECYCLE_FIELDS: ParamNumberField[] = [
+  { key: "SERVER_IDLE_UNLOAD_MINUTES", labelKey: "models.params.idleUnload" },
 ];
 
 /** 数字参数输入：编辑中不写库，失焦 / Enter 时提交（下次启动生效）。 */
@@ -174,6 +186,23 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
             <span className="text-[11px] text-muted-foreground">{t("models.params.pipeline")}</span>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {PIPELINE_FIELDS.map((f) => (
+                <ParamInput
+                  key={f.key}
+                  label={t(f.labelKey)}
+                  value={settings[f.key] ?? ""}
+                  onCommit={(v) => commit({ [f.key]: v })}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2 border-t pt-3">
+            <span className="text-[11px] text-muted-foreground">{t("models.params.lifecycle")}</span>
+            <p className="text-[10px] leading-relaxed text-muted-foreground/70">
+              {t("models.params.idleUnloadHint")}
+            </p>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+              {LIFECYCLE_FIELDS.map((f) => (
                 <ParamInput
                   key={f.key}
                   label={t(f.labelKey)}

@@ -1,6 +1,9 @@
 import { afterAll, expect, mock, test } from "bun:test";
 
 import {
+  CLOUD_PRESETS,
+  getPreset,
+  isBuiltinBaseUrl,
   providersForType,
   providerModelsOfType,
   modelTypeOf,
@@ -347,12 +350,14 @@ test("预设新增的模型会补进存量厂商行（阶跃语音线：老用�
   // 存量库里那一行是当初拷贝下来的快照（只有两个对话模型）。厂商后来上了语音线，
   // 预设跟着版本走 —— 不补的话，语音页 / 通话页对老用户就是一片空白，
   // 只能自己去设置页点「获取模型列表」在几百条远程模型里挑。
-  const res = CloudProviders.createCloudProvider({ presetId: "stepfun" });
-  expect(res.ok).toBe(true);
-  const id = res.id!;
-  created.push(id);
-  // 模拟老行：语音线的模型一条都没有。
-  CloudProviders.updateCloudProvider(id, { models: [{ id: "step-1-8k" }, { id: "step-1-flash" }] });
+  //
+  // 内置厂商现在安装即入驻（ensureBuiltinProviders），"还没配过的存量行"只能在
+  // 入驻之后人为还原：把清单改回那份老快照。
+  const id = stepfunRowId();
+  const trimmed = CloudProviders.updateCloudProvider(id, {
+    models: [{ id: "step-1-8k" }, { id: "step-1-flash" }],
+  });
+  expect(trimmed.ok).toBe(true);
 
   const info = CloudProviders.listCloudProviders().providers.find((p) => p.id === id)!;
   const ids = info.models.map((m) => m.id);
@@ -473,13 +478,14 @@ test("保存厂商：地址栏粘成 API Key 时当场拒绝，而不是回一�
 // 两半拼不上，而且不报错、不打日志，只能靠人肉发现选择器是空的。
 // ---------------------------------------------------------------------------
 
-/** 拿 stepfun 预设行（前面用例可能已经建过），并把它交回 afterAll 清理。 */
+/** 拿 stepfun 预设行（内置行安装即入驻；用例跑之前可能还没触发过入驻）。 */
 function stepfunRowId(): string {
   const existing = CloudProviders.listCloudProviders().providers.some((p) => p.id === "stepfun");
   if (!existing) {
     const r = CloudProviders.createCloudProvider({ presetId: "stepfun" });
     expect(r.ok).toBe(true);
   }
+  // 内置行删不掉（deleteCloudProvider 会拒），这里登记只是让 afterAll 的清理意图完整。
   if (!created.includes("stepfun")) created.push("stepfun");
   return "stepfun";
 }
@@ -522,4 +528,138 @@ test("自定义厂商（没有预设）不被补协议：没声明过协议就�
   const row = providers.find((p) => p.id === id);
   expect(row?.musicApi).toBe("");
   expect(row?.videoApi).toBe("");
+});
+
+// ---------------------------------------------------------------------------
+// 内置厂商目录：装完就整份列在「模型云服务」里，用户只填 Key
+//
+// 以前要先去「添加服务商」从预设网格里挑一家，现在安装即入驻；代价是两条新规矩
+// 必须钉住 —— 内置行的**地址由应用维护**（界面上只读、写库被拒）、**不能删除**
+// （删了下次读取还会原样入驻），否则用户会把地址改成自己的中转却改不回来。
+// ---------------------------------------------------------------------------
+
+test("内置厂商安装即入驻：国内主流厂商一个不少，默认未启用、带着预设模型", () => {
+  const { providers } = CloudProviders.listCloudProviders();
+  const ids = providers.map((p) => p.id);
+  for (const id of [
+    "deepseek",
+    "qwen-dashscope",
+    "zhipu",
+    "moonshot",
+    "doubao",
+    "baidu",
+    "hunyuan",
+    "minimax",
+    "spark",
+    "stepfun",
+    "siliconflow",
+  ]) {
+    expect(ids).toContain(id);
+  }
+  expect(providers.length).toBeGreaterThanOrEqual(CLOUD_PRESETS.length);
+
+  // 刚入驻的行：没有 Key、没有启用 —— 用户要做的只有"填 Key"这一件事。
+  const deepseek = providers.find((p) => p.id === "deepseek")!;
+  expect(deepseek.apiKey).toBe("");
+  expect(deepseek.enabled).toBe(false);
+  expect(deepseek.baseUrl).toBe(getPreset("deepseek")!.baseUrl);
+  expect(deepseek.models.map((m) => m.id)).toEqual(["deepseek-chat", "deepseek-reasoner"]);
+
+  // 列表顺序跟内置目录一致：同一批入驻的行 createdAt 相同，不按目录排就是随机顺序。
+  updateSettings({ CLOUD_PROVIDER: "" });
+  const builtinIds = CloudProviders.listCloudProviders()
+    .providers.filter((p) => getPreset(p.id))
+    .map((p) => p.id);
+  expect(builtinIds).toEqual(CLOUD_PRESETS.map((p) => p.id));
+});
+
+test("内置厂商地址只读：改地址被拒，库里原样；自定义服务商不受影响", () => {
+  expect(CloudProviders.updateCloudProvider("deepseek", { baseUrl: "https://my-relay.example/v1" })).toMatchObject(
+    { ok: false },
+  );
+  expect(CloudProviders.getCloudProviderInfo("deepseek")!.baseUrl).toBe("https://api.deepseek.com/v1");
+
+  // 自定义行（自建网关 / 中转）照旧可改 —— 内置地址锁不该顺手把所有地址都锁上。
+  const custom = makeProvider({ name: "自建网关", baseUrl: "https://gw.example/v1" });
+  expect(CloudProviders.updateCloudProvider(custom, { baseUrl: "https://gw2.example/v1" }).ok).toBe(true);
+
+  // 密钥 / 模型这些该改的仍然能改（锁的只是地址）。
+  expect(CloudProviders.updateCloudProvider("deepseek", { apiKey: "sk-ds" }).ok).toBe(true);
+  expect(CloudProviders.getCloudProviderInfo("deepseek")!.apiKey).toBe("sk-ds");
+});
+
+test("内置厂商不能被删除（删了下一次读取还会原样入驻，等于删了个寂寞）", () => {
+  const res = CloudProviders.deleteCloudProvider("deepseek");
+  expect(res.ok).toBe(false);
+  expect(res.error).toContain("内置厂商");
+  expect(CloudProviders.getCloudProviderInfo("deepseek")).not.toBeNull();
+
+  // 自定义：删得掉。
+  const custom = makeProvider({ name: "临时网关", baseUrl: "https://temp.example/v1" });
+  expect(CloudProviders.deleteCloudProvider(custom).ok).toBe(true);
+  expect(CloudProviders.getCloudProviderInfo(custom)).toBeNull();
+});
+
+test("地址被改过的内置行不再锁（老版本允许改地址，用户的中转必须还能改回来）", () => {
+  // 纯规则：预设里的地址（含尾斜杠 / 大小写差异）算"内置地址"。
+  expect(isBuiltinBaseUrl({ id: "deepseek", baseUrl: "https://api.deepseek.com/v1" })).toBe(true);
+  expect(isBuiltinBaseUrl({ id: "deepseek", baseUrl: "https://api.deepseek.com/v1/" })).toBe(true);
+  expect(isBuiltinBaseUrl({ id: "deepseek", baseUrl: "HTTPS://API.DeepSeek.com/v1" })).toBe(true);
+  // 用户改过的（指向自己的中转）不算：那一行必须继续可编辑，否则他既改不回来也用不了。
+  expect(isBuiltinBaseUrl({ id: "deepseek", baseUrl: "https://my-relay.example/v1" })).toBe(false);
+  // 自定义服务商从来不在锁的范围内。
+  expect(isBuiltinBaseUrl({ id: "custom-1757000000000", baseUrl: "https://anything.example/v1" })).toBe(false);
+});
+
+test("引导页那种「选厂商 + 填 Key」：一步落进厂商表、启用并激活", async () => {
+  updateSettings({ CLOUD_PROVIDER: "", SERVER_MODE: "local", VLLM_MODEL_NAME: "", CHAT_MODEL: "" });
+  globalThis.fetch = mock(
+    async () =>
+      new Response(JSON.stringify({ data: [{ id: "deepseek-chat" }, { id: "deepseek-reasoner" }] }), {
+        status: 200,
+      }),
+  ) as never;
+
+  const res = await CloudProviders.configureCloudProvider({
+    providerId: "deepseek",
+    apiKey: "sk-ds-setup",
+    model: "deepseek-chat",
+  });
+  expect(res.ok).toBe(true);
+  expect(res.id).toBe("deepseek");
+
+  const info = CloudProviders.getCloudProviderInfo("deepseek")!;
+  expect(info.enabled).toBe(true);
+  expect(info.apiKey).toBe("sk-ds-setup");
+  // 激活 = 写回老槽位：网关 / CLI / 集成选择器读的还是这几个键，不用感知新表。
+  expect(getSetting("CLOUD_PROVIDER")).toBe("deepseek");
+  expect(getSetting("SERVER_MODE")).toBe("remote");
+  expect(getSetting("VLLM_API_BASE")).toBe("https://api.deepseek.com/v1");
+  expect(getSetting("VLLM_API_KEY")).toBe("sk-ds-setup");
+  expect(getSetting("VLLM_MODEL_NAME")).toBe("deepseek-chat");
+});
+
+test("引导页填自定义地址：同一台网关复用同一行，已经挑过的模型不被冲掉", async () => {
+  globalThis.fetch = mock(
+    async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+  ) as never;
+
+  const first = await CloudProviders.configureCloudProvider({
+    baseUrl: "https://relay.example/v1",
+    apiKey: "sk-relay-a",
+    model: "qwen-max",
+  });
+  expect(first.ok).toBe(true);
+  created.push(first.id!);
+
+  // 地址只差一个尾斜杠：还是同一台网关，不该再多出一行。
+  const second = await CloudProviders.configureCloudProvider({
+    baseUrl: "https://relay.example/v1/",
+    apiKey: "sk-relay-b",
+  });
+  expect(second.id).toBe(first.id);
+
+  const info = CloudProviders.getCloudProviderInfo(first.id!)!;
+  expect(info.apiKey).toBe("sk-relay-b");
+  expect(info.models.map((m) => m.id)).toContain("qwen-max");
 });

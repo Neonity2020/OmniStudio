@@ -21,37 +21,25 @@ export const COMFY_SIZES: Record<string, { width: number; height: number }> = {
 
 /** 时长范围按接口协议给：云端厂商在设置里选了 MiniMax / Seedance 协议。 */
 export const DURATION_RANGE: Record<"minimax" | "seedance" | "comfyui", { min: number; max: number }> = {
-  minimax: { min: 6, max: 10 },
+  // MiniMax v2（H3 系）逐秒可选：H3 是 4~15 秒、H3-Max 是 5~15 秒，这里按宽的那档给滑块，
+  // 提交前后端再按模型夹一次（选 H3-Max 又停在 4 秒时会被抬到 5 秒）。
+  minimax: { min: 4, max: 15 },
   seedance: { min: 3, max: 12 },
   comfyui: { min: 3, max: 15 },
 };
 
-/**
- * 有固定档位的协议用按钮选、不给滑块：MiniMax 的 Hailuo 系只认 6 / 10 秒，
- * 滑块停在 7、8、9 秒就是等着上游回参数错误（视频那边也会再收敛一次）。
- */
-export const DURATION_OPTIONS: Partial<Record<"minimax" | "seedance" | "comfyui", number[]>> = {
-  minimax: [6, 10],
-};
-
-/** 把时长收敛到该协议合法的档位：有固定档位取最近的（等距取长的那档），没有就按 range 夹。 */
+/** 把时长收敛到该协议合法的区间（三家都是连续秒数，没有离散档位）。 */
 export function snapDuration(
   protocol: "minimax" | "seedance" | "comfyui",
   seconds: number,
 ): number {
-  const options = DURATION_OPTIONS[protocol];
-  if (options?.length) {
-    return options.reduce(
-      (best, cur) => (Math.abs(cur - seconds) <= Math.abs(best - seconds) ? cur : best),
-      options[0]!,
-    );
-  }
   const range = DURATION_RANGE[protocol];
   return Math.min(Math.max(Math.round(seconds), range.min), range.max);
 }
 
 export const RESOLUTIONS: Record<"minimax" | "seedance", string[]> = {
-  minimax: ["768P", "1080P", "720P"],
+  // MiniMax v2 只有这三档（H3 吃 768P / 2K，H3-Max 吃 480P / 768P，768P 是共同档）
+  minimax: ["768P", "2K", "480P"],
   seedance: ["480p", "720p", "1080p"],
 };
 
@@ -87,7 +75,7 @@ export function formatTime(ts: number): string {
 
 export function downloadVideo(url: string, record: VideoRecordRow) {
   const ext = url.split("?")[0]!.split(".").pop() || "mp4";
-  void rpcClient.saveImageToDownloads({
+  return rpcClient.saveImageToDownloads({
     url,
     filename: `video-${record.id}-${Date.now()}.${ext}`,
   });

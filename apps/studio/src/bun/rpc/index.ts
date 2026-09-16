@@ -44,6 +44,7 @@ import type { ServerStatus } from "../server-manager";
 import * as Served from "../model-servers";
 import type { ServedModelInfo, ServedModelsSnapshot } from "../../shared/served-models";
 import type { InferenceEngine } from "../../shared/engines";
+import type { StartupErrorKind } from "../../shared/engine-errors";
 import * as Gateway from "../gateway";
 import type { GatewayStatus } from "../gateway";
 import * as GatewayKeys from "../gateway-keys";
@@ -53,6 +54,15 @@ import type { TunnelInfo } from "../tunnel";
 import * as Cloudflared from "../cloudflared";
 import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
 import * as EngineInstall from "../engine-install";
+import * as EngineCatalog from "../engine-catalog";
+import type {
+  LocalEngineId,
+  LocalEngineStatus,
+} from "../../shared/local-engines";
+import type {
+  LocalEngineInstallResult,
+  LocalEngineUninstallResult,
+} from "../engine-catalog";
 import * as Chat from "../chat";
 import type { Conversation, ChatMessage, ChatStats } from "../chat";
 import * as Agent from "../agent";
@@ -240,6 +250,10 @@ import type {
   MusicTask,
   MusicOutputFormat,
 } from "../music-gen";
+import * as Playlists from "../music-playlists";
+import type { MusicPlaylistSummary } from "../music-playlists";
+import * as MusicLyrics from "../music-lyrics";
+import * as MusicCovers from "../music-covers";
 import * as PromptLib from "../prompt-library";
 import * as Up from "../user-prompt";
 import * as MlxGen from "../mlx-gen";
@@ -490,6 +504,20 @@ export type AppRPC = {
         params: { id: string; enabled: boolean };
         response: { ok: boolean; error?: string; modelCount?: number };
       };
+      /**
+       * 「选厂商 + 填 Key」一步落地：内置厂商用预设行、自定义按地址复用或新建，
+       * 校验密钥后启用并激活（写回 VLLM_* 槽位）。引导页 URL 模式用它收尾。
+       */
+      cloudProviderConfigure: {
+        params: {
+          providerId?: string;
+          name?: string;
+          baseUrl?: string;
+          apiKey: string;
+          model?: string;
+        };
+        response: { ok: boolean; id?: string; error?: string };
+      };
       /** 按已保存的地址 + 密钥探测服务商（设置页「校验密钥」）。 */
       cloudProviderProbe: {
         params: { id: string };
@@ -524,6 +552,27 @@ export type AppRPC = {
         params: { engine: InferenceEngine };
         response: { ok: boolean; error?: string; version?: string };
       };
+      /**
+       * 本地引擎的统一管理（设置 → 模型引擎）：文本推理四个引擎 + whisper.cpp / audio.cpp /
+       * PaddleOCR / Tesseract / mflux / cloudflared 的状态、安装（升级）与卸载。
+       * 安装过程同样走 engineInstallLog / engineInstallPhase 推送。
+       */
+      listLocalEngines: {
+        params: undefined;
+        response: {
+          engines: LocalEngineStatus[];
+          /** 正在进行的安装 / 卸载（界面重载后据此恢复「进行中」，否则用户会以为没反应又点一次）。 */
+          busy: { id: LocalEngineId; op: "install" | "uninstall" } | null;
+        };
+      };
+      installLocalEngine: {
+        params: { engine: LocalEngineId; upgrade?: boolean };
+        response: LocalEngineInstallResult;
+      };
+      uninstallLocalEngine: {
+        params: { engine: LocalEngineId };
+        response: LocalEngineUninstallResult;
+      };
       startServer: {
         params: undefined;
         response: { ok: boolean; error?: string };
@@ -543,6 +592,8 @@ export type AppRPC = {
           pid?: number;
           logs: string;
           error?: string;
+          /** `error` 的类型（缺依赖 / 显存不足 / 端口被占 …），界面据此给下一步建议。 */
+          errorKind?: StartupErrorKind;
           /** 端口上有没有活着的推理服务（外部启动的也算）：UI 据此决定要不要提示去控制台启动。 */
           reachable: boolean;
         };
@@ -738,7 +789,9 @@ export type AppRPC = {
       };
       saveImageToDownloads: {
         params: { url: string; filename: string };
-        response: { ok: boolean };
+        // `path` 让调用方能把「存到哪了」写进 tooltip：只回 {ok} 的静默保存，
+        // 用户点完看不出任何变化。
+        response: { ok: boolean; path?: string };
       };
       saveAudioToFolder: {
         params: { url: string; filename: string };
@@ -989,6 +1042,14 @@ export type AppRPC = {
       forkAgentSession: {
         params: { conversationId: number; messageId: number };
         response: { ok: boolean; conversationId?: number; error?: string };
+      };
+      /**
+       * 回退到某条消息：删掉它之后（用户消息则连它一起）的消息与工具事件，不重新生成。
+       * `prompt` 是被删掉的那条用户消息正文（助手消息时为空），前端拿它回填输入框。
+       */
+      revertAgentSession: {
+        params: { conversationId: number; messageId: number };
+        response: { ok: boolean; error?: string; removed?: number; prompt?: string };
       };
       renameAgentSession: {
         params: { conversationId: number; title: string };
@@ -2266,6 +2327,66 @@ export type AppRPC = {
         params: { backend?: MusicGenBackend; providerId?: string } | undefined;
         response: { models: string[]; error?: string };
       };
+      // 音乐歌单（左侧歌单栏 + 曲目列表 + 新建 / 改名 / 删除 + 加入 / 移出）。
+      // 作品的"自动收录进默认歌单"不在这里 —— 它在生成落库时完成（见 bun/music-playlists.ts）。
+      listMusicPlaylists: {
+        params: undefined;
+        response: { playlists: MusicPlaylistSummary[]; error?: string };
+      };
+      createMusicPlaylist: {
+        params: { name: string };
+        response: { ok: boolean; playlist?: MusicPlaylistSummary; error?: string };
+      };
+      renameMusicPlaylist: {
+        params: { id: number; name: string };
+        response: { ok: boolean; error?: string };
+      };
+      deleteMusicPlaylist: {
+        params: { id: number };
+        response: { ok: boolean; error?: string };
+      };
+      listMusicPlaylistTracks: {
+        params: { playlistId: number };
+        response: { records: MusicRecordRow[]; error?: string };
+      };
+      addMusicToPlaylist: {
+        params: { playlistId: number; recordIds: number[] };
+        response: { ok: boolean; added?: number; error?: string };
+      };
+      removeMusicFromPlaylist: {
+        params: { playlistId: number; recordId: number };
+        response: { ok: boolean; error?: string };
+      };
+      /** "加入歌单"菜单的勾选状态：这些作品当前在哪些歌单里（entries 而不是 map，过 JSON 后键会变字符串）。 */
+      musicRecordPlaylistIds: {
+        params: { recordIds: number[] };
+        response: { entries: { recordId: number; playlistIds: number[] }[]; error?: string };
+      };
+      /** 一键写词：用对话模型按风格描述写一份歌词（仅歌曲创作，翻唱/配乐的词必须与原曲一致）。 */
+      generateMusicLyrics: {
+        params: { id: number };
+        response: { ok: boolean; lyrics?: string; error?: string };
+      };
+      /** 一键对齐：转写音频拿分段时间戳，把歌词行对成 LRC（较慢，几十秒级）。 */
+      alignMusicLyrics: {
+        params: { id: number };
+        response: { ok: boolean; lrc?: string; error?: string };
+      };
+      /** 封面：本地上传（path 来自刚弹过的文件框）。 */
+      setMusicCover: {
+        params: { id: number; path: string };
+        response: { ok: boolean; coverUrl?: string; error?: string };
+      };
+      /** 封面：一键生成（走生图管线，用歌名 + 风格描述拼提示词）。 */
+      generateMusicCover: {
+        params: { id: number; prompt?: string };
+        response: { ok: boolean; coverUrl?: string; error?: string };
+      };
+      /** 封面：删掉图片，退回按歌名生成的渐变。 */
+      clearMusicCover: {
+        params: { id: number };
+        response: { ok: boolean; error?: string };
+      };
       // MLX 本地生图引擎（mflux）
       getMlxGenStatus: {
         params: undefined;
@@ -2985,8 +3106,11 @@ export type AppRPC = {
       skillsInstallProgress: SkillsInstallProgress;
       /** Skills 中央库发生变化（外部编辑/git pull/安装同步完成），前端刷新列表。 */
       skillsChanged: { reason?: string };
-      /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
-      navigate: { path: string };
+      /**
+       * CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。
+       * `tab` / `sub` 只在 path = settings 时有意义（如 tab=library + sub=cloud = 模型库的云端模型页签）。
+       */
+      navigate: { path: string; tab?: string; sub?: string };
       /** 全局备份 / 恢复进度（节流推送）与终态。 */
       backupProgress: BackupProgress;
       backupFinished: BackupFinishedEvent;
@@ -3095,6 +3219,8 @@ const rpcRequests: NonNullable<
   cloudProviderSetEnabled: async ({ id, enabled }) =>
     CloudProviders.setCloudProviderEnabled(id, enabled),
 
+  cloudProviderConfigure: async (params) => CloudProviders.configureCloudProvider(params),
+
   cloudProviderProbe: async ({ id }) => {
     const provider = CloudProviders.getCloudProviderInfo(id);
     if (!provider) return { ok: false, error: "服务商不存在" };
@@ -3120,6 +3246,20 @@ const rpcRequests: NonNullable<
     return EngineInstall.installInferenceEngine(engine);
   },
 
+  listLocalEngines: async () => {
+    return { engines: await EngineCatalog.listLocalEngines(), busy: EngineCatalog.currentEngineJob() };
+  },
+
+  installLocalEngine: async ({ engine, upgrade }) =>
+    loggedEngineCall("server", "engine.manage.install_failed", { engine, upgrade: upgrade === true }, () =>
+      EngineCatalog.installLocalEngine(engine, { upgrade: upgrade === true }),
+    ),
+
+  uninstallLocalEngine: async ({ engine }) =>
+    loggedEngineCall("server", "engine.manage.uninstall_failed", { engine }, () =>
+      EngineCatalog.uninstallLocalEngine(engine),
+    ),
+
   startServer: async () => {
     return ServerManager.startServer();
   },
@@ -3135,11 +3275,14 @@ const rpcRequests: NonNullable<
 
   getServerStatus: async () => {
     const status = ServerManager.getStatus();
+    const error = ServerManager.getLastError() || undefined;
     return {
       status,
       pid: ServerManager.getPid(),
       logs: ServerManager.getLogs(),
-      error: ServerManager.getLastError() || undefined,
+      error,
+      // 分类只在真的失败时才给（前端据此渲染建议；没有错误时给 unknown 会误导）。
+      errorKind: status === "error" ? ServerManager.getLastErrorKind() : undefined,
       // 有实例在跑就不用探测；否则探一次端口，区分「没启动」和「外部服务在跑」。
       reachable: status === "running" ? true : await ServerManager.probeLocalServer(),
     };
@@ -3572,7 +3715,7 @@ const rpcRequests: NonNullable<
       }
       const dest = path.join(Utils.paths.downloads, name);
       copyFileSync(filePath, dest);
-      return { ok: true };
+      return { ok: true, path: dest };
     } catch (e) {
       logEvent({
         level: "error",
@@ -3847,6 +3990,9 @@ const rpcRequests: NonNullable<
   },
   forkAgentSession: async ({ conversationId, messageId }) => {
     return Chat.forkConversation(conversationId, messageId);
+  },
+  revertAgentSession: async ({ conversationId, messageId }) => {
+    return Agent.revertAgentSession(conversationId, messageId);
   },
   renameAgentSession: async ({ conversationId, title }) => {
     return Chat.renameConversation(conversationId, title);
@@ -5416,6 +5562,148 @@ const rpcRequests: NonNullable<
         detail: { backend: params?.backend ?? null, providerId: params?.providerId ?? null, error: e },
       });
       return { models: [], error: message };
+    }
+  },
+
+  // 音乐歌单
+  listMusicPlaylists: async () => {
+    try {
+      return { playlists: Playlists.listMusicPlaylists() };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // 空列表 + 静默 catch = 左侧栏显示"还没有歌单"，而库里其实有 —— 必须留痕。
+      logEvent({
+        level: "error",
+        source: "music",
+        event: "music.playlists.list_failed",
+        message,
+        detail: { error: e },
+      });
+      return { playlists: [], error: message };
+    }
+  },
+
+  createMusicPlaylist: async ({ name }) => {
+    const r = Playlists.createMusicPlaylist(name);
+    if (!r.ok) {
+      logEvent({
+        level: "warn",
+        source: "music",
+        event: "music.playlist.create_failed",
+        message: r.error ?? "建歌单失败",
+        detail: { nameLength: typeof name === "string" ? name.length : null },
+      });
+    }
+    return r;
+  },
+
+  renameMusicPlaylist: async ({ id, name }) => {
+    const r = Playlists.renameMusicPlaylist(id, name);
+    if (!r.ok) {
+      logEvent({
+        level: "warn",
+        source: "music",
+        event: "music.playlist.rename_failed",
+        message: r.error ?? "改歌单名失败",
+        detail: { id },
+      });
+    }
+    return r;
+  },
+
+  deleteMusicPlaylist: async ({ id }) => {
+    const r = Playlists.deleteMusicPlaylist(id);
+    if (!r.ok) {
+      logEvent({
+        level: "warn",
+        source: "music",
+        event: "music.playlist.delete_failed",
+        message: r.error ?? "删歌单失败",
+        detail: { id },
+      });
+    }
+    return r;
+  },
+
+  listMusicPlaylistTracks: async ({ playlistId }) => {
+    try {
+      return { records: MusicGen.listMusicPlaylistRecords(playlistId) };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logEvent({
+        level: "error",
+        source: "music",
+        event: "music.playlist.tracks_failed",
+        message,
+        detail: { playlistId, error: e },
+      });
+      return { records: [], error: message };
+    }
+  },
+
+  addMusicToPlaylist: async ({ playlistId, recordIds }) => {
+    const r = Playlists.addMusicToPlaylist(playlistId, recordIds);
+    if (!r.ok) {
+      logEvent({
+        level: "warn",
+        source: "music",
+        event: "music.playlist.add_failed",
+        message: r.error ?? "加入歌单失败",
+        detail: { playlistId, count: Array.isArray(recordIds) ? recordIds.length : null },
+      });
+    }
+    return r;
+  },
+
+  removeMusicFromPlaylist: async ({ playlistId, recordId }) => {
+    const r = Playlists.removeMusicFromPlaylist(playlistId, recordId);
+    if (!r.ok) {
+      logEvent({
+        level: "warn",
+        source: "music",
+        event: "music.playlist.remove_failed",
+        message: r.error ?? "移出歌单失败",
+        detail: { playlistId, recordId },
+      });
+    }
+    return r;
+  },
+
+  generateMusicLyrics: async ({ id }) => {
+    const r = await MusicLyrics.generateLyricsForRecord(id);
+    return r.lyrics ? { ok: true, lyrics: r.lyrics } : { ok: false, error: r.error };
+  },
+
+  alignMusicLyrics: async ({ id }) => {
+    const r = await MusicLyrics.alignLyricsForRecord(id);
+    return r.lrc ? { ok: true, lrc: r.lrc } : { ok: false, error: r.error };
+  },
+
+  setMusicCover: async ({ id, path }) => MusicCovers.setMusicCoverFromFile(id, path),
+
+  generateMusicCover: async ({ id, prompt }) => MusicCovers.generateMusicCover(id, prompt),
+
+  clearMusicCover: async ({ id }) => MusicCovers.clearMusicCover(id),
+
+  musicRecordPlaylistIds: async ({ recordIds }) => {
+    try {
+      const map = Playlists.playlistIdsForRecords(recordIds);
+      return {
+        entries: Object.entries(map).map(([recordId, playlistIds]) => ({
+          recordId: Number(recordId),
+          playlistIds,
+        })),
+      };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logEvent({
+        level: "warn",
+        source: "music",
+        event: "music.playlist.membership_failed",
+        message,
+        detail: { count: Array.isArray(recordIds) ? recordIds.length : null, error: e },
+      });
+      return { entries: [], error: message };
     }
   },
 

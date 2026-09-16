@@ -134,6 +134,8 @@ apps/
 
 **托管安装优先于 PATH**：四个 runtime 的 `checkBinary` 都先看托管目录（llama.cpp 的 `current/llama-server`、Python 引擎的 venv 解释器），再回落到 `Bun.which` / 常见安装路径 —— 用户自己装过的照旧能用（不接管、不删除），应用自己装的那份是版本可查、与启动参数对得上的一份。安装过程经 `initEngineInstallBroadcast` 推送（日志 80ms 合批、阶段 `throttleLatest` 合并），`getSetupEnvironment` 一并下发 `installSupport` / `installedVersions` / `installing`（`installing` 让界面在**重载之后**仍显示"安装中"，而不是让用户以为没反应又点一次）。
 
+**十个本地运行时在一页里统一管理**（设置 → 模型引擎）：`shared/local-engines.ts` 是引擎身份的真源（id / 分类 / 文案键 / 手动安装与卸载命令，文本推理四个沿用 `InferenceEngine` 的 id），`bun/engine-catalog.ts` 是探测与派发（每行给出状态 `managed` / `system` / `missing`、版本、路径、占用、是否在用，以及安装 / 升级 / 卸载）。三条规矩：**卸载只动托管目录**（`<dataDir>/engines/<id>`，PATH / brew / conda 上那份一律不碰，所以系统安装的行不给卸载按钮）；**模型权重不跟引擎一起删**（换引擎不必重下几十 GB，`LocalEngineSpec.modelsTarget` 指到管理它的页面）；**卸载前先停掉正在用它的服务**（推理服务 / whisper-server / OCR 与生图 worker），唯一例外是 cloudflared —— 隧道正连着公网时拒绝卸载。升级与安装是同一条路（带 `upgrade: true`：pip 走 `--upgrade`，版本钉在代码里的引擎等于重新下载），进度复用引导页那条推送链路（事件里的引擎 id 是 `LocalEngineId`），其余安装器自己的日志由 `startEngineLogBridge()` 桥接进来，界面只订阅一条流。新增一个引擎 = 一个 `LOCAL_ENGINE_SPECS` 条目 + 一个适配器。
+
 **机器画像决定首屏推荐什么**：探测在 `bun/hardware.ts`，纯计算在 `shared/hardware.ts`，界面在 `mainview/app/setup-screen/`。探测只用系统自带命令 —— macOS 走 `sysctl -n machdep.cpu.brand_string`（Apple 芯片直接回 `Apple M3 Ultra`）与 `hw.physicalcpu/logicalcpu`，**只有 Intel Mac 才跑 `system_profiler SPDisplaysDataType`** 拿独显型号与显存（秒级命令；Apple 芯片的 GPU 就是芯片本身，不必再跑）；Linux / Windows 用 `nvidia-smi` 查显存，其余走 `node:os`。结果缓存在进程里（芯片和内存不会在运行期变），随 `getSetupEnvironment` 一起下发 —— 引导页没有新增 RPC。命令与系统信息都可注入，四条平台路径在 `bun/hardware.test.ts` 里用假 runner 各走一遍（CI 上没有 Apple 芯片，本地是 Apple 芯片，两边都要能断言）。
 
 内存预算有三个口径，界面上的「推理可用预算」是后面所有"约占多少内存"的比较基准：Apple 统一内存取物理内存的 **75%**（macOS 默认的 GPU wired 上限）、独显取显存的 **90%**、纯 CPU / 核显取内存的 **60%**。模型占用 = 权重（量化的真实体积）+ KV 缓存（层数 × KV 头 × head_dim × 2(K/V) × 2B × 上下文，引导页按 8K 估）+ 运行期开销（权重的 5%，下限 512MB）；占用 / 预算的比例分四档：≤60% 流畅、≤80% 可用、≤100% 偏紧、超过即装不下。
@@ -145,6 +147,22 @@ apps/
 - **量化档**：先认目录里的默认档（Q4_K_M 这类质量 / 体积甜点档），机器很宽裕就往上抬一档，默认档偏紧或装不下就退到装得下的最大档。
 
 用户点过任意模型或档位之后，推荐不再覆盖他的选择（`modelTouched` / `touchedQuants`）。
+
+**引导页三个引擎共用一份千问模型表**（`setup-screen/constants.ts` 的 `SETUP_MODELS`）：llama.cpp
+按 GGUF 量化档，vLLM / SGLang / MLX 按整仓库 bf16。MLX 曾经是例外 —— 它当时只有两个 DeepSeek
+大 MoE 预设、拿不到体积，于是界面把其中一个**写死**标成"推荐"：32GB 的机器上也会被推一个
+装不下的模型。现在 MLX 与 vLLM 同一口径（mlx-lm 直接加载 HF safetensors），推荐跟着内存走。
+
+引导页还有三条**不能破的约束**，它们各自都有回归用例（`setup-screen/index.test.tsx`、
+`bun/secrets.test.ts`）：
+
+1. **跳过是无条件的**：写 `SETUP_COMPLETE` 失败也照样进主界面（失败只记一条日志）；
+2. **这一页必须能滚动**：`body` 是 `overflow: hidden`，所以滚动容器要把高度锁在视口上
+   （`h-full overflow-y-auto`）—— 用 `min-h-screen` 那种自适应高度，页面只会比窗口更高、
+   被 body 裁掉且没有滚动条，列表一长「下一步 / 跳过」就永远够不着；
+3. **读设置永远不抛**：`secrets.key` 不在备份归档里，跨机恢复后 settings / cloud_providers /
+   gateway_keys 里会躺着本机钥匙解不开的密文，而读设置是启动路上的第一个调用 —— 逐行降级成
+   空值 + 一条 `settings.decrypt.failed` 日志，用户重填一次凭据即可（见 §8 数据层）。
 
 几个关键实现细节：
 
@@ -470,7 +488,7 @@ omi <cmd>
 | 知识库运维 | `kb_ingest_jobs`（摄取队列）、`kb_events`（审计流水） |
 | 记忆 | `memories`、`memory_events`、`memory_metrics` |
 
-迁移在 `src/bun/db/migrations/`（0000–0024）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。
+迁移在 `src/bun/db/migrations/`（0000–0040）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。根因是迁移器**只读一次**库里的最大 `created_at`（`ORDER BY created_at DESC LIMIT 1`，循环里不再更新）：只要待应用迁移的 `when` 不大于那一刻的最大值，它在那个库上就永远够不着。因此 `db/index.ts` 在 `migrate()` 之前有两道自愈 —— `normalizeMigrationTimestamps()`（按 SQL hash 把已应用行的 `created_at` 对齐到 journal 的 `when`）与 `repairUnreachableMigrations()`（把「`when` 不高于库内最大值、却没有应用记录」的迁移就地补跑并记账）。合并分支重编号迁移时（main 保留编号、我方顺延到末位、`when` 取引入提交毫秒）正是这两道自愈起作用的场景，回归用例见 `db/db-migrate-timestamps.tests.ts`。
 
 **数据目录布局**（`<userData>`，macOS 上是 `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`）：
 
@@ -493,6 +511,7 @@ omni-control.sock       CLI 控制通道
 - **恢复要求本机已建库**：恢复只做整表替换、不建表（内核不 import 数据层，拿不到那批迁移），所以目标库没有应用表结构时直接报错并提示"先启动一次应用"，而不是对每张表都判定"本机没有表"、最后交出一次"写回 0 条记录"的假成功。
 - **不依赖应用运行**：模块不 import `db/index.ts`（避免连带跑迁移）与 electrobun，独立进程可在应用起不来时备份 / 恢复（恢复要求应用已退出，避免两个写者）。
 - **加密**（`backup/crypto.ts`）：可选 AES-256-GCM + scrypt（N=2^15/r=8/p=1）。容器 = 明文头（魔数 `OMNBKP01`、KDF 参数、压缩标志、salt、iv、keyCheck）+ 密文 + 16 字节 GCM 标签；头部作为 AAD 参与认证。`keyCheck` 让"密码不对"在打开时就报明确错误（预览只读开头，流走不到结尾触发不了 GCM 校验）。密码不落盘。scrypt 派生与独立实现（Python `hashlib.scrypt`）逐字节对齐验证过。
+- **凭据字段的存储加密**（`secrets.ts`，`secrets.key` 0600）：`settings` 的 `VLLM_API_KEY` / `GATEWAY_API_KEY` / `TUNNEL_TOKEN` 与 `cloud_providers.apiKey` / `gateway_keys.key` 落盘都是 `v1:` 密文，读时透明解密。**读路径一律用 `tryDecryptSecret`（不抛）**：`secrets.key` 不在归档里，跨机恢复之后库里的密文本机解不开 —— 这几条读路径中的第一条就是启动时的 `getSettings`，抛出去等于引导页永远走不完、主界面进不去（点跳过也没用，它写完 `SETUP_COMPLETE` 还要再读一次设置）。降级语义统一是"这台机器上没有这个凭据"：按空值处理 + 一条 `*.decrypt.failed` 警告（同一个键一次进程只报一条），用户重填即可。写路径仍用会抛的 `decryptSecret` —— 坏密文绝不能当明文用出去。
 - **远端存储**（`backup/remote.ts`）：S3 兼容（AWS / R2 / MinIO / OSS / COS，自己实现 SigV4，只用到 PUT / GET / DELETE / ListObjectsV2，单次 PUT 上限 5 GB）与 WebDAV（坚果云 / Nextcloud / 群晖，Basic 认证 + PROPFIND 列表）。不引 SDK，凭据存本机 settings（键名带 KEY/SECRET，备份的剔除密钥会抹掉）。配置在设置页填写，支持"创建后自动上传 / 上传后删本地"，远端列表可直接下载并恢复。
 - 模型权重（`models/`）与引擎（`engines/`）不参与备份：体积大且可重新下载；生成的音频 / 图片 / 视频（`media`）默认也不备份。冒烟见 `scripts/backup-smoke.ts`（含加密、上传、坏库隔离三组场景）。
 
@@ -519,6 +538,7 @@ omni-control.sock       CLI 控制通道
 7. **新引擎只改 `shared/engines.ts` + 写一个 Runtime 实现**，别在别处硬编码引擎判断。
 8. **出站 HTTP 走全局 `fetch`**（`bun/proxy.ts` 装的代理包装）**或显式 `proxy` 参数**；不要为远端主机另开 socket 或旁路 HTTP 客户端，否则那条请求会绕过用户的代理设置。本机 IPC（控制套接字的 `unix:` 请求）例外，包装层主动放行。
 9. **小应用只能调用宿主放行的动作**（`shared/miniapps.ts` 的 `MINIAPP_ACTIONS`），转发层（`lib/miniapp-bridge.ts`）不得出现"按方法名透传 RPC"的写法；小应用页面必须保持在 `sandbox`（无 `allow-same-origin`）的 iframe 里。
+10. **内置厂商目录只有一份**（`shared/cloud-providers.ts` 的 `CLOUD_PRESETS`）：安装即整份入驻 `cloud_providers` 表（`ensureBuiltinProviders`，幂等、已有行一律不动），界面上直接列出来、用户只填 Key。**地址由应用维护** —— 与预设一致的行由 `isBuiltinBaseUrl` 判定为"内置地址"：界面上只读、`updateCloudProvider` 拒改、`deleteCloudProvider` 拒删（删了下一次读取还会原样入驻）；地址被用户改过的旧行不在此列，保持可改。新增一家厂商 = 预设数组里加一条（含 `section` 分栏与 `apiKeyUrl`），不改界面、不改数据库。
 
 ## 11. 已知架构债
 

@@ -105,8 +105,27 @@ describe("buildCommandLine / chat", () => {
       `${bin} -m ${chatModel} --alias e2e-chat --host 127.0.0.1 --port 18400 --ctx-size 8192` +
         " --image-max-tokens 2048 --parallel 1 --batch-size 256 --ubatch-size 64" +
         " --cache-type-k q8_0 --cache-type-v q8_0 --repeat-penalty 1.12 --repeat-last-n 256" +
-        " --temp 0.1 --top-p 0.8 --no-mmproj-offload",
+        " --temp 0.1 --top-p 0.8 --top-k 40 --no-mmproj-offload",
     );
+  });
+
+  test("采样参数「设置优先、模型档案兜底」：设置页显示的就是发出去的那份（ENG-04）", () => {
+    setChatSettings();
+    // 档案默认值（模型自带的那套）
+    const fromProfile = new LlamaRuntime().buildCommandLine(chatModel);
+    expect(fromProfile).toContain("--repeat-penalty 1.12");
+    expect(fromProfile).toContain("--temp 0.1");
+    expect(fromProfile).toContain("--top-p 0.8");
+    expect(fromProfile).toContain("--top-k 40");
+    // 设置盖过档案
+    SETTINGS.SERVER_TOP_K = "7";
+    SETTINGS.SERVER_REPEAT_PENALTY = "1.3";
+    const cmd = new LlamaRuntime().buildCommandLine(chatModel);
+    expect(cmd).toContain("--top-k 7");
+    expect(cmd).toContain("--repeat-penalty 1.3");
+    // 空串 = 没设过，落回档案的默认值（而不是把参数发成空）
+    SETTINGS.SERVER_TOP_K = "";
+    expect(new LlamaRuntime().buildCommandLine(chatModel)).toContain("--top-k 40");
   });
 });
 

@@ -27,6 +27,7 @@ import { join } from "path";
 
 import { ENGINE_SHORT_NAMES, engineInstallSupport, type InferenceEngine } from "../shared/engines";
 import type { GpuKind } from "../shared/hardware";
+import type { LocalEngineId } from "../shared/local-engines";
 import { logEvent } from "./app-log";
 import { defaultCommandRunner, type CommandRunner } from "./command-runner";
 import { engineVersionFilePath, llamaCppRootDir, type PythonEngineId } from "./engine-paths";
@@ -42,7 +43,11 @@ import {
 export type { InstallPhase } from "./python-engine";
 
 export type EngineInstallEvent = {
-  engine: InferenceEngine;
+  /**
+   * 哪个引擎（`LocalEngineId` 而非 `InferenceEngine`）：这条推送链路不只服务文本推理，
+   * 引擎管理页把 whisper.cpp / audio.cpp / mflux 等的安装日志也并到同一条流上。
+   */
+  engine: LocalEngineId;
   phase: InstallPhase;
   message: string;
   /** 下载类安装的百分比（未知时为 null，界面显示不确定进度）。 */
@@ -86,6 +91,19 @@ function emitPhase(event: EngineInstallEvent): void {
       // 同上
     }
   }
+}
+
+/**
+ * 把**别的**安装器（whisper.cpp / audio.cpp / PaddleOCR / mflux / tesseract / cloudflared）
+ * 的日志与阶段并到这条链路上 —— 引擎管理页只订阅这一条流，界面因此不必知道每种引擎
+ * 各自有几个推送频道。日志桥在 `engine-catalog.ts`，这里只开两个出口。
+ */
+export function publishEngineInstallLog(text: string): void {
+  emitLog(text);
+}
+
+export function publishEngineInstallPhase(event: EngineInstallEvent): void {
+  emitPhase(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +640,8 @@ export function isEngineInstalling(): InferenceEngine | null {
 export type EngineInstallOverrides = Partial<LlamaInstallDeps> & {
   /** Python 引擎：注入的系统 Python 查找（测试用）。 */
   findPython?: () => string | null;
+  /** 已装过也重装一遍（拿到更新的版本）——引擎管理页的「升级」。 */
+  upgrade?: boolean;
 };
 
 export async function installInferenceEngine(
@@ -654,6 +674,7 @@ export async function installInferenceEngine(
       distributionName: target.distribution,
       reporter,
       findPython: overrides.findPython,
+      upgrade: overrides.upgrade,
     });
     return { ok: result.ok, error: result.error, version: result.version };
   } finally {

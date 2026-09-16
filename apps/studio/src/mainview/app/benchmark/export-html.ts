@@ -1,10 +1,12 @@
-import { fmtCtx } from "@/shared/benchmark";
+import { batchSizesFromParams, fmtCtx } from "@/shared/benchmark";
 import { RELEASE_REPO_URL } from "@/shared/release";
 import type { DisplayResult } from "./parts";
 import {
+  batchTag,
   cacheRowsOf,
   engineLabelOf,
   evalReportStats,
+  hasMultipleBatches,
   speedReportNotes,
   type ReportT,
 } from "./report-data";
@@ -109,6 +111,7 @@ body {
 .eyebrow { margin: 0; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 h1 { margin: 6px 0 10px; font-size: 22px; line-height: 1.3; word-break: break-word; }
 h2 { margin: 0 0 10px; font-size: 14px; }
+h3 { margin: 16px 0 8px; font-size: 12px; font-weight: 600; }
 section { margin-top: 28px; }
 .badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .badge {
@@ -188,6 +191,42 @@ function summaryCards(result: DisplayResult, t: ReportT): string {
   const basis = s.basis
     ? `<p class="hint">${esc(t("benchmark.summaryBasis", { basis: t(`benchmark.cache.${s.basis}`) }))}</p>`
     : "";
+  // 扫了多个并发时，上面这几个数是跨并发混算的：必须再给一份逐并发的数字，
+  // 否则报告里那个"平均 TPS"会被当成某一个并发的成绩。
+  const byBatch = s.byBatch && s.byBatch.length > 1
+    ? `<h3>${esc(t("benchmark.summary.byBatch"))}</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="txt">${esc(t("benchmark.col.batch"))}</th>
+          <th class="num">${esc(t("benchmark.summary.avgTps"))}</th>
+          <th class="num">${esc(t("benchmark.summary.peakTps"))}</th>
+          <th class="num">${esc(t("benchmark.summary.peakAgg"))}</th>
+          <th class="num">${esc(t("benchmark.col.ttft"))}</th>
+          <th class="num">${esc(t("benchmark.col.tpot"))}</th>
+          <th class="num">${esc(t("benchmark.summary.buckets"))}</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${s.byBatch
+          .map(
+            (b) => `<tr>
+          <td class="txt">${esc(batchTag(b.batchSize))}</td>
+          ${numCell(b.avgTps, "tps")}
+          ${numCell(b.peakTps)}
+          ${numCell(b.peakAggTps)}
+          ${numCell(b.avgTtftMs)}
+          ${numCell(b.avgTpotMs)}
+          ${numCell(b.rows)}
+        </tr>`,
+          )
+          .join("\n        ")}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">${esc(t("benchmark.summary.mixedBatch"))}</p>`
+    : "";
   return `<section>
   <h2>${esc(t("benchmark.export.summary"))}</h2>
   ${basis}
@@ -199,18 +238,20 @@ function summaryCards(result: DisplayResult, t: ReportT): string {
       )
       .join("\n    ")}
   </div>
+  ${byBatch}
 </section>`;
 }
 
 function configSection(result: DisplayResult, t: ReportT): string {
   const p = (result.params ?? {}) as {
     genLength?: number;
-    batchSize?: number;
     contexts?: number[];
     cacheModes?: string[];
     suite?: string;
     sampleSize?: number;
   };
+  // 并发档：新记录是 batchSizes 列表，老记录只有单值 batchSize。
+  const batchSizes = batchSizesFromParams(result.params);
   const rows: { label: string; value: string }[] = [
     { label: t("benchmark.tab"), value: t(`benchmark.tab.${result.kind}`) },
     { label: t("benchmark.model"), value: result.model },
@@ -219,7 +260,7 @@ function configSection(result: DisplayResult, t: ReportT): string {
     if (p.genLength != null) {
       rows.push({
         label: t("benchmark.genLength"),
-        value: `${p.genLength} tok × ${p.batchSize ?? 1}`,
+        value: `${p.genLength} tok × ${batchSizes.join(" / ")}`,
       });
     }
     if (p.contexts?.length) {
@@ -262,11 +303,14 @@ function cacheSection(result: DisplayResult, t: ReportT): string {
   const rows = cacheRowsOf(result);
   if (rows.length === 0) return "";
   const speedup = (v: number | null) => (v != null ? `<span class="speedup">×${esc(v)}</span>` : "");
+  const multiBatch = hasMultipleBatches(result);
   return `<section>
   <h2>${esc(t("benchmark.cacheCompare"))}</h2>
   ${rows
     .map((c) => {
       const parts = [`<span class="ctx">${esc(fmtCtx(c.contextLength))}</span>`];
+      // 缓存倍数只在同一个并发内成立：多并发时把 ×N 写在行首，免得看成跨并发的收益
+      if (multiBatch) parts.push(`<span class="ctx">${esc(batchTag(c.batchSize))}</span>`);
       if (c.cold) parts.push(`<span>${esc(t("benchmark.cache.cold"))} ${esc(c.cold.ttftMs)} ms</span>`);
       if (c.partial) {
         parts.push(
@@ -354,6 +398,7 @@ function speedTable(result: DisplayResult, t: ReportT): string {
 function speedChart(result: DisplayResult, t: ReportT): string {
   if (result.rows.length === 0) return "";
   const max = Math.max(...result.rows.map((r) => r.tps), 0.0001);
+  const multiBatch = hasMultipleBatches(result);
   return `<section>
   <h2>${esc(t("benchmark.chart"))}</h2>
   <div class="bars">
@@ -363,7 +408,9 @@ function speedChart(result: DisplayResult, t: ReportT): string {
         const value = r.ok === 0 ? "—" : `${r.tps} tps`;
         return `<div class="bar-row">
       <span class="bar-ctx">${esc(fmtCtx(r.contextLength))}</span>
-      <span class="bar-cache">${esc(t(`benchmark.cache.${r.cache ?? "warm"}`))}</span>
+      <span class="bar-cache">${esc(
+        `${multiBatch ? `${batchTag(r.batchSize)} ` : ""}${t(`benchmark.cache.${r.cache ?? "warm"}`)}`,
+      )}</span>
       <span class="bar-track"><span class="bar-fill" style="width:${width.toFixed(2)}%"></span></span>
       <span class="bar-value${r.ok === 0 ? " bad" : ""}">${esc(value)}</span>
     </div>`;

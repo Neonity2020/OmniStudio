@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { rpcClient } from "@lib/rpc";
 import { type InferenceEngine, classifyModelName, filterModelIds, isChatModelCategory, modelNameFromRef, MODEL_CATEGORY_SETS } from "@/shared/modelscope";
-import { type BenchmarkCacheMode, BENCHMARK_DEFAULT_CACHE_MODES, BENCHMARK_DEFAULT_CONTEXTS, BENCHMARK_MAX_CONTEXT, BENCHMARK_MIN_CONTEXT, BENCHMARK_PRESET_CONTEXTS, fmtCtx, normalizeCacheModes, normalizeContexts, parseContext, serverContextWindow } from "@/shared/benchmark";
+import { type BenchmarkCacheMode, BENCHMARK_DEFAULT_CACHE_MODES, BENCHMARK_DEFAULT_CONTEXTS, BENCHMARK_MAX_BATCH, BENCHMARK_MAX_CONTEXT, BENCHMARK_MIN_CONTEXT, BENCHMARK_PRESET_CONTEXTS, fmtCtx, normalizeBatchSizes, normalizeCacheModes, normalizeContexts, parseBatch, parseContext, serverContextWindow } from "@/shared/benchmark";
 import { useT } from "@stores/ui-lang";
 import { useBenchmarkStore } from "@stores/benchmark";
 import { useRouter } from "@stores/router";
@@ -26,11 +26,13 @@ export function useBenchmarkConfig() {
   const [cloudModel, setCloudModel] = useState("");
   const [providerId, setProviderId] = useState<string | null>(null);
   const [genLength, setGenLength] = useState(128);
-  const [batchSize, setBatchSize] = useState(1);
+  const [batchSizes, setBatchSizes] = useState<number[]>([1]);
   const [contexts, setContexts] = useState<number[]>(BENCHMARK_DEFAULT_CONTEXTS);
   const [cacheModes, setCacheModes] = useState<BenchmarkCacheMode[]>(BENCHMARK_DEFAULT_CACHE_MODES);
   const [customCtx, setCustomCtx] = useState("");
   const [customCtxError, setCustomCtxError] = useState<string | null>(null);
+  const [customBatch, setCustomBatch] = useState("");
+  const [customBatchError, setCustomBatchError] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   // 能力评测参数：套件 + 抽样题数（0 = 全量）+ 并发跑题数。
   const [suite, setSuite] = useState<EvalSuiteId>("mmlu");
@@ -122,7 +124,11 @@ export function useBenchmarkConfig() {
       return;
     }
     if (!providerId || !providers.some((p) => p.id === providerId)) {
-      setProviderId(cloudActiveId ?? providers[0]!.id);
+      // 内置厂商目录整份常驻（20 多家），默认落在激活行 → 第一个配好 Key 的行 →
+      // 第一行：不然一进来选中的是"还没配 Key 的那家"，模型清单也是空的。
+      const configured =
+        providers.find((p) => p.apiKey.trim()) ?? providers.find((p) => p.models.length > 0);
+      setProviderId(cloudActiveId ?? configured?.id ?? providers[0]!.id);
     }
   }, [providers, cloudActiveId, providerId]);
   const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
@@ -156,7 +162,7 @@ export function useBenchmarkConfig() {
       sampleSize: mode === "eval" ? sampleSize : undefined,
       concurrency: mode === "eval" ? evalConcurrency : undefined,
       genLength: mode === "speed" ? genLength : undefined,
-      batchSize: mode === "speed" ? batchSize : undefined,
+      batchSizes: mode === "speed" ? batchSizes : undefined,
       contexts: mode === "speed" ? contexts : undefined,
       cacheModes: mode === "speed" ? cacheModes : undefined,
     });
@@ -241,6 +247,13 @@ export function useBenchmarkConfig() {
     setContexts((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : normalizeContexts([...prev, c])));
   };
 
+  const toggleBatchSize = (n: number) => {
+    setBatchSizes((prev) =>
+      // 至少留一档：空列表会被主进程回落到 [1]，界面却显示一个并发都没勾
+      prev.includes(n) ? (prev.length > 1 ? prev.filter((x) => x !== n) : prev) : normalizeBatchSizes([...prev, n]),
+    );
+  };
+
   const toggleCacheMode = (m: BenchmarkCacheMode) => {
     setCacheModes((prev) =>
       // 至少留一种：空集会被主进程回落到"三种全测"，界面却显示一个都没勾
@@ -269,6 +282,27 @@ export function useBenchmarkConfig() {
     setContexts((prev) => normalizeContexts([...prev, parsed]));
   };
 
+  /**
+   * 添加并发档：可以一次填多个（`1,2,4`，逗号 / 空格都认）。
+   * 超范围不静默夹紧：把用户填的 100 悄悄改成 64，跑出来的矩阵对不上他填的数。
+   */
+  const addCustomBatch = () => {
+    const parts = customBatch.split(/[,，\s]+/).filter(Boolean);
+    const parsed = parts.map(parseBatch);
+    if (parts.length === 0 || parsed.some((n) => n === null)) {
+      setCustomBatchError(t("benchmark.batch.invalid"));
+      return;
+    }
+    const nums = parsed as number[];
+    if (nums.some((n) => n > BENCHMARK_MAX_BATCH)) {
+      setCustomBatchError(t("benchmark.batch.outOfRange", { max: String(BENCHMARK_MAX_BATCH) }));
+      return;
+    }
+    setCustomBatchError(null);
+    setCustomBatch("");
+    setBatchSizes((prev) => normalizeBatchSizes([...prev, ...nums]));
+  };
+
   // 可点选的档位 = 预设 + 用户自定义（自定义的用虚线边框区分，位置按大小排在中间）
   const chipContexts = useMemo(() => normalizeContexts([...BENCHMARK_PRESET_CONTEXTS, ...contexts]), [contexts]);
   const isPresetCtx = (c: number) => BENCHMARK_PRESET_CONTEXTS.includes(c);
@@ -291,7 +325,8 @@ export function useBenchmarkConfig() {
     modelOptions, effectiveModel, setModel,
     providers, providerId, setProviderId, providerIncomplete, providerKeyMissing,
     cloudModelOptions, effectiveCloudModel, setCloudModel,
-    genLength, setGenLength, batchSize, setBatchSize,
+    genLength, setGenLength,
+    batchSizes, toggleBatchSize, customBatch, setCustomBatch, customBatchError, setCustomBatchError, addCustomBatch,
     contexts, toggleContext, chipContexts, isPresetCtx,
     customCtx, setCustomCtx, customCtxError, setCustomCtxError, addCustomContext,
     overWindow, serverWindow,

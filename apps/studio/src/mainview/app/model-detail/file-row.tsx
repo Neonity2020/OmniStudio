@@ -1,17 +1,21 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DownloadIcon, CheckCircle2Icon, Loader2Icon, PauseIcon, PlayIcon, RotateCcwIcon, AlertTriangleIcon } from "lucide-react";
+import { DownloadIcon, CheckCircle2Icon, Loader2Icon, AlertTriangleIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Badge } from "@ui/badge";
-import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
 import { MODEL_SOURCE_META, engineSupports, fileBaseName, type MarketFile, type ModelSource } from "../../../shared/modelscope";
-import { SourceBadge } from "@components/source-badge";
 import { ModelFormatBadge } from "@components/model-category-badge";
 import { installedFileNames } from "@/mainview/lib/installed-models";
-import { queuePositionOf, taskEta } from "@lib/download-view";
 import { formatBytes } from "./parts";
 
+/**
+ * 模型文件清单的一行 —— **只是清单**：文件名、格式、大小、装没装。
+ *
+ * 进度、速度、剩余时间、排队位置、暂停/重试都不在这里：下载的单元是整个模型
+ * （见 ModelDownloadCard），逐个文件挂一条进度条会把「这个模型下了多少」淹掉。
+ * 唯一的例外是 GGUF：每个量化是能独立跑的模型，所以仍保留它自己那一个下载按钮。
+ */
 export function FileRow({
   file,
   repo,
@@ -28,7 +32,6 @@ export function FileRow({
 }) {
   const t = useT();
   const queryClient = useQueryClient();
-  const tasks = useModelDownloadStore((s) => s.tasks);
   const installedModels = useQuery({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
@@ -38,11 +41,6 @@ export function FileRow({
   // 整仓库条目（一个仓库一条记录）的成员文件在 `files` 里，由 installedFileNames 摊平。
   const installedPaths = installedFileNames(installedModels.data?.models ?? []);
   const isInstalledHere = installedPaths.has(fileBaseName(file.name));
-  const task = tasks.find((t) => t.repo === repo && t.fileName === file.name && t.status !== "canceled");
-  const eta = task ? taskEta(task, t) : null;
-  const etaSuffix = eta ? ` · ${eta}` : "";
-  const position = task ? queuePositionOf(task, tasks) : null;
-  const queuedAhead = position != null ? Math.max(0, position - 1) : null;
 
   const startMutation = useMutation({
     mutationFn: () =>
@@ -57,14 +55,6 @@ export function FileRow({
       }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
   });
-  const pauseMutation = useMutation({
-    mutationFn: () => rpcClient.pauseModelDownload({ id: task!.id }),
-  });
-  const resumeMutation = useMutation({
-    mutationFn: () => rpcClient.resumeModelDownload({ id: task!.id }),
-  });
-
-  const active = task?.status === "downloading" || task?.status === "queued";
 
   return (
     <div className="flex items-center gap-3 rounded-lg border px-3 py-2.5">
@@ -89,80 +79,15 @@ export function FileRow({
             </span>
           )}
         </div>
-        <p className="text-[11px] text-muted-foreground">
-          {formatBytes(file.size)}
-          {task?.speed ? ` · ${formatBytes(task.speed)}/s` : ""}
-          {task ? etaSuffix : ""}
-        </p>
-        {/* 排队中：告诉用户前面还有几个（小文件先下，队列会动）。 */}
-        {task && queuedAhead != null && queuedAhead > 0 && (
-          <p className="text-[10px] text-muted-foreground/80">
-            {t("downloads.queuedAhead", { n: String(queuedAhead) })}
-          </p>
-        )}
-        {/* 任务的下载源和本页不一致时标出来（例如之前从另一个平台开始下的）。 */}
-        {task && task.source !== source && <SourceBadge source={task.source} className="mt-1" />}
-        {task && (task.status === "downloading" || task.status === "paused") && (
-          <div className="mt-1.5 h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full rounded-full bg-primary transition-[width] duration-300"
-              style={{ width: `${task.percent ?? 0}%` }}
-            />
-          </div>
-        )}
-        {task?.status === "failed" && (
-          <p className="mt-0.5 truncate text-[11px] text-destructive">{task.error ?? "failed"}</p>
-        )}
+        <p className="text-[11px] text-muted-foreground">{formatBytes(file.size)}</p>
       </div>
 
       {isInstalledHere ? (
         <Badge variant="secondary" className="shrink-0 text-[10px]">
           <CheckCircle2Icon className="size-3" /> {t("models.downloaded")}
         </Badge>
-      ) : task ? (
-        <div className="flex shrink-0 items-center gap-1">
-          {task.status === "downloading" || task.status === "queued" ? (
-            <>
-              <span className="w-10 text-right text-[11px] text-muted-foreground tabular-nums">
-                {task.percent != null ? `${task.percent.toFixed(0)}%` : "…"}
-              </span>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                tooltip={t("downloads.pause")}
-                disabled={task.status === "queued"}
-                onClick={() => pauseMutation.mutate()}
-              >
-                <PauseIcon className="size-3.5" />
-              </Button>
-            </>
-          ) : task.status === "paused" ? (
-            <>
-              <span className="w-10 text-right text-[11px] text-muted-foreground tabular-nums">
-                {task.percent != null ? `${task.percent.toFixed(0)}%` : "…"}
-              </span>
-              <Button
-                variant="outline"
-                size="icon-sm"
-                tooltip={t("downloads.resume")}
-                onClick={() => resumeMutation.mutate()}
-              >
-                <PlayIcon className="size-3.5" />
-              </Button>
-            </>
-          ) : task.status === "failed" ? (
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs"
-              onClick={() => resumeMutation.mutate()}
-            >
-              <RotateCcwIcon data-icon="inline-start" className="size-3" />
-              {t("common.retry")}
-            </Button>
-          ) : null}
-        </div>
-      ) : (
+      ) : file.kind === "gguf" ? (
+        // GGUF：一个文件就是一个可独立运行的模型，保留单独下载（进度在下载面板里看）。
         <Button
           variant="outline"
           size="sm"
@@ -177,8 +102,7 @@ export function FileRow({
           )}
           {t("market.downloadFrom", { source: MODEL_SOURCE_META[source].label })}
         </Button>
-      )}
-      {active && <span className="sr-only" />}
+      ) : null}
     </div>
   );
 }

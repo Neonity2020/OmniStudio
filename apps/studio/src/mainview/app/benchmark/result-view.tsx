@@ -1,10 +1,10 @@
 import { Badge } from "@ui/badge";
 import { GaugeIcon, GraduationCapIcon } from "lucide-react";
-import { fmtCtx } from "@/shared/benchmark";
+import { batchSizesFromParams, fmtCtx } from "@/shared/benchmark";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { ReportExportButton } from "./export-button";
-import { cacheRowsOf, engineLabelOf, evalReportStats, speedReportNotes } from "./report-data";
+import { batchTag, cacheRowsOf, engineLabelOf, evalReportStats, hasMultipleBatches, speedReportNotes } from "./report-data";
 import { fmtTime, type DisplayResult } from "./parts";
 
 const STATUS_STYLES: Record<DisplayResult["status"], string> = {
@@ -26,7 +26,10 @@ export function ResultView({
   const t = useT();
   const summary = result.summary;
   const engineLabel = engineLabelOf(result, t);
-  const speedParams = result.params as { genLength?: number; batchSize?: number } | undefined;
+  const speedParams = result.params as { genLength?: number } | undefined;
+  // 并发档列表：新记录是 batchSizes，老记录只有单值 batchSize（helper 里兼容）。
+  const batchSizes = batchSizesFromParams(result.params);
+  const multiBatch = hasMultipleBatches(result);
   const evalParams = result.params as { suite?: string; sampleSize?: number } | undefined;
 
   if (result.kind === "eval") {
@@ -68,7 +71,7 @@ export function ResultView({
         </Badge>
         {speedParams?.genLength != null && (
           <Badge variant="secondary" className="text-[10px] tabular-nums">
-            {speedParams.genLength} tok × {speedParams.batchSize ?? 1}
+            {speedParams.genLength} tok × {batchSizes.join(" / ")}
           </Badge>
         )}
         <Badge className={cn("text-[10px]", STATUS_STYLES[result.status])}>
@@ -107,6 +110,44 @@ export function ResultView({
         </div>
       )}
 
+      {/* 按并发分开的数字：不同并发的吞吐不可比，上面那几张卡是跨并发混算的 */}
+      {(summary?.byBatch?.length ?? 0) > 1 && (
+        <div>
+          <h3 className="mb-2 text-sm font-medium">{t("benchmark.summary.byBatch")}</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="border-b text-left text-muted-foreground">
+                  <th className="px-2 py-1.5 font-medium">{t("benchmark.col.batch")}</th>
+                  <th className="px-2 py-1.5 text-right font-medium">{t("benchmark.summary.avgTps")}</th>
+                  <th className="px-2 py-1.5 text-right font-medium">{t("benchmark.summary.peakTps")}</th>
+                  <th className="px-2 py-1.5 text-right font-medium">{t("benchmark.summary.peakAgg")}</th>
+                  <th className="px-2 py-1.5 text-right font-medium">{t("benchmark.col.ttft")}</th>
+                  <th className="px-2 py-1.5 text-right font-medium">{t("benchmark.col.tpot")}</th>
+                  <th className="px-2 py-1.5 text-right font-medium">{t("benchmark.summary.buckets")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary?.byBatch?.map((b) => (
+                  <tr key={b.batchSize} className="border-b border-muted/50">
+                    <td className="px-2 py-1.5 tabular-nums">{batchTag(b.batchSize)}</td>
+                    <td className="px-2 py-1.5 text-right font-semibold tabular-nums text-primary">{b.avgTps}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{b.peakTps}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{b.peakAggTps}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{b.avgTtftMs}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums">{b.avgTpotMs}</td>
+                    <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground">{b.rows}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+            {t("benchmark.summary.mixedBatch")}
+          </p>
+        </div>
+      )}
+
       {/* 档位级的注意项：失败原因 / 截断 / 提前收尾 */}
       {notes.length > 0 && (
         <div className="flex flex-col gap-1 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
@@ -132,12 +173,17 @@ export function ResultView({
           <div className="flex flex-col gap-1.5">
             {cacheRows.map((c) => (
               <div
-                key={c.contextLength}
+                key={`${c.contextLength}-${c.batchSize}`}
                 className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border bg-card px-3 py-2 text-xs"
               >
                 <span className="w-10 shrink-0 font-mono text-[10px] text-muted-foreground">
                   {fmtCtx(c.contextLength)}
                 </span>
+                {multiBatch && (
+                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                    {batchTag(c.batchSize)}
+                  </span>
+                )}
                 {c.cold && (
                   <span className="tabular-nums text-muted-foreground">
                     {t("benchmark.cache.cold")} {c.cold.ttftMs} ms
@@ -202,7 +248,10 @@ export function ResultView({
               </thead>
               <tbody>
                 {result.rows.map((r) => (
-                  <tr key={`${r.contextLength}-${r.cache ?? "legacy"}`} className="border-b border-muted/50">
+                  <tr
+                    key={`${r.contextLength}-${r.batchSize}-${r.cache ?? "legacy"}`}
+                    className="border-b border-muted/50"
+                  >
                     <td className="px-2 py-1.5 tabular-nums">
                       <span className={cn(r.error && "text-destructive", !r.error && r.truncated && "text-amber-600 dark:text-amber-400")}>
                         {fmtCtx(r.contextLength)}
@@ -247,10 +296,18 @@ export function ResultView({
           <h3 className="mb-2 text-sm font-medium">{t("benchmark.chart")}</h3>
           <div className="flex flex-col gap-1.5">
             {result.rows.map((r) => (
-              <div key={`${r.contextLength}-${r.cache ?? "legacy"}`} className="flex items-center gap-2">
+              <div
+                key={`${r.contextLength}-${r.batchSize}-${r.cache ?? "legacy"}`}
+                className="flex items-center gap-2"
+              >
                 <span className="w-10 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
                   {fmtCtx(r.contextLength)}
                 </span>
+                {multiBatch && (
+                  <span className="w-8 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
+                    {batchTag(r.batchSize)}
+                  </span>
+                )}
                 <span className="w-16 shrink-0 text-[10px] text-muted-foreground">
                   {t(`benchmark.cache.${r.cache ?? "warm"}`)}
                 </span>

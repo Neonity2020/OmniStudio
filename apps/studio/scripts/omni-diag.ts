@@ -276,25 +276,37 @@ function readDb(): { sections: Section[]; warnings: string[] } {
   const providers = query(
     "select id, name, base_url, api_key, video_api, enabled, models from cloud_providers order by created_at",
   );
+  // 厂商目录是内置的（装上就 20 多家）：全量列出来会把这一节刷成一屏"未启动 / 无密钥"，
+  // 真正要看的（用户在用的、配过密钥的）反而被淹掉。只列碰过的行，其余按数量带过。
+  const touchedProviders = Array.isArray(providers)
+    ? providers.filter((p: any) => !p?._error && (p.enabled === 1 || p.api_key))
+    : providers;
   sections.push({
-    title: "云服务商（设置 → 模型云服务）",
-    lines: show(providers, (p) => {
-      let modelCount = 0;
-      try {
-        const parsed = JSON.parse(String(p.models ?? "[]"));
-        modelCount = Array.isArray(parsed) ? parsed.length : 0;
-      } catch {
-        modelCount = -1;
-      }
-      const flags = [
-        p.enabled === 1 ? "已启动" : "未启动",
-        p.api_key ? "有密钥" : "无密钥",
-        p.video_api ? `视频接口=${p.video_api}` : "",
-      ]
-        .filter(Boolean)
-        .join(" / ");
-      return `${p.id}（${p.name}）：${flags}，模型 ${modelCount >= 0 ? modelCount : "解析失败"} 个\n    ${p.base_url || "（无地址）"}`;
-    }),
+    title: "云服务商（设置 → 云端模型）",
+    lines: [
+      ...show(touchedProviders, (p) => {
+        let modelCount = 0;
+        try {
+          const parsed = JSON.parse(String(p.models ?? "[]"));
+          modelCount = Array.isArray(parsed) ? parsed.length : 0;
+        } catch {
+          modelCount = -1;
+        }
+        const flags = [
+          p.enabled === 1 ? "已启动" : "未启动",
+          p.api_key ? "有密钥" : "无密钥",
+          p.video_api ? `视频接口=${p.video_api}` : "",
+        ]
+          .filter(Boolean)
+          .join(" / ");
+        return `${p.id}（${p.name}）：${flags}，模型 ${modelCount >= 0 ? modelCount : "解析失败"} 个\n    ${p.base_url || "（无地址）"}`;
+      }),
+      ...(Array.isArray(providers) && providers.length > touchedProviders.length
+        ? [
+            `（另有 ${providers.length - touchedProviders.length} 家内置厂商未配置：未启动、无密钥）`,
+          ]
+        : []),
+    ],
   });
 
   // 表行数概览：判断"没反应"是没数据还是坏了。

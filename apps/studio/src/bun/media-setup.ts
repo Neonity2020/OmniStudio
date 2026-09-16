@@ -254,7 +254,7 @@ export async function scanSetupCandidates(input: {
       return { candidates: models.map((m) => ({ id: m, label: m, ready: true })) };
     }
     const base = (input.base ?? apiBase).trim();
-    if (!base) return { candidates: [], error: "请先在「设置 → 模型云服务」里启用一个厂商" };
+    if (!base) return { candidates: [], error: "请先在「设置 → 云端模型」里启用一个厂商" };
     const models = await ImageGen.listImageApiModels(base, apiKey);
     // 生图服务的 /v1/models 也会列对话模型：只挑生图模型，认不出时保留全量。
     const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
@@ -321,7 +321,7 @@ async function checkImageReadiness(
         ok: false,
         reason: "missing-config",
         message:
-          "生图后端是云端模型，但还没选定云厂商。请到「设置 → 模型云服务」启用厂商（会在启用时校验密钥），再回来挑生图模型。",
+          "生图后端是云端模型，但还没选定云厂商。请到「设置 → 云端模型」启用厂商（会在启用时校验密钥），再回来挑生图模型。",
       };
     }
     if (!model) {

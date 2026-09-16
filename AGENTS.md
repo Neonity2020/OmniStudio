@@ -66,6 +66,39 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   A failure path without a `logEvent` call is a bug: the next person cannot diagnose it.
   Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
   `bun run --cwd apps/studio scripts/omni-diag.ts`
+- **Every local runtime the app installs is one catalog, managed in one place**
+  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the ten engines —
+  llama.cpp / vLLM / SGLang / MLX (text inference), whisper.cpp, audio.cpp, PaddleOCR,
+  Tesseract, mflux and cloudflared — each get one row with state, version, path, disk usage
+  and 安装 / 升级 / 卸载. Adding an engine = one `LOCAL_ENGINE_SPECS` entry + one probe/install/
+  uninstall adapter; the page, its groups and its buttons are derived from those two, and the
+  id doubles as the setup-screen engine id (`EngineInstallEvent.engine` is a `LocalEngineId`).
+  Three rules: **uninstall only ever removes the managed copy** under `<dataDir>/engines/<id>`
+  (PATH / brew / conda installs are never touched, so those rows deliberately show no uninstall
+  button), **model weights are never deleted with an engine** (each spec points at the page that
+  owns them), and **install/uninstall stops whatever was using the engine first** (served models,
+  whisper-server, OCR / MLX workers) — cloudflared refuses while its tunnel is up instead.
+  Upgrading is the same path as installing with `upgrade: true` (pip `--upgrade`, or re-download
+  for engines whose version is pinned in code); progress reuses the setup-screen push channel
+  (`engineInstallLog` / `engineInstallPhase`), and `startEngineLogBridge()` folds the other
+  installers' own logs into it rather than adding a second channel.
+- **The 模型 group is four entries, one per question — don't add a fifth** (设置 → 模型):
+  **模型库** (`library`), **运行模型** (`run`), **云端模型** (`cloud`), **模型引擎** (`engines`).
+  `mainview/app/model-library/` answers "what models do I have / where do they come from" with three
+  horizontal tabs — **market** (ModelScope / HF search + recommended presets; downloads happen in
+  model-detail), **downloaded** (the installed list, default tab) and **favorites** — and nothing
+  else: engine choice and launch parameters are `mainview/app/local-models/` (运行模型), providers
+  and per-app defaults are `CloudProviderPanel` + `DefaultModelsPanel` (云端模型), engine
+  install/upgrade/uninstall is `main-layout/engines-tab.tsx` (模型引擎). A model-related surface
+  belongs in one of those four, not in a new entry — the earlier six parallel entries
+  (模型云服务 / 默认模型 / 本地模型 / 引擎 / 模型库 / 在线模型市场) forced users to hop pages for
+  one task. Two rules that cost real bugs if broken: external jump targets still use the old ids
+  (`network` / `defaults` → cloud, `model` → run, `store` → library, `market` → library's market
+  tab, plus mini-app `omni.openSettings("network")` and `omi`'s `navigate` with `tab` / `sub`),
+  so `settings.tsx`'s `LEGACY_TABS` must keep resolving them — an unmapped id lands on a blank pane;
+  and every user-facing "configure it over in …" string (bun error messages, `cloud.where`, CLI
+  help, the omni-doctor playbooks, whose left column matches raw error text) must name
+  设置 → 云端模型 / 设置 → 模型引擎, not the retired names.
 - **Cloud models are picked as `provider → model`, never as a per-page URL + key**: image,
   image-edit, video, TTS, ASR, live-translate and VLM OCR each store only a provider id
   (`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / …) plus a model name; base URL and key come from
@@ -75,6 +108,18 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   (`CloudModelEntry.type`: image / video / tts / asr / chat / …; inferred from the id when
   absent) and every picker filters by it — a new cloud model selector must go through
   `CloudModelSelect` + `providersForType` instead of listing all providers.
+  **The provider entries themselves are a built-in catalog, not something users assemble**:
+  every entry in `CLOUD_PRESETS` (`shared/cloud-providers.ts`, grouped by `section`:
+  official / cn / aggregator / global) is seeded into the table on first read
+  (`ensureBuiltinProviders`, idempotent — existing rows are never touched), so the settings
+  page lists all of them up front and the user only pastes an API key. A built-in row whose
+  `baseUrl` still equals the preset's is an *app-maintained* address (`isBuiltinBaseUrl`):
+  read-only in the panel, rejected by `updateCloudProvider`, and `deleteCloudProvider`
+  refuses built-ins (they would just be re-seeded). Legacy rows whose address the user
+  already changed stay editable. Adding a vendor = one `CLOUD_PRESETS` entry (with
+  `section` + `apiKeyUrl`), never a UI or schema change; the first-run setup screen
+  (`mainview/app/setup-screen/remote-flow.tsx`) reuses the same catalog and ends in
+  `cloudProviderConfigure`, so a key typed there is the same row the settings page shows.
   Video and music are the exceptions that prove the rule: those APIs are not standardized, so
   the provider row also carries a protocol — `videoApi` ("minimax" | "seedance") and `musicApi`
   ("stepfun" | "minimax") — and it is the *only* dispatch switch (`bun/music-gen.ts` never
@@ -157,6 +202,19 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   To look at a page without booting the desktop app: `bun run --cwd apps/studio miniapps:preview`
   (the pages, with a stub host in a plain browser) and `miniapps:center` (the app center, rendered
   against the built stylesheet).
+- **Music is a playlist library, not a record list** (音乐 app): the left sidebar is playlists
+  (`bun/music-playlists.ts` + `music_playlists` / `music_playlist_items`), the right side is the
+  selected playlist's track page, and a bottom player bar (`stores/music-player.ts`) stays put
+  across all three views. Three invariants: the **default playlist is a real builtin row** — every
+  new record is added to it by `insertMusicRecord`, so a song can never exist only in the creation
+  log; songs are recorded once and belong to *N* playlists, which is why membership is its own table
+  (removing one there must stick, so the old-record backfill runs **only** when that row is created,
+  never on later reads); and the **audio element is a module-level singleton outside React** whose
+  queue is a snapshot taken when the user hits play, refreshed by `patchQueue` from the
+  `["music-records"]` query — a track that finishes generating must become playable without
+  restarting playback. Album art does not exist in either upstream API, so covers are deterministic
+  gradients (`app/music/cover.tsx`); a playlist cover is a 2×2 mosaic of its first four tracks.
+  Playlists are user-authored structure, so they get their own default-on `BACKUP_SCOPES` entry.
 - **One proxy governs every outbound request** (Settings → Preferences → General):
   `bun/proxy.ts` wraps `globalThis.fetch` at startup, so cloud model calls (chat / image /
   video / TTS / ASR / OCR / translate), the model hubs, engine and weight downloads, web
@@ -272,7 +330,7 @@ The RPC contract lives in `src/bun/rpc/index.ts` (~5,400 lines) which holds both
 
 ## Database Migrations
 
-Migrations live in `apps/studio/src/bun/db/migrations/` (currently 0000–0031). Generated by `drizzle-kit generate`:
+Migrations live in `apps/studio/src/bun/db/migrations/` (currently 0000–0040). Generated by `drizzle-kit generate`:
 
 ```bash
 cd apps/studio && bun run db:generate
@@ -280,6 +338,15 @@ cd apps/studio && bun run db:generate
 
 **Critical rules:**
 - **Always check migration ordering.** The `when` field determines execution order — if a new migration's `when` is less than a previous one, older databases skip it entirely during upgrade.
+- **The migrator compares one number, read once**: drizzle takes `SELECT … ORDER BY created_at DESC LIMIT 1`
+  before the loop and never updates it, so any migration whose `when` is not greater than that value is
+  **permanently unreachable** for that database — it will not be re-tried on later starts. Two mechanisms
+  in `db/index.ts` exist for that, and both run before `migrate()`: `normalizeMigrationTimestamps()`
+  rewrites applied rows' `created_at` to the journal's `when` (matched by SQL hash), and
+  `repairUnreachableMigrations()` re-runs entries whose `when` is ≤ the DB's max but which have no applied
+  row. A merged branch that renumbers migrations (main keeps its numbers, ours shift to the end —
+  `when` taken from the introducing commit's ms) is exactly when these fire; regression coverage is
+  `db/db-migrate-timestamps.tests.ts` (four cases: fresh, poisoned, released 0.1.0, local canary).
 - New tables/columns go into SQL files; Drizzle schema lives in `src/bun/db/schema.ts`.
 - WAL mode + `busy_timeout=5000` + `synchronous=NORMAL` supports concurrent reads from CLI/MCP bridge while app runs.
 

@@ -86,6 +86,67 @@ export function normalizeContexts(list: number[]): number[] {
   return [...seen].sort((a, b) => a - b);
 }
 
+// ---------------------------------------------------------------------------
+// 并发档位（batch）
+//
+// 单请求吞吐和聚合吞吐是两条相反的曲线：并发越高，单流越慢、聚合越高。
+// 只测一个并发等于只给出一条曲线上的一个点，所以并发也是一档要扫的维度
+// （扫描矩阵 = 档位 × 并发 × 缓存场景）。
+// ---------------------------------------------------------------------------
+
+/** 最小并发：1 就是"不开并发"。 */
+export const BENCHMARK_MIN_BATCH = 1;
+/**
+ * 最大并发：64。
+ *
+ * 上限不只是界面约束：控制 socket / webview 传来的是不受信的数组，而扫描耗时
+ * 按并发线性增长（每档要等最慢的那个请求），本机引擎同时塞 100 个请求只会
+ * 排队到超时 —— 与其跑出一个假的"聚合吞吐"，不如在这里夹住。
+ */
+export const BENCHMARK_MAX_BATCH = 64;
+
+/** 单档文本 → 并发数：只认正整数。无法识别返回 null。 */
+export function parseBatch(text: string): number | null {
+  const m = /^(\d+)$/.exec(text.trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** 列表文本（CLI `--batches 1,2,4`、界面的自定义输入）→ 规范并发列表。 */
+export function parseBatchSizes(text: string): number[] {
+  const parsed = text
+    .split(/[,，\s]+/)
+    .map(parseBatch)
+    .filter((n): n is number => n !== null);
+  return normalizeBatchSizes(parsed);
+}
+
+/**
+ * 规范形态：去重、夹在 [1, 64]、升序；空集回落到 [1]。
+ *
+ * 空集回落到 [1] 而不是空数组：扫描静默变成"零个并发"就什么都不测了，
+ * 而 [1] 恰好是"不开并发"的历史默认行为。
+ */
+export function normalizeBatchSizes(list: number[]): number[] {
+  const seen = new Set<number>();
+  for (const raw of list) {
+    if (!Number.isFinite(raw)) continue;
+    seen.add(Math.min(Math.max(Math.round(raw), BENCHMARK_MIN_BATCH), BENCHMARK_MAX_BATCH));
+  }
+  return seen.size > 0 ? [...seen].sort((a, b) => a - b) : [BENCHMARK_MIN_BATCH];
+}
+
+/**
+ * 从任务参数里读回并发档列表：新记录是 `batchSizes`，老记录（以及老 CLI 负载）
+ * 只有单值 `batchSize`。界面表头、导出报告、CLI 都读这一份，免得三处各写一遍兼容。
+ */
+export function batchSizesFromParams(params?: Record<string, unknown> | null): number[] {
+  const list = Array.isArray(params?.batchSizes) ? (params.batchSizes as number[]).map(Number) : [];
+  if (list.length === 0 && params?.batchSize != null) list.push(Number(params.batchSize));
+  return normalizeBatchSizes(list);
+}
+
 /**
  * 推理服务器当前**单请求**能吃多少 tokens（界面在勾档位前提示用）。
  *
@@ -149,6 +210,8 @@ export function parseCacheModes(text: string): BenchmarkCacheMode[] {
 /** 一行指标里与缓存对比有关的字段（SpeedBenchRow 与界面里的历史行都满足）。 */
 export type CacheCompareRow = {
   contextLength: number;
+  /** 老记录没有这个字段：当年只有一个并发档，按 1 看待。 */
+  batchSize?: number;
   /** 老记录没有这个字段：当年只有"预热过再测"一条路，按 warm 看待。 */
   cache?: BenchmarkCacheMode;
   ok: number;
@@ -161,6 +224,7 @@ export type CacheCompareRow = {
 
 export type CacheComparison = {
   contextLength: number;
+  batchSize: number;
   cold: CacheCompareRow | null;
   partial: CacheCompareRow | null;
   warm: CacheCompareRow | null;
@@ -176,14 +240,21 @@ function modeOf(row: CacheCompareRow): BenchmarkCacheMode {
   return row.cache ?? "warm";
 }
 
-/** 按档位把三种场景并排放：界面/CLI 的对比区都读它，避免两边各算一套。 */
+/**
+ * 按 **档位 × 并发** 把三种场景并排放：界面/CLI 的对比区都读它，避免两边各算一套。
+ *
+ * 分组必须带上并发：缓存收益与并发叠在一起时（并发越高每个请求独占的 KV 越少），
+ * 拿 ×1 的冷启去比 ×8 的命中，差值里既有缓存的功劳也有并发的代价 —— 那个倍数没意义。
+ */
 export function cacheComparison<T extends CacheCompareRow>(rows: T[]): CacheComparison[] {
-  const byCtx = new Map<number, Partial<Record<BenchmarkCacheMode, T>>>();
+  const bySlot = new Map<string, { contextLength: number; batchSize: number; modes: Partial<Record<BenchmarkCacheMode, T>> }>();
   for (const row of rows) {
     if (row.ok <= 0) continue; // 没测出来的档位没有可比性
-    const entry = byCtx.get(row.contextLength) ?? {};
-    entry[modeOf(row)] = row;
-    byCtx.set(row.contextLength, entry);
+    const batchSize = row.batchSize ?? 1;
+    const key = `${row.contextLength}@${batchSize}`;
+    const slot = bySlot.get(key) ?? { contextLength: row.contextLength, batchSize, modes: {} };
+    slot.modes[modeOf(row)] = row;
+    bySlot.set(key, slot);
   }
 
   const ratio = (cold: CacheCompareRow | null, other: CacheCompareRow | null): number | null => {
@@ -191,14 +262,15 @@ export function cacheComparison<T extends CacheCompareRow>(rows: T[]): CacheComp
     return Number((cold.ttftMs / other.ttftMs).toFixed(2));
   };
 
-  return [...byCtx.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([contextLength, entry]) => {
-      const cold = entry.cold ?? null;
-      const partial = entry.partial ?? null;
-      const warm = entry.warm ?? null;
+  return [...bySlot.values()]
+    .sort((a, b) => a.contextLength - b.contextLength || a.batchSize - b.batchSize)
+    .map(({ contextLength, batchSize, modes }) => {
+      const cold = modes.cold ?? null;
+      const partial = modes.partial ?? null;
+      const warm = modes.warm ?? null;
       return {
         contextLength,
+        batchSize,
         cold,
         partial,
         warm,

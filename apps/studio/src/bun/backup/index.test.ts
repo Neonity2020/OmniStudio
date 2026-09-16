@@ -152,6 +152,16 @@ describe("作用域归置", () => {
     expect(defaults).toContain(root!.scope);
   });
 
+  test("默认备份带上音乐歌单（编排丢了没法重算，音频可以重生成）", () => {
+    const defaults = BACKUP_SCOPES.filter((s) => s.defaultOn).map((s) => s.id);
+    const tables = tablesForScopes(defaults);
+    expect(tables).toContain("music_playlists");
+    expect(tables).toContain("music_playlist_items");
+    // 两张表必须在同一个作用域里：只备歌单不备成员关系，恢复出来是一堆空歌单。
+    const scopeOf = (table: string) => BACKUP_SCOPES.find((s) => s.tables.includes(table))?.id;
+    expect(scopeOf("music_playlists")).toBe(scopeOf("music_playlist_items"));
+  });
+
   test("归档条目反推归属，技能仓库的 .git 被排除", () => {
     expect(classifyArchiveEntry(`${BACKUP_FILES_PREFIX}chat-images/1/a.png`)).toMatchObject({ scope: "chats" });
     expect(classifyArchiveEntry(`${BACKUP_FILES_PREFIX}skills-repo/my-skill/SKILL.md`)).toMatchObject({ scope: "skills" });

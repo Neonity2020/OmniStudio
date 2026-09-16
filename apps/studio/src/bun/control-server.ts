@@ -68,9 +68,12 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     case "navigate": {
       const path = String(payload.path ?? "");
       if (!path) return { ok: false, error: "缺少 path" };
+      // tab / sub 是可选的二级落点（设置页里的标签与子页签），长度封一下 —— 它们来自命令行。
+      const tab = payload.tab == null ? undefined : String(payload.tab).slice(0, 40);
+      const sub = payload.sub == null ? undefined : String(payload.sub).slice(0, 40);
       win()?.show();
       try {
-        win().webview.rpc?.send.navigate({ path });
+        win().webview.rpc?.send.navigate({ path, tab, sub });
       } catch (err) {
         return { ok: false, error: String(err) };
       }
@@ -294,11 +297,16 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
       const cacheModes = Array.isArray(payload.cacheModes)
         ? (payload.cacheModes.filter((m) => typeof m === "string") as BenchmarkParams["cacheModes"])
         : undefined;
+      // 并发档列表同理：`--batches 1,2,4` 发的是列表，`--batch 4` 是单值简写。
+      const batchSizes = Array.isArray(payload.batchSizes)
+        ? payload.batchSizes.map(Number).filter((n) => Number.isFinite(n))
+        : undefined;
       const result = startBenchmark({
         model: typeof payload.model === "string" ? payload.model : "",
         providerId: typeof payload.providerId === "string" ? payload.providerId : undefined,
         genLength: Number(payload.genLength) || undefined,
         batchSize: Number(payload.batchSize) || undefined,
+        batchSizes,
         temperature: Number.isFinite(Number(payload.temperature)) ? Number(payload.temperature) : undefined,
         contexts,
         cacheModes,

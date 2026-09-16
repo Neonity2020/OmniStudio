@@ -185,7 +185,7 @@ export function TtsTab() {
   });
   const provider = providerData?.config;
   const configured = !!provider?.providerId;
-  // 云端 TTS 只记厂商 id：地址 / 密钥在「设置 → 模型云服务」里（本页不再输入）。
+  // 云端 TTS 只记厂商 id：地址 / 密钥在「设置 → 云端模型」里（本页不再输入）。
   const [pProviderId, setPProviderId] = useState("");
   const [pError, setPError] = useState<string>();
   // 参考音频：已选文件（ref 传给后端 / url 前端预览）+ 是否手动覆盖“该模型支持参考音频”（null=跟随自动检测）。
@@ -383,7 +383,7 @@ export function TtsTab() {
                 </div>
                 <p className="text-[11px] text-muted-foreground">{t("voice.compat.desc")}</p>
 
-                {/* 厂商 + 模型：都是「设置 → 模型云服务」里配好并启动过的 TTS 模型 */}
+                {/* 厂商 + 模型：都是「设置 → 云端模型」里配好并启动过的 TTS 模型 */}
                 <div>
                   <Label className="mb-1 block text-xs">{t("voice.compat.cloudProvider")}</Label>
                   <CloudModelSelect

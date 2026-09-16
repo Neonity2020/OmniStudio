@@ -20,7 +20,7 @@ import { useMlxModelRunStore } from "@stores/mlx-model-run";
 import type { ImageGenBackend, ImageRecordRow } from "../../../bun/image-gen";
 import type { MlxModelInfo } from "../../../bun/mlx-gen";
 import { cn } from "@/mainview/lib/utils";
-import { RATIOS, RANDOM_PROMPTS, MLX_FALLBACKS, formatTime, formatBytes, ImageCard, GenLoading, RecentStrip, isForeignModel } from "./parts";
+import { RATIOS, RANDOM_PROMPTS, MLX_FALLBACKS, formatTime, formatBytes, formatSpeed, ImageCard, GenLoading, RecentStrip, isForeignModel } from "./parts";
 
 export function GenerateTab() {
   const t = useT();
@@ -49,7 +49,7 @@ export function GenerateTab() {
 
   // ---------- 后端配置 ----------
   const [backend, setBackend] = useState<ImageGenBackend>("api");
-  // 云端只记厂商 id：地址 / 密钥在「设置 → 模型云服务」里（本页不再让用户填）。
+  // 云端只记厂商 id：地址 / 密钥在「设置 → 云端模型」里（本页不再让用户填）。
   const [providerId, setProviderId] = useState("");
   const [comfyBase, setComfyBase] = useState("");
   const [configError, setConfigError] = useState<string>();
@@ -194,6 +194,24 @@ export function GenerateTab() {
   const downloading = modelProgress?.stage === "downloading";
   const downloadingThis =
     downloading && !!modelProgress && modelProgress.modelId === model && mlxStatus?.engineInstalled;
+  // 多文件模型（VLM / MLX）只展示整体下载速度，不做逐文件速度：用整体字节
+  // （doneBytes + 当前文件 received 的回写）的增量算 bytes/s。
+  const [dlSpeed, setDlSpeed] = useState(0);
+  const dlSampleRef = useRef<{ at: number; bytes: number } | null>(null);
+  useEffect(() => {
+    if (!modelProgress || modelProgress.stage !== "downloading") {
+      dlSampleRef.current = null;
+      return;
+    }
+    const now = Date.now();
+    const bytes = modelProgress.doneBytes + modelProgress.received;
+    const prev = dlSampleRef.current;
+    dlSampleRef.current = { at: now, bytes };
+    if (prev) {
+      const dt = (now - prev.at) / 1000;
+      if (dt > 0) setDlSpeed(Math.max(0, (bytes - prev.bytes) / dt));
+    }
+  }, [modelProgress]);
   const downloadMlxModelMut = useMutation({
     mutationFn: () => rpcClient.downloadMlxModel({ modelId: model }),
     onSuccess: (r) => {
@@ -438,9 +456,7 @@ export function GenerateTab() {
                       <div className="flex flex-col gap-1 rounded-md border bg-muted/40 p-2">
                         <div className="flex items-center justify-between text-[10px] tabular-nums text-muted-foreground">
                           <span className="truncate text-primary">
-                            {modelProgress.fileName
-                              ? `${t("image.mlx.downloadingFile")}：${modelProgress.fileName.split("/").pop()}`
-                              : t("image.mlx.downloadingModel")}
+                            {t("image.mlx.downloadingModel")}
                           </span>
                           <span className="ml-2 shrink-0">{modelProgress.percent}%</span>
                         </div>
@@ -450,12 +466,21 @@ export function GenerateTab() {
                             style={{ width: `${Math.min(100, modelProgress.percent)}%` }}
                           />
                         </div>
+                        {/* 多文件模型只展示整包进度与整体下载速度，不逐文件列了。 */}
                         <p className="text-[9px] tabular-nums text-muted-foreground">
-                          {modelProgress.filesTotal > 0
-                            ? `${modelProgress.filesDone}/${modelProgress.filesTotal} 文件 · ${formatBytes(
+                          {modelProgress.allBytes > 0
+                            ? `${formatBytes(
                                 modelProgress.doneBytes + modelProgress.received,
                               )} / ${formatBytes(modelProgress.allBytes)}`
                             : formatBytes(modelProgress.received)}
+                          {modelProgress.filesTotal > 1 &&
+                            ` · ${t("image.mlx.filesOf").replace(
+                              "{done}",
+                              String(modelProgress.filesDone + (modelProgress.fileName ? 1 : 0)),
+                            ).replace("{total}", String(modelProgress.filesTotal))}`}
+                          {formatSpeed(dlSpeed) && (
+                            <span className="ml-1 text-primary">{formatSpeed(dlSpeed)}</span>
+                          )}
                         </p>
                       </div>
                     ) : mlxDownloaded.has(model.trim()) ? (
@@ -592,7 +617,7 @@ export function GenerateTab() {
           ) : (
           <div className="flex flex-col gap-2.5 rounded-lg border bg-card p-3">
             {backend === "api" ? (
-              // 云端生图：只选厂商 + 模型（都是「设置 → 模型云服务」里配好并启动过的），
+              // 云端生图：只选厂商 + 模型（都是「设置 → 云端模型」里配好并启动过的），
               // 地址与密钥由厂商提供，这里不再出现输入框。
               <div>
                 <Label className="mb-1 block text-xs">{t("image.config.cloudProvider")}</Label>

@@ -1,6 +1,6 @@
 # OmniStudio 迭代规划与未完成任务清单
 
-> 更新：2026-09-13　结构说明见 [docs/architecture.md](./docs/architecture.md)
+> 更新：2026-09-16　结构说明见 [docs/architecture.md](./docs/architecture.md)
 > 图例：✅ 已完成 / 🟡 部分完成 / ❌ 未启动　优先级：P0 核心 / P1 重要 / P2 远期
 >
 > 同步到 GitHub Projects 用 `scripts/create-project-backlog.sh`，数据源是 `scripts/backlog.tsv`。
@@ -25,7 +25,7 @@
 | OW-09b | 上下文压缩（长任务不炸窗口） | ✅ | `bun/agent-compaction.ts` + `Agent.transformContext`；子智能体轮数独立上限 `AGENT_SUBAGENT_MAX_STEPS` |
 | OW-10 | 编辑 diff 视图 | ✅ | LCS 行级 diff（+/- 计数）内联在 edit_file / write_file 卡片里 |
 | OW-11 | 运行中排队消息 / 插话（steer） | ✅ | `followUpAgentMessage()` + 队列面板：Enter 排队、Cmd/Ctrl+Enter 立即插话、停止时连队列一起取消 |
-| OW-12 | 会话分叉（从某条消息分支） | 🟡 | `Chat.forkConversation()` + 消息操作条「分支」按钮；回退 / 上下文压缩未做 |
+| OW-12 | 会话分叉（从某条消息分支）+ 回退到某条消息 | 🟡 | `Chat.forkConversation()` + 消息操作条「分支」按钮。**回退已补**：`Agent.revertAgentSession()` + `planRevertToMessage()`（删除边界按角色分：用户消息「回到这条提问」连它一起删并把正文回填输入框；助手消息「保留到这里」只删后面的），带确认弹窗（写明不动工作区文件），删消息同时清 `agent_events`。仍未做：分叉时的上下文压缩 |
 | OW-12b | 确认改到消息流内（不遮挡输入框、可回看） | ✅ | 授权 / 提问的请求与结果各落一条事件（按 id 配对），卡片画在触发它的消息下方，答完收成一行记录 |
 | OW-12c | 搜索 / 自动化 / 插件 / Skills 收到 Agent 侧栏 | ✅ | 侧栏「新建任务」下面是**自动化 / 插件**两个子视图（点开在 Agent 主区域内显示，带返回对话），一级菜单移除「自动化」；搜索后来改成顶栏 ⌘K 弹窗（正文命中 + 片段），Skills 提升为一级菜单 —— 上一版留下的 `AgentSearchView` / `AgentSkillsView` 已作为死代码删除 |
 | OW-13 | 通知中心 | ✅ | `bun/notifications.ts` + 顶栏铃铛：后台授权请求、自动化结果、无人值守回合结束 |
@@ -109,8 +109,8 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 当前完成度概览（截至 0.0.7-canary.0）：
 
 - ✅ **已落地**：仪表盘、网络/服务配置、模型市集 + 下载器（含任务持久化与断点续传）、模型分类、多 App 结构 + 多模态聊天、集成 Launcher（`omi launch`）、基准测试（吞吐）、日志查看器（基础）、更新通道 / i18n、语音工作台（TTS / ASR / 克隆 / 实时通话）、**图片生图闭环**、**视频生成**、**OCR 三引擎 + 文档管线**、**知识库（本地 RAG）**、**共享记忆**、**MCP 客户端 + 服务端**、**Skills 管理**、云端厂商多配置、**Agent 能力面对齐 OpenWork**（授权 / 待办 / 反问 / 子智能体 / 产出物面板 / 会话侧栏 / 自动化，见 M0）、**Agent 工程能力对齐 Codex**（apply_patch 补丁 / AGENTS.md 项目指令 / 看图工具 / 命令归一化 / 回合快照与回退 / 上下文占用可见 / 命令沙箱 / 外部通知回调 / 生命周期 hooks / 主动申请权限 / `omi agent run` 无头执行 / 会话内 `/model` 换模型 / 快照仓库维护 / `/compact` 与 `/status`，见 M0b）、**Agent 能力面对齐 oh-my-pi**（系统提示去抖动 / 摘要式压缩 + 记忆拼接 / 重复读取去重 / 探索打点收网 / Skills 按需读取 / Goal 与 Plan 两个模式做实 / **瞬时失败自愈（重试 + 空回合提醒）/ 工具输出转存 / 多层 AGENTS.md 段落去重**，见 M0c）。
-- 🟡 **部分完成**：vLLM / SGLang 运行时（参数组装 + 二进制探测 + 安装提示已实现，**仍缺一键安装与实测验证**）、引擎状态 UI（有启停与运行状态，缺版本 / 路径 / 健康度）、性能与内存生命周期、平台支持（配置与发布流程已覆盖 Linux / Windows 构建，未做端到端验证）、Agent 沙箱（M0b 的 CX-06：macOS 三档 + Linux 的 bubblewrap / Landlock 双后端已落地并有端到端，剩 Windows 后端一项）。
-- ❌ **未启动**：外观（托盘 / Dock 指标）、安全（API Key 加密存储 / 日志脱敏）。
+- 🟡 **部分完成**：vLLM / SGLang 运行时（参数组装 + 托管安装 + 统一管理页已实现，**仍缺真实环境实测**）、引擎健康度（版本 / 路径 / 占用 / 使用中已有，缺可连性与显存探测）、平台支持（配置与发布流程已覆盖 Linux / Windows 构建，未做端到端验证）、Agent 沙箱（M0b 的 CX-06：macOS 三档 + Linux 的 bubblewrap / Landlock 双后端已落地并有端到端，剩 Windows 后端一项）、API Key 存储（静态加密已全覆盖，缺系统凭据库与不回显）、会话分叉（回退已补，缺分叉时的上下文压缩）。
+- ❌ **未启动**：外观（托盘 / Dock 指标）、服务统计的显存 / 温度（OPS-05 / 06）、KV 缓存分层与分块预填充（PERF-04 / 05）、日志查看器的服务端分片。日志脱敏（FUT-03）与 API Key 静态加密（FUT-02 主体）已完成，见 M6。
 
 ---
 
@@ -132,24 +132,24 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 
 ## M2 · 本地推理引擎交付（P0）—— vLLM / SGLang 从"🟡"到可交付
 
-`runtimes/vllm.ts` 与 `runtimes/sglang.ts` 参数组装已实现，并已接入统一的 `Runtime` 抽象与 `shared/engines.ts` 注册表；**仍缺一键安装与真实环境实测**。
+`runtimes/vllm.ts` 与 `runtimes/sglang.ts` 参数组装已实现，并已接入统一的 `Runtime` 抽象与 `shared/engines.ts` 注册表；一键安装也已落地（`bun/engine-install.ts` + `bun/python-engine.ts`，设置 → 引擎 页可安装 / 升级 / 卸载）；**仍缺真实环境实测**。
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| LIE-01 | 引擎环境检测 | 🟡 | `Runtime.checkBinary()` 已实现（含 `BinaryCheckResult`），缺失时给出 `shared/engines.ts` 的 `installHint` 文本；未做 Python 环境探测 |
-| LIE-02 | 引擎一键安装 | ❌ | 目前只有提示文本（`pip install vllm`）。对比：whisper.cpp / PaddleOCR / mflux / Tesseract 都已有一键安装 |
+| LIE-01 | 引擎环境检测 | 🟡 | `Runtime.checkBinary()` 区分"应用托管的那份"与"PATH 上那份"（`BinaryCheckResult.mode`），设置 → 引擎 页给出三态（已安装 / 系统安装 / 未安装）+ 版本 + 路径 + 占用 + 是否在用；Python 只作为安装前提文案，未做实时探测 |
+| LIE-02 | 引擎一键安装 | ✅ | llama.cpp 下官方预编译构建（CUDA / Vulkan 变体 + CPU 回退），vLLM / SGLang / MLX 在数据目录建 venv 装 pip 包；升级 = 带 `upgrade` 再走一遍（pip `--upgrade`），卸载只删托管目录。入口 `bun/engine-install.ts`，统一管理在 `bun/engine-catalog.ts` |
 | LIE-03 | vLLM 运行时实测 | ❌ | 参数组装与真实 vLLM 行为对齐、修复差异 |
 | LIE-04 | SGLang 运行时实测 | ❌ | 同上 |
-| LIE-05 | 引擎启动诊断 | 🟡 | `extractStartupError` 已能从实时日志挖出可读错误；缺分类型诊断（缺依赖 / 显存不足 / 端口占用 / 格式不符） |
-| LIE-06 | 引擎状态 UI | 🟡 | `app/local-models-screen.tsx` 有引擎选择 + 启动参数（含重试与并发）+ 启停 + 运行状态；缺版本、路径与健康度 |
+| LIE-05 | 引擎启动诊断 | ✅ | `extractStartupError` 挖出错误原文 + **`shared/engine-errors.ts` 分类型**（缺依赖 / 显存不足 / 磁盘满 / 端口占用 / 权重缺失 / 架构不符 / 权限 / **权重还在下载中**，9 类；文本可判定的 8 类是纯函数 + 26 项单测，第 9 类只能由上下文判定 —— llama.cpp 对"文件没下完"和"架构不认识"说的是同一句 `exiting due to model loading error`，应用按下载队列认出来，实机复现过）。类型随 `ServedModelInfo.errorKind` 与 `getServerStatus().errorKind` 出主进程，界面按类型给可执行的下一步（`engine.error.hint.<kind>`，zh/en），找不到类型时按同一张规则表现算 —— 聊天 / 控制台 / 模型页三处不再各判各的（老的四个正则只认 llama.cpp 那一句） |
+| LIE-06 | 引擎状态 UI | ✅ | 设置 → 引擎：十个本地引擎（四个文本推理 + whisper.cpp / audio.cpp / PaddleOCR / Tesseract / mflux / cloudflared）一页统一管理 —— 状态 / 版本 / 路径 / 占用 / 使用中，安装 / 升级 / 卸载 / 打开目录；`app/local-models-screen.tsx` 保留引擎选择 + 启动参数 + 启停。仍缺健康度（可连性 / 显存占用） |
 
 ## M3 · 性能与生命周期（P1）
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| PERF-01 | 空闲超时自动卸载 | 🟡 | MLX 生图 worker 已实现（`IMG_MLX_IDLE_MINUTES`，默认 10 分钟，0 = 关闭）；**推理服务器本身仍未做** |
+| PERF-01 | 空闲超时自动卸载 | ✅ | **推理服务器层已做**：`model-servers.ts` 的空闲定时器（`SERVER_IDLE_UNLOAD_MINUTES`，默认 0 = 关闭，设置页「服务生命周期」可改）。三个活动信号：应用内推理调用（`recordUsage` / `recordUsageEvent` 打点，后者是网关那一路的收口，外部 agent 的请求也在这里被看见）、实例输出是否变化、llama.cpp 的 `/slots` `is_processing`（唯一精确的「正在忙」信号）。**故意没做在飞请求计数**：一个请求就是一条可能很长的 SSE 流，要正确计数得在正常结束 / 客户端断开 / 引擎报错每条路径上都减回去，漏一条就是永久性的「再也不会卸载」；读数不准的闸门比没有更危险，所以改成把局限写进设置页说明。MLX 生图 worker 的 `IMG_MLX_IDLE_MINUTES` 照旧（默认 10 分钟） |
 | PERF-02 | 预填充内存防护与防护层级 | ❌ | 验证 llama.cpp `--mlock` 等能力后设计 |
-| PERF-03 | 模型回退路由 | ❌ | 默认模型启动失败时回退到备选模型 |
+| PERF-03 | 模型回退路由 | ✅ | `server-manager.ts` 的 `startWithFallback()` + 设置 `SERVER_FALLBACK_MODELS`（控制台「备选模型」卡片里从已下载模型里挑，可排序删除）。**只在模型侧失败时回退**（架构 / 权重 / 显存，`isModelSideFailure`）—— 端口被占、缺依赖、权限不足换哪个模型都一样，回退只会盖住真原因。回退不静默：写 app.log + 进通知中心。7 项单测 |
 | PERF-04 | KV 缓存热/冷分层与 SSD 溢出 | ❌ | 缓存分层 + SSD 溢出目录，先做能力验证 |
 | PERF-05 | 分块预填充 / 预填充优先级 | ❌ | 按引擎支持情况接入设置 |
 
@@ -157,9 +157,9 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| OPS-01 | 日志查看器：多文件切换 | ❌ | 现为单流视图（`main-layout/server-logs.tsx`，197 行：自动滚动 / 复制 / 清空 / 行数）；server.log 未按天或大小分片 |
-| OPS-02 | 日志查看器：最近 N 条筛选 | ❌ | 显式条数筛选 |
-| OPS-03 | 基准测试：batch × ctx 扫描矩阵 | ❌ | 当前一趟固定 batch，改矩阵扫描 |
+| OPS-01 | 日志查看器：多来源 + 多文件切换 | ✅ | 控制台（设置 → 数据 → 控制台）下半屏是一个来源切换器：**应用日志**（`app.log`，结构化条目表：时间 / 级别 / 来源 / 事件 / 正文，detail 可展开）+ **每个实例的实时输出**（推理 stdout）。应用日志可翻轮转文件（`app-*.log`，带时间与体积），`resolveAppLogFile()` 只接受 `appLogFiles()` 列出的 basename（越界文件名拒绝并记 `app_log.file.rejected`）。注：ROADMAP 原来指的 `server-logs.tsx` 早已随多实例改造删除 |
+| OPS-02 | 日志查看器：最近 N 条筛选 | ✅ | 来源切换器右侧共用的 100 / 500 / 2000 档位：应用日志走 `AppLogQuery.limit`（主进程按「取最新 N 条再排序」，`oldestFirst` 只影响顺序），实例输出按行裁（`split("\n").slice(-limit)`，仍受 ANSI 渲染上限约束）。另加级别筛选、搜索、跟随最新（1s 轮询 `memoryOnly + since`，不重读整份文件） |
+| OPS-03 | 基准测试：batch × ctx 扫描矩阵 | ✅ | `BenchmarkParams.batchSizes[]`（保留 `batchSize` 单值作旧载荷兼容），扫描顺序 ctx × batch × cache，`progress.total` 三维相乘；`summary.byBatch` 按并发档分开汇总（跨档的平均值在界面上明确标注口径），`cacheComparison` 按 `ctx@batch` 分组；UI 并发档位 chips + 逗号批量输入，CLI `--batches 1,2,4`（`--batch N` 仍是简写），HTML 报告加「按并发」表 |
 | OPS-04 | 基准测试：准确度 / 质量基准 | ✅ | 已实现「能力评测」模式（`bun/eval.ts`，8 套件：mmlu / cmmlu / gsm8k / mmlu_pro / humaneval / mbpp / ifeval / longctx，支持抽样、并发跑题与按类别得分），结果落 `benchmark_records` |
 | OPS-05 | 服务统计：逐模型显存 / VRAM | ❌ | `/slots` 已能拿实际加载模型，但仅 llama-server 支持；其他引擎靠"最近使用即视作 loaded"兜底 |
 | OPS-06 | 服务统计：GPU 温度与显存锁定量 | ❌ | |
@@ -171,8 +171,8 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 | ENG-01 | 下载任务持久化 | ✅ | `download-manager.ts`：任务写进 settings `MODEL_DOWNLOADS`，重启后按 `.part` 分片续传 | P1 |
 | ENG-02 | `omi launch <tool>` 子命令 | ✅ | 原规划里的 `vllm-studio launch`；现名 `omi launch`，支持 claude / codex / opencode / openclaw / hermes / pi | P1 |
 | ENG-03 | 网络页：Anthropic / Claude Code 端点单独展示 | ❌ | 现在并入集成页 | P2 |
-| ENG-04 | TopK / repeat penalty 设为 UI 参数 | ❌ | 目前 repeat penalty 取自模型 profile 的 serverArgs | P2 |
-| ENG-05 | 模型库扩展目录选择器 | ❌ | `MODEL_DIRS` 现为手输文本，改目录选择 | P2 |
+| ENG-04 | TopK / repeat penalty 设为 UI 参数 | ✅ | 新增 `SERVER_TOP_K`（默认 40）与 `SERVER_REPEAT_PENALTY`（默认 1.12，与各 profile 现行值一致），共用一个优先级：**设置优先、模型档案兜底**（空串 = 没设过），llama.cpp 启动参数发 `--top-k` 与 `--repeat-penalty`；本地模型页的启动参数面板里可改 | P2 |
+| ENG-05 | 模型库扩展目录选择器 | ✅ | **此项早已落地、状态过期**：`app/local-models/model-dirs.tsx` 走系统目录对话框（`openDirectoryDialog`）+ 扫描预览 + 增删 RPC | P2 |
 | ENG-06 | Linux 平台支持 | 🟡 | 构建配置与发布流程已覆盖，未做端到端验证 | P2 |
 | ENG-07 | Windows 平台支持 | 🟡 | 同上 | P2 |
 
@@ -181,15 +181,15 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
 | FUT-01 | 菜单栏 / Dock 托盘指标 | ❌ | 先评估 Electrobun 系统托盘 / 菜单栏 API 支持度 |
-| FUT-02 | API Key 加密存储 | ❌ | macOS Keychain / 系统凭据，远端 Key 不回显（当前明文存 SQLite） |
-| FUT-03 | 日志脱敏 | ❌ | 打印前脱敏 |
+| FUT-02 | API Key 加密存储 | 🟡 | **静态加密已全覆盖**：`ENCRYPTED_KEYS` 从 3 个扩到 15 个（各家云厂商的 TTS / ASR / OCR / 生图 / 视频 / 联网搜索 / 记忆向量 Key、Skills PAT、备份远端访问密钥），知识库的 `embedding_api_key` / `rerank_api_key` 两列同样 AES-256-GCM + 逐行写穿迁移（读到明文顺手加密），名单是唯一真源、测试直接遍历它。**仍未做**：macOS Keychain / 系统凭据（钥匙与锁仍同屋：`<数据目录>/secrets.key` 0600），桌面 RPC 仍把明文 Key 交给 webview（浏览器端 `getSettings` 已脱敏） |
+| FUT-03 | 日志脱敏 | ✅ | 两层：**字段名**（名单补了 `access_key` / `secret_key` / `credential` 等别名，裸 `key` 故意不收）+ **内容**（`redactSecrets()`：Authorization / x-api-key 头、`Bearer`、`sk-`/`osk-`/`hf_`/`ghp_`/`glpat-` 前缀、`api_key=` / `?token=` / `--password` 赋值、URL userinfo）。`message` 也过一遍 —— 泄漏密钥的路径主要是「把整条命令行 / URL 抄进日志」，字段名那层盖不住。14 项单测含「不误伤」用例（`prompt_tokens=1024`、路径、短值） |
 | FUT-04 | 本地引擎音频能力评估 | 🟡 | TTS 与 ASR 均已接入本地引擎（audio.cpp / whisper.cpp），本条实质已达成；保留用于评估更多本地音频能力 |
 
 ---
 
 ## 迭代节奏建议
 
-- **M2 是当前最大的交付缺口**：vLLM / SGLang 的一键安装 + 实测（LIE-02/03/04）直接决定"三引擎统一运行时"能不能算兑现；其余引擎（whisper.cpp / PaddleOCR / mflux）的一键安装已有成熟模式可复用。
+- **M2 剩下的缺口是实测**：vLLM / SGLang 的一键安装与统一管理页已落地（LIE-02 / LIE-06），还差的是一台带 NVIDIA 显卡的机器上把参数组装跑通（LIE-03/04）与分类型启动诊断（LIE-05）。
 - **M3 的 PERF-01 有现成参照**：MLX 生图 worker 的空闲卸载逻辑可以照搬到 `server-manager` 层。
 - 每个里程碑结束跑一次回归：`cd apps/studio && bun run build:dev` + 手工过 P0 路径（聊天 → 生图 → OCR → 语音）。
 - 提交前跑：`bun run lint && bun run typecheck && bun run test && bun run --cwd apps/studio test:smoke`（与 CI 一致）。

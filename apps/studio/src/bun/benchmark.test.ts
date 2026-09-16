@@ -24,6 +24,18 @@ let seen: SeenRequest[] = [];
 /** 前缀缓存：留着最近几段见过的 prompt，按最长公共前缀算可复用的 tokens。 */
 let cachedPrompts: string[] = [];
 
+/**
+ * 流式请求的"到达分组"：组内 = 同一时刻在途的请求。
+ *
+ * 假服务端秒回的话，同一 bucket 的 N 个并发请求会一个接一个地完成，"并发 N"
+ * 就只是一个说法。给流式响应加一点假耗时，让它们真的重叠起来，再记下每组的
+ * 大小 —— 这样"这一档到底同时发了几个请求"才是可断言的。
+ */
+const STREAM_DELAY_MS = 30;
+let inflightStreams = 0;
+let streamGroups: { promptTokens: number; size: number }[] = [];
+let currentGroup: { promptTokens: number; size: number } | null = null;
+
 function commonPrefixLength(a: string, b: string): number {
   const max = Math.min(a.length, b.length);
   let i = 0;
@@ -75,6 +87,20 @@ const server = Bun.serve({
       })}\n\n`,
       "data: [DONE]\n\n",
     ];
+    // 在途计数：同一 bucket 的并发请求会挤在同一组里（档与档之间是串行的，
+    // 所以"组"就是"一次并发批次"）。
+    if (inflightStreams === 0) {
+      currentGroup = { promptTokens, size: 0 };
+      streamGroups.push(currentGroup);
+    }
+    inflightStreams += 1;
+    currentGroup!.size = Math.max(currentGroup!.size, inflightStreams);
+    try {
+      await Bun.sleep(STREAM_DELAY_MS);
+    } finally {
+      inflightStreams -= 1;
+      if (inflightStreams === 0) currentGroup = null;
+    }
     return new Response(chunks.join(""), { headers: { "Content-Type": "text/event-stream" } });
   },
 });
@@ -116,6 +142,9 @@ beforeAll(() => {
 async function runToCompletion(params: Parameters<typeof startBenchmark>[0]) {
   seen = [];
   cachedPrompts = [];
+  inflightStreams = 0;
+  streamGroups = [];
+  currentGroup = null;
   const started = startBenchmark(params);
   if ("error" in started) throw new Error(started.error);
   const deadline = Date.now() + 30_000;
@@ -212,7 +241,7 @@ describe("档位扫描", () => {
     const failed = state.rows[3]!;
     expect(failed.ok).toBe(0);
     expect(failed.error).toContain("exceeds the available context size");
-    expect(state.stopped).toEqual({ reason: "context-overflow", contextLength: 16384 });
+    expect(state.stopped).toEqual({ reason: "context-overflow", contextLength: 16384, batchSize: 1 });
     expect(state.summary?.stopped?.reason).toBe("context-overflow");
     // 失败档位不摊进平均，且平均只取冷启（唯一没被缓存粉饰的那种工况）
     expect(state.summary?.basis).toBe("cold");
@@ -348,5 +377,115 @@ describe("缓存场景", () => {
     const state = await runThreeModes();
     expect(state.progress.total).toBe(3);
     expect(state.progress.done).toBe(3);
+  });
+});
+
+describe("并发矩阵扫描", () => {
+  test("档位 × 并发 × 缓存 全部展开：每格一行，顺序按 档位 → 并发 → 缓存", async () => {
+    const state = await runToCompletion({
+      model: "test-model",
+      providerId: FAKE_PROVIDER.id,
+      contexts: [1024, 4096],
+      // 乱序 + 重复：规范化后应当是 [1, 2] 两档
+      batchSizes: [2, 1, 2],
+      cacheModes: ["cold", "warm"],
+      genLength: 32,
+    });
+
+    expect(state.status).toBe("done");
+    expect(state.rows.map((r) => `${r.contextLength}/${r.batchSize}/${r.cache}`)).toEqual([
+      "1024/1/cold",
+      "1024/1/warm",
+      "1024/2/cold",
+      "1024/2/warm",
+      "4096/1/cold",
+      "4096/1/warm",
+      "4096/2/cold",
+      "4096/2/warm",
+    ]);
+    // 进度总数把三个维度都算进去（漏掉并发这一维，进度条会先跑到 100% 再继续跑）
+    expect(state.progress.total).toBe(2 * 2 * 2);
+    expect(state.progress.done).toBe(state.progress.total);
+    // 每行的 ok 等于它所属并发的请求数（×2 的格子确实发了两个请求）
+    for (const row of state.rows) expect(row.ok).toBe(row.batchSize);
+    expect(state.stopped).toBeUndefined();
+  });
+
+  test("每个并发档真的同时发出 N 个请求：假服务端看到的在途分组大小 = 1 → 3", async () => {
+    const state = await runToCompletion({
+      model: "test-model",
+      providerId: FAKE_PROVIDER.id,
+      contexts: [2048],
+      batchSizes: [1, 3],
+      cacheModes: ["cold"],
+      genLength: 32,
+    });
+
+    expect(state.rows.map((r) => `${r.batchSize}:${r.ok}`)).toEqual(["1:1", "3:3"]);
+    expect(streamGroups.map((g) => g.promptTokens)).toEqual([2048, 2048]);
+    expect(streamGroups.map((g) => g.size)).toEqual([1, 3]);
+  });
+
+  test("汇总按并发分开：byBatch 每档一份（顶层那几个数是跨并发混算的）", async () => {
+    const state = await runToCompletion({
+      model: "test-model",
+      providerId: FAKE_PROVIDER.id,
+      contexts: [1024, 4096],
+      batchSizes: [1, 2],
+      cacheModes: ["cold"],
+      genLength: 32,
+    });
+
+    expect(state.summary?.byBatch?.map((b) => [b.batchSize, b.rows])).toEqual([
+      [1, 2],
+      [2, 2],
+    ]);
+    for (const b of state.summary?.byBatch ?? []) {
+      expect(b.avgTps).toBeGreaterThan(0);
+      expect(b.peakTps).toBeGreaterThanOrEqual(b.avgTps);
+      expect(b.peakAggTps).toBeGreaterThan(0);
+      expect(b.avgTtftMs).toBeGreaterThan(0);
+    }
+  });
+
+  test("并发矩阵下早停带上撞墙的并发档，并跳过同一档位剩下的并发与场景", async () => {
+    maxPromptTokens = 12_288;
+    const state = await runToCompletion({
+      model: "test-model",
+      providerId: FAKE_PROVIDER.id,
+      contexts: [1024, 16384],
+      batchSizes: [4, 8],
+      cacheModes: ["cold", "warm"],
+      genLength: 32,
+    });
+
+    expect(state.status).toBe("done");
+    expect(state.rows.map((r) => `${r.contextLength}/${r.batchSize}/${r.cache}`)).toEqual([
+      "1024/4/cold",
+      "1024/4/warm",
+      "1024/8/cold",
+      "1024/8/warm",
+      "16384/4/cold",
+    ]);
+    expect(state.stopped).toEqual({ reason: "context-overflow", contextLength: 16384, batchSize: 4 });
+    maxPromptTokens = Number.POSITIVE_INFINITY;
+  });
+
+  test("老的单值 batchSize 仍然生效（单元素简写），只扫一个并发档", async () => {
+    const state = await runToCompletion({
+      model: "test-model",
+      providerId: FAKE_PROVIDER.id,
+      contexts: [1024],
+      cacheModes: ["warm"],
+      genLength: 32,
+      batchSize: 2,
+    });
+
+    expect(state.rows.map((r) => r.batchSize)).toEqual([2]);
+    expect(state.rows[0]!.ok).toBe(2);
+    expect(state.params.batchSizes).toEqual([2]);
+    expect(state.progress.total).toBe(1);
+    // 单并发时不塞冗余的 byBatch（它与顶层那几个数就是同一份）
+    expect(state.summary?.byBatch).toBeUndefined();
   });
 });

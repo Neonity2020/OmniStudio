@@ -264,9 +264,61 @@ export const musicRecords = sqliteTable("music_records", {
   /** 上游改写后的风格描述 / 歌词（stepfun 只在 SUCCESS 时返回）。 */
   rewrittenCaption: text("rewritten_caption"),
   rewrittenLyrics: text("rewritten_lyrics"),
+  /**
+   * 带时间轴的歌词（LRC）。
+   *
+   * 生音乐接口只给整段文本，播放页原先按"内容行均分总时长"估着高亮。这里存的是
+   * **一键对齐**的结果：用 ASR 的分段时间戳把歌词行对上去（见 bun/music-lyrics.ts）。
+   * 有它就用真实时间轴，没有就退回估算 —— 界面会写明是哪一种。
+   */
+  lyricLrc: text("lyric_lrc"),
+  /**
+   * 作品封面（images 目录内，如 music/covers/xxx.webp）；null = 还没设封面，
+   * 界面按歌名生成确定性渐变兜底（见 mainview/app/music/cover.tsx）。
+   * 上传与生成都统一裁成 1024 方图，见 bun/music-covers.ts。
+   */
+  coverPath: text("cover_path"),
   error: text("error"),
   createdAt: int("created_at").$defaultFn(() => Date.now()),
 });
+
+/**
+ * 音乐歌单（音乐页左侧那一栏）。
+ *
+ * 一首歌可以同时属于多个歌单，所以成员关系放在 `music_playlist_items` 里，而不是在
+ * `music_records` 上加一列 playlist_id —— 后者表达不了"同一首歌放进两个歌单"。
+ *
+ * `builtin = 1` 的那一行是**默认歌单**：新生成的音乐会经
+ * `music-playlists.ts` 的 `addToDefaultPlaylist` 自动收录进来，不能改名也不能删 ——
+ * 它是"生成完就能在歌单里找到"这条承诺的落点，有了它任何一首作品都不会只躺在创作记录里
+ * 而进不了播放队列。老版本生成的记录在首次读取时一次性补齐（见 `ensureDefaultPlaylist`）。
+ */
+export const musicPlaylists = sqliteTable("music_playlists", {
+  id: int("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull(),
+  /** 内置歌单（默认歌单）：不可改名 / 删除，新作品自动进来。 */
+  builtin: int("builtin").default(0).notNull(),
+  createdAt: int("created_at").$defaultFn(() => Date.now()),
+  /** 最后一次往里加歌的时间：左侧列表按它排序（默认歌单永远排最前）。 */
+  updatedAt: int("updated_at").$defaultFn(() => Date.now()),
+});
+
+/** 歌单 ↔ 作品的成员关系。`position` 是歌单内顺序，新歌追加到末尾。 */
+export const musicPlaylistItems = sqliteTable(
+  "music_playlist_items",
+  {
+    id: int("id").primaryKey({ autoIncrement: true }),
+    playlistId: int("playlist_id").notNull(),
+    recordId: int("record_id").notNull(),
+    position: int("position").default(0).notNull(),
+    createdAt: int("created_at").$defaultFn(() => Date.now()),
+  },
+  (t) => [
+    // 同一首歌在同一个歌单里只留一条：重复"加入歌单"是幂等的，不该长出两行。
+    unique().on(t.playlistId, t.recordId),
+    index("music_playlist_items_playlist_idx").on(t.playlistId, t.position),
+  ],
+);
 
 export const translationRecords = sqliteTable("translation_records", {
   id: int().primaryKey({ autoIncrement: true }),
@@ -817,7 +869,7 @@ export const benchmarkRecords = sqliteTable("benchmark_records", {
   /** 目标服务快照：local（引擎+端口）/ remote（激活的云服务商槽位）/ cloud（按 id 直连的云服务商，engine 存服务商名）。 */
   serverMode: text("server_mode"),
   engine: text("engine"),
-  /** JSON：{ genLength, batchSize, contexts, temperature }。 */
+  /** JSON：{ genLength, batchSizes, contexts, temperature }（老记录是单值 batchSize）。 */
   params: text("params"),
   /** JSON：每档上下文的指标行数组。 */
   rows: text("rows"),

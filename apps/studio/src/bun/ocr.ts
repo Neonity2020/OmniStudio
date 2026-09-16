@@ -117,7 +117,7 @@ export function getOcrProviderConfig(): OcrProviderConfig {
 
 /**
  * 保存 VLM OCR 配置：OCR 页只选「厂商 + 模型」，地址 / 密钥属于服务商
- * （在「设置 → 模型云服务」里维护并启用），这里不再接收 base / apiKey。
+ * （在「设置 → 云端模型」里维护并启用），这里不再接收 base / apiKey。
  */
 export function saveOcrProviderConfig(cfg: {
   providerId?: string;
@@ -632,9 +632,9 @@ export async function runOcrVlm(input: {
     // 远程来源：使用 OCR 页自己的 OpenAI 兼容配置。
     const provider = getOcrProviderConfig();
     if (!provider.base) {
-      // OCR 页早已没有地址输入框：地址与密钥来自「设置 → 模型云服务」里选中的厂商，
+      // OCR 页早已没有地址输入框：地址与密钥来自「设置 → 云端模型」里选中的厂商，
       // 指向一个不存在的输入框只会让人白找。
-      throw new Error("还没有可用的云厂商：请到「设置 → 模型云服务」启用一个厂商，再回到 OCR 页选择模型");
+      throw new Error("还没有可用的云厂商：请到「设置 → 云端模型」启用一个厂商，再回到 OCR 页选择模型");
     }
     endpoint = {
       base: provider.base,

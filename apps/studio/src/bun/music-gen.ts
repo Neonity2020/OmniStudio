@@ -15,6 +15,12 @@ import {
   type CloudMusicApi,
 } from "../shared/cloud-providers";
 import { logEvent } from "./app-log";
+import { removeCoverFile } from "./music-covers";
+import {
+  addToDefaultPlaylist,
+  listMusicPlaylistRecordIds,
+  removeRecordFromAllPlaylists,
+} from "./music-playlists";
 import { providerLabelFor, recordUsageEvent } from "./usage";
 
 // 模型清单的唯一真源在 shared/cloud-providers（预设与服务商用同一份），
@@ -79,6 +85,10 @@ export type MusicRecordRow = {
   audioPath: string | null;
   rewrittenCaption: string | null;
   rewrittenLyrics: string | null;
+  /** 对齐后的带时间轴歌词（LRC）；null = 还没对齐，播放页按进度估算。 */
+  lyricLrc: string | null;
+  /** 封面图地址；null = 用确定性渐变兜底。 */
+  coverUrl: string | null;
   error: string | null;
   createdAt: number;
   /** 本轮轮询的瞬时错误（如音频下载失败，下一轮重试），不落库。 */
@@ -213,13 +223,13 @@ type CloudMusicTarget = {
 function resolveCloudTarget(providerId: string): CloudMusicTarget {
   const provider = CloudProviders.resolveCloudProvider(providerId);
   if (!provider) {
-    throw new Error("还没选择云厂商。请到「设置 → 模型云服务」启用一个支持生音乐的厂商");
+    throw new Error("还没选择云厂商。请到「设置 → 云端模型」启用一个支持生音乐的厂商");
   }
   if (!provider.baseUrl.trim()) throw new Error(`云厂商「${provider.name}」还没有填 API 地址`);
   const musicApi = provider.musicApi;
   if (musicApi !== "stepfun" && musicApi !== "minimax") {
     throw new Error(
-      `云厂商「${provider.name}」没有配置生音乐接口（在「设置 → 模型云服务」里把它设为 StepFun 或 MiniMax）`,
+      `云厂商「${provider.name}」没有配置生音乐接口（在「设置 → 云端模型」里把它设为 StepFun 或 MiniMax）`,
     );
   }
   return {
@@ -296,7 +306,7 @@ function looksLikeJson(raw: string): boolean {
 function withRouteHint(base: string, status: number, raw: string, message: string): string {
   if (status !== 404 || looksLikeJson(raw)) return message;
   const text = message || "404 page not found";
-  return `${text}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 模型云服务」检查该厂商的地址 —— 填根地址或带 /v1 的地址都可以，两种都会被自动规整`;
+  return `${text}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 云端模型」检查该厂商的地址 —— 填根地址或带 /v1 的地址都可以，两种都会被自动规整`;
 }
 
 /**
@@ -316,7 +326,7 @@ export function apiRoot(base: string): string {
 /** 把接口路径拼到规整后的根地址上。 */
 function endpoint(base: string, apiPath: string): string {
   const root = apiRoot(base);
-  if (!root) throw new Error("该厂商还没填 API 地址，请到「设置 → 模型云服务」补上");
+  if (!root) throw new Error("该厂商还没填 API 地址，请到「设置 → 云端模型」补上");
   return `${root}${apiPath}`;
 }
 
@@ -348,6 +358,8 @@ function toRow(r: RecordRow, pollError: string | null = null): MusicRecordRow {
     audioPath: r.audioPath,
     rewrittenCaption: r.rewrittenCaption,
     rewrittenLyrics: r.rewrittenLyrics,
+    lyricLrc: r.lyricLrc ?? null,
+    coverUrl: r.coverPath ? chatImageUrl(r.coverPath) : null,
     error: r.error,
     createdAt: r.createdAt ?? 0,
     pollError,
@@ -364,10 +376,32 @@ export function listMusicRecords(limit = 100): MusicRecordRow[] {
   return rows.map((r) => toRow(r));
 }
 
+/**
+ * 歌单曲目：按歌单内顺序取回完整记录行。
+ *
+ * 歌单表只存 recordId（成员关系是可以被单独删掉的），所以顺序以歌单为准、在这里重排；
+ * 记录已经被删掉的悬空成员直接丢掉，不让列表里出现打不开的空行。
+ */
+export function listMusicPlaylistRecords(playlistId: number): MusicRecordRow[] {
+  const ids = listMusicPlaylistRecordIds(playlistId);
+  if (ids.length === 0) return [];
+  const byId = new Map(
+    db.select().from(musicRecords).where(inArray(musicRecords.id, ids)).all().map((r) => [r.id, r]),
+  );
+  return ids
+    .map((id) => byId.get(id))
+    .filter((r): r is RecordRow => !!r)
+    .map((r) => toRow(r));
+}
+
 export function deleteMusicRecord(id: number): { ok: boolean } {
   const [row] = db.select().from(musicRecords).where(eq(musicRecords.id, id)).limit(1).all();
   if (!row) return { ok: false };
   db.delete(musicRecords).where(eq(musicRecords.id, id)).run();
+  // 成员关系跟着记录一起走：留着的话歌单里会多出一行指向不存在作品的位置。
+  removeRecordFromAllPlaylists(id);
+  // 封面文件同理：库里的行都删了，留一张没人引用的图只是占地方。
+  removeCoverFile(row.coverPath);
   // 顺带清理磁盘上的音频（ref 是相对 images 根目录的路径）。
   if (row.audioPath) {
     const base = getImagesBaseDir();
@@ -382,7 +416,10 @@ export function deleteMusicRecord(id: number): { ok: boolean } {
 }
 
 function insertMusicRecord(data: Partial<typeof musicRecords.$inferInsert>): RecordRow {
-  return db.insert(musicRecords).values(data).returning().get();
+  const row = db.insert(musicRecords).values(data).returning().get();
+  // 新作品默认进「默认歌单」（新歌在前）—— 生成完就能在歌单里找到，不必再手工添加。
+  addToDefaultPlaylist(row.id);
+  return row;
 }
 
 function updateMusicRecord(
@@ -566,7 +603,7 @@ function classifyPollStatus(status: number, message: string): { fatal: boolean; 
     return {
       fatal: true,
       status,
-      message: `上游鉴权失败（${status}）：${message || "API Key 被拒绝"} —— 请到「设置 → 模型云服务」检查该厂商的 API Key`,
+      message: `上游鉴权失败（${status}）：${message || "API Key 被拒绝"} —— 请到「设置 → 云端模型」检查该厂商的 API Key`,
     };
   }
   if (status >= 500) {
@@ -807,7 +844,7 @@ async function runMinimaxSync(
     const msg = String(json?.base_resp?.status_msg ?? "").trim() || "上游返回错误";
     const hint =
       code === 1004 || code === 2049
-        ? "（API Key 被上游拒绝，去「设置 → 模型云服务」检查）"
+        ? "（API Key 被上游拒绝，去「设置 → 云端模型」检查）"
         : code === 1002
           ? "（上游限流，稍后重试）"
           : code === 1008
@@ -871,7 +908,7 @@ async function localUnavailable(cfg: MusicGenConfig): Promise<string> {
   return (
     "本地音乐生成还没接入引擎（当前是预留位）。" +
     (api ? `已配置的本地协议「${api}」还没有对应实现，` : "本地协议还没选，") +
-    "可先用云端厂商：到「设置 → 模型云服务」启用一个支持生音乐的厂商（StepFun / MiniMax）"
+    "可先用云端厂商：到「设置 → 云端模型」启用一个支持生音乐的厂商（StepFun / MiniMax）"
   );
 }
 

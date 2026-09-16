@@ -238,6 +238,31 @@ function assistantMessage(
  * 抽成纯函数是为了能单测：`regenerateAgentMessage` 那一层要连上模型才跑得起来，
  * 而这条规则错一次的代价是"每次重新生成都多一条用户消息"，很难在界面上认出来。
  */
+/**
+ * 回退到某条消息时要删哪些行（纯函数，理由同 `planRegenerate`）。
+ *
+ * 边界按角色分，这不是随手定的：
+ * - 落在**用户**消息上（「回到这条提问」）：连它一起删。留着它反而别扭 —— 那条提问
+ *   还在历史里，用户改完再发同一件事就会在库里出现两遍（`dropCurrentPrompt` 那条
+ *   注释警告的正是这个形态）。
+ * - 落在**助手**消息上（「保留到这里」）：只删它**后面**的。把这条答案一起删掉，
+ *   「这个回答是对的、后面跑偏了」这个最常见的诉求就没法表达了。
+ *
+ * 抽成纯函数是为了能单测：`revertAgentSession` 那一层要连库跑，而边界错一次
+ * 的代价是「用户明明想保留的那条回答被删了」，在界面上只能靠用户报障才发现。
+ */
+export function planRevertToMessage(
+  history: { id: number; role?: string | null }[],
+  messageId: number,
+): { doomed: number[]; keepTarget: boolean } {
+  const target = history.find((m) => m.id === messageId);
+  const keepTarget = target?.role !== "user";
+  return {
+    doomed: history.filter((m) => (keepTarget ? m.id > messageId : m.id >= messageId)).map((m) => m.id),
+    keepTarget,
+  };
+}
+
 export function planRegenerate(
   history: { id: number; role?: string | null; content?: string | null }[],
   messageId: number,

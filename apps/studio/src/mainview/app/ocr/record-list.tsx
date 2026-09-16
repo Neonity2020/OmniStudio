@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { useInfiniteQuery } from "@tanstack/react-query";
-import { FileIcon, FileTextIcon, ScanTextIcon, SearchIcon } from "lucide-react";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { FileIcon, FileTextIcon, ScanTextIcon, SearchIcon, Trash2Icon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import type { DocumentStatus } from "@lib/constants";
+import { RecordDeleteDialog } from "@components/record-actions";
 import { Badge } from "@ui/badge";
 import { ScrollArea } from "@ui/scroll-area";
 import { Skeleton } from "@ui/skeleton";
@@ -14,6 +15,7 @@ import {
   SidebarGroupLabel,
   SidebarInput,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@ui/sidebar";
@@ -92,7 +94,9 @@ export function OcrRecordList() {
   const { route, setRoute } = useRouter();
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
   const t = useT();
   const tab = useOcrStore((s) => s.tab);
   const setTab = useOcrStore((s) => s.setTab);
@@ -120,6 +124,16 @@ export function OcrRecordList() {
 
   const docs = data?.pages.flatMap((p) => p.documents) ?? [];
   const total = data?.pages[0]?.total ?? 0;
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => rpcClient.deleteDocument({ id }),
+    onSuccess: (_r, id) => {
+      // 删的是当前正在看的那份：先回列表页，否则详情页会停在一个已经不存在的文档上。
+      if (route.path === "document" && route.id === id) setRoute({ path: "index" });
+      setConfirmDelete(null);
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+  });
 
   useEffect(() => {
     const el = sentinelRef.current;
@@ -223,6 +237,24 @@ export function OcrRecordList() {
                         totalPages={doc.totalPages ?? undefined}
                       />
                     </SidebarMenuButton>
+                    {/* 悬浮整行才出现，并由 SidebarMenuButton 自动让出右侧 32px（pr-8）。
+                        必须是兄弟节点而不是塞进按钮里 —— 按钮不能嵌套。 */}
+                    <SidebarMenuAction
+                      showOnHover
+                      title={t("common.delete")}
+                      disabled={deleteMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDelete(doc.id);
+                      }}
+                      // 别改 top：基类里的 `peer-data-[size=default]/menu-button:top-1.5`
+                      // 带 peer 变体，特异性高于普通工具类，top-1/2 会被它压掉，
+                      // 再叠一个 -translate-y-1/2 就把按钮顶到行的中线上方去了。
+                      // 默认的 top-1.5 + 20px 高度正好落在这条 32px 行的垂直居中。
+                      className="right-1 text-muted-foreground hover:text-destructive"
+                    >
+                      <Trash2Icon className="size-3.5" />
+                    </SidebarMenuAction>
                   </SidebarMenuItem>
                 );
               })}
@@ -236,6 +268,15 @@ export function OcrRecordList() {
           )}
         </SidebarMenu>
       </ScrollArea>
+
+      <RecordDeleteDialog
+        open={confirmDelete != null}
+        onOpenChange={(open) => !open && setConfirmDelete(null)}
+        title={t("ocr.docs.deleteTitle")}
+        description={t("ocr.docs.deleteDesc")}
+        pending={deleteMutation.isPending}
+        onConfirm={() => confirmDelete != null && deleteMutation.mutate(confirmDelete)}
+      />
     </SidebarGroup>
   );
 }

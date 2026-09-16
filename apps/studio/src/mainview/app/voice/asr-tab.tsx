@@ -843,7 +843,7 @@ export function AsrTab() {
                 </div>
                 <p className="text-[11px] text-muted-foreground">{t("voice.asr.compatDesc")}</p>
 
-                {/* 厂商 + 模型：只列「设置 → 模型云服务」里已启动厂商的 ASR 模型 */}
+                {/* 厂商 + 模型：只列「设置 → 云端模型」里已启动厂商的 ASR 模型 */}
                 <div>
                   <Label className="mb-1 block text-xs">{t("voice.asr.cloudProvider")}</Label>
                   <CloudModelSelect

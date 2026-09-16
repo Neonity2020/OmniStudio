@@ -54,7 +54,8 @@ function binaryName(): string {
   return process.platform === "win32" ? "cloudflared.exe" : "cloudflared";
 }
 
-function cloudflaredRootDir(): string {
+/** 托管目录（引擎管理页展示「占用 / 路径」与卸载的目标）。 */
+export function cloudflaredRootDir(): string {
   return getDataDir("engines", "cloudflared");
 }
 

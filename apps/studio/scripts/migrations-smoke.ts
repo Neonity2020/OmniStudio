@@ -45,6 +45,7 @@ const EXPECTED_TABLES = [
   "automation_runs",
   "usage_records",
   "miniapp_notes",
+  "music_playlists",
 ];
 
 function assert(cond: unknown, msg: string): asserts cond {

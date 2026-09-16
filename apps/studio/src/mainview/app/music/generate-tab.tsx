@@ -24,6 +24,7 @@ import { ResultError } from "@components/media-result";
 import { useMusicStore } from "@stores/music";
 import type { MusicGenBackend, MusicTask } from "../../../bun/music-gen";
 import {
+  ALL_WORKS_PLAYLIST_ID,
   BACKEND_ITEMS,
   DEFAULT_FORMAT,
   FORMATS,
@@ -31,6 +32,7 @@ import {
   MusicFailedCard,
   MusicPlayerCard,
   MusicTaskCard,
+  RECENT_COUNT,
   RecentStrip,
 } from "./parts";
 
@@ -64,7 +66,7 @@ export function GenerateTab() {
 
   // ---------- 后端配置 ----------
   const [backend, setBackend] = useState<MusicGenBackend>("cloud");
-  // 云端只记厂商 + 模型：地址 / 密钥 / 接口协议都在「设置 → 模型云服务」里。
+  // 云端只记厂商 + 模型：地址 / 密钥 / 接口协议都在「设置 → 云端模型」里。
   const [providerId, setProviderId] = useState("");
   const [cloudModel, setCloudModel] = useState("");
   const [localApi, setLocalApi] = useState("");
@@ -165,6 +167,9 @@ export function GenerateTab() {
     mutationFn: (id: number) => rpcClient.deleteMusicRecord({ id }),
     onSuccess: (_r, id) => {
       queryClient.invalidateQueries({ queryKey: ["music-records"] });
+      // 删掉的作品同时离开了它所在的歌单（后端会清成员关系），侧栏数量与曲目页都要跟着变。
+      queryClient.invalidateQueries({ queryKey: ["music-playlists"] });
+      queryClient.invalidateQueries({ queryKey: ["music-playlist-tracks"] });
       if (focusRecordId === id) setFocusRecordId(null);
     },
   });
@@ -200,6 +205,9 @@ export function GenerateTab() {
       setConfigError(undefined);
       setFocusRecordId(r.record.id);
       queryClient.invalidateQueries({ queryKey: ["music-records"] });
+      // 新作品落库时已经进了默认歌单（见 bun/music-playlists.ts），侧栏那一行要跟着 +1。
+      queryClient.invalidateQueries({ queryKey: ["music-playlists"] });
+      queryClient.invalidateQueries({ queryKey: ["music-playlist-tracks"] });
     },
     onError: (e) => setConfigError(String(e)),
   });
@@ -614,7 +622,19 @@ export function GenerateTab() {
           ) : display.status === "failed" ? (
             <MusicFailedCard record={display} onDelete={(id) => del.mutate(id)} />
           ) : (
-            <MusicPlayerCard record={display} onDelete={(id) => del.mutate(id)} />
+            <MusicPlayerCard
+              record={display}
+              onDelete={(id) => del.mutate(id)}
+              // 队列 = 这条 + "最近生成"那几首（去重）：从结果卡点播放之后能接着听别的，
+              // 而且当前这条一定在队列里（否则点播放会跳到列表头那首上去）。
+              playlistRecords={[
+                display,
+                ...records
+                  .filter((x) => x.id !== display.id && x.status === "done" && x.audioUrl)
+                  .slice(0, RECENT_COUNT),
+              ]}
+              source={{ playlistId: ALL_WORKS_PLAYLIST_ID, name: t("music.recent.title") }}
+            />
           )}
         </div>
 

@@ -537,7 +537,7 @@ export function testRealtimeConnection(
     const model = (cfg?.model ?? current.model).trim() || DEFAULT_REALTIME_MODEL;
     if (!apiKey) {
       // 密钥来自选中的厂商行，不再要求手填：提示指向厂商而不是 DashScope。
-      resolve({ ok: false, error: "请先在「设置 → 模型云服务」里为所选厂商填写 API Key" });
+      resolve({ ok: false, error: "请先在「设置 → 云端模型」里为所选厂商填写 API Key" });
       return;
     }
     const url = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}model=${encodeURIComponent(model)}`;

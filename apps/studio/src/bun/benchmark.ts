@@ -13,6 +13,7 @@ import {
   BENCHMARK_DEFAULT_CACHE_MODES,
   BENCHMARK_DEFAULT_CONTEXTS,
   fmtCtx,
+  normalizeBatchSizes,
   normalizeCacheModes,
   normalizeContexts,
   type BenchmarkCacheMode,
@@ -34,7 +35,13 @@ export type BenchmarkParams = {
   model: string;
   /** 指定 cloud_providers 行 id 时直连该云服务商测速（无需全局激活）。 */
   providerId?: string;
+  /**
+   * 单并发档简写（老界面 / 老 CLI `--batch` / 控制 socket 负载都在发它）。
+   * 新调用方用 `batchSizes`；两个都没给时按 `[1]` 扫。
+   */
   batchSize?: number;
+  /** 一次扫描的并发档位：扫描矩阵 = 档位 × 并发 × 缓存场景。 */
+  batchSizes?: number[];
   genLength?: number;
   contexts?: number[];
   temperature?: number;
@@ -92,6 +99,31 @@ export type SpeedBenchRow = {
 /** 任务提前收尾的档位（1M 扫描里"更大的档位只会更糟"的两种情形）。 */
 export type BenchmarkStopReason = "context-overflow" | "timeout";
 
+/** 提前收尾的位置：哪一档（并发 × 上下文）是墙。 */
+export type BenchmarkStopInfo = {
+  reason: BenchmarkStopReason;
+  contextLength: number;
+  /** 撞墙时的并发档（矩阵扫描下界面要说清是哪个 bucket 停的）。 */
+  batchSize?: number;
+};
+
+/**
+ * 单个并发档的汇总数字。
+ *
+ * 不同并发之间不可比（并发越高单流越慢、聚合吞吐越高），所以顶层那几个"平均 /
+ * 峰值"之外还得按并发分开列一份 —— 把 ×1 和 ×8 平均成一个数，谁都不像。
+ */
+export type BenchmarkBatchSummary = {
+  batchSize: number;
+  /** 有数据的档位数（ok=0 的行不进平均，这里也不计）。 */
+  rows: number;
+  avgTps: number;
+  peakTps: number;
+  peakAggTps: number;
+  avgTtftMs: number;
+  avgTpotMs: number;
+};
+
 export type BenchmarkSummary = {
   avgTps: number;
   peakTps: number;
@@ -101,7 +133,7 @@ export type BenchmarkSummary = {
   peakPrefillTps: number;
   totalTokens: number;
   /** 没跑完所有档位时的收尾原因（界面按 reason 出文案，不去解析 error 串）。 */
-  stopped?: { reason: BenchmarkStopReason; contextLength: number };
+  stopped?: BenchmarkStopInfo;
   /**
    * 平均 / 最佳这几个数取自哪种缓存场景。
    *
@@ -109,6 +141,11 @@ export type BenchmarkSummary = {
    * —— 它是唯一不会被缓存粉饰的数字；只勾了命中场景时才报命中。
    */
   basis?: BenchmarkCacheMode;
+  /**
+   * 按并发分开的汇总（与 avgTps 一样，只取 basis 那种缓存场景、只算测出来的档位）。
+   * 扫了多个并发时才出现 —— 单并发下它和上面那几个数是同一份。
+   */
+  byBatch?: BenchmarkBatchSummary[];
   /** kind='eval' 时有值（速度字段全 0）。 */
   eval?: {
     suite: EvalSuiteId;
@@ -145,6 +182,8 @@ export type BenchmarkRunState = {
     done: number;
     phase: "warmup" | "measure";
     currentContext?: number;
+    /** 当前正在跑的并发档。 */
+    currentBatch?: number;
     /** 当前正在跑的缓存场景。 */
     currentCache?: BenchmarkCacheMode;
   };
@@ -159,7 +198,7 @@ export type BenchmarkRunState = {
   /** eval 任务的实时进度。 */
   eval?: BenchmarkEvalInfo;
   /** 速度扫描提前收尾时，跳过了哪些档位、为什么。 */
-  stopped?: { reason: BenchmarkStopReason; contextLength: number };
+  stopped?: BenchmarkStopInfo;
   /** **展示名**（模型名 / 云模型 id），落库与界面都用它 —— 绝不是 MLX 那种路径型请求 id。 */
   model: string;
   /** local（本地引擎）/ remote（激活的云服务商槽位）/ cloud（按 id 直连的云服务商）。 */
@@ -673,10 +712,37 @@ function emptyRow(ctx: number, batchSize: number, cache?: BenchmarkCacheMode): S
   };
 }
 
-function summarize(
-  rows: SpeedBenchRow[],
-  stopped?: { reason: BenchmarkStopReason; contextLength: number },
-): BenchmarkSummary {
+/**
+ * 按并发分组算一遍上面那几个数。
+ *
+ * 传进来的是已经筛过"测出来了 + basis 缓存场景"的行：并发档之间的可比性只在
+ * 组内成立，组外（×1 vs ×8）连平均都不该做。
+ */
+function summarizeByBatch(rows: SpeedBenchRow[]): BenchmarkBatchSummary[] {
+  const byBatch = new Map<number, SpeedBenchRow[]>();
+  for (const row of rows) {
+    const list = byBatch.get(row.batchSize);
+    if (list) list.push(row);
+    else byBatch.set(row.batchSize, [row]);
+  }
+  return [...byBatch.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([batchSize, rs]) => ({
+      batchSize,
+      rows: rs.length,
+      avgTps: Number((rs.reduce((s, r) => s + r.tps, 0) / rs.length).toFixed(1)),
+      peakTps: Math.max(...rs.map((r) => r.tps)),
+      peakAggTps: Math.max(...rs.map((r) => r.aggTps)),
+      avgTtftMs: Math.round(rs.reduce((s, r) => s + r.ttftMs, 0) / rs.length),
+      avgTpotMs: Number((rs.reduce((s, r) => s + r.tpotMs, 0) / rs.length).toFixed(3)),
+    }));
+}
+
+/**
+ * 顶层汇总：跨所有并发档算一遍（**有意如此**，界面与导出报告都要把这件事写出来
+ * —— 不同并发的数不可比，逐并发的数字看 `byBatch`）。
+ */
+function summarize(rows: SpeedBenchRow[], stopped?: BenchmarkStopInfo): BenchmarkSummary {
   // 失败档位（ok=0）不进平均：把"一整档没测出来"当 0 摊进平均值，会让恰好最关键的
   // 结论被拉成无意义的数字。峰值本来取 Max，0 值不影响。
   const ok = rows.filter((r) => r.ok > 0);
@@ -702,6 +768,9 @@ function summarize(
     summary.bestTtftMs = Math.min(...basisRows.map((r) => r.ttftMs));
     summary.peakAggTps = Math.max(...basisRows.map((r) => r.aggTps));
     summary.peakPrefillTps = Math.max(...basisRows.map((r) => r.prefillTps));
+    // 单并发时 byBatch 与上面这几个数是同一份，就不往 summary 里塞冗余字段了。
+    const byBatch = summarizeByBatch(basisRows);
+    if (byBatch.length > 1) summary.byBatch = byBatch;
   }
   if (stopped) summary.stopped = stopped;
   return summary;
@@ -788,7 +857,9 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
   // 显示的必须是模型名 —— 表头和侧栏不该出现 `/Users/…`。请求 id 留在 params.requestModel。
   const displayModel = modelNameFromRef(requested, requested);
 
-  const batchSize = Math.max(params.batchSize ?? 1, 1);
+  // 并发档位：规范形态是升序去重的列表（上限 64），空集回落到 [1]；
+  // 老的单值 batchSize 只是它的单元素简写。
+  const batchSizes = normalizeBatchSizes(params.batchSizes ?? (params.batchSize != null ? [params.batchSize] : []));
   const genLength = Math.max(params.genLength ?? 128, 16);
   const temperature = params.temperature ?? 0;
   // 档位统一规范化：去重、升序、夹在 128 ~ 1M（上限也是防呆 —— 1M 的 prompt 已是 4MB）。
@@ -813,15 +884,15 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
     status: "running",
     startedAt: Date.now(),
     kind,
-    // 一档一片（contexts × cacheModes），进度条按这个总数走。
-    progress: { total: contexts.length * cacheModes.length, done: 0, phase: "warmup" },
+    // 一档一片（contexts × batchSizes × cacheModes），进度条按这个总数走。
+    progress: { total: contexts.length * batchSizes.length * cacheModes.length, done: 0, phase: "warmup" },
     rows: [],
     model: displayModel,
     serverMode,
     engine,
     params:
       kind === "speed"
-        ? { genLength, batchSize, contexts, cacheModes, temperature, requestModel: model }
+        ? { genLength, batchSizes, contexts, cacheModes, temperature, requestModel: model }
         : { suite, sampleSize, concurrency, requestModel: model },
   };
   if (kind === "eval") {
@@ -845,14 +916,14 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
   logEvent({
     source: "benchmark",
     event: "benchmark.run.started",
-    message: `基准测试开始：${displayModel}（${kind === "speed" ? `${contexts.map(fmtCtx).join(" / ")} × ${cacheModes.length} 种缓存场景` : `评测 ${suite}`}）`,
-    detail: { runId, kind, serverMode, engine, model, contexts, cacheModes, genLength, batchSize, suite, sampleSize, concurrency },
+    message: `基准测试开始：${displayModel}（${kind === "speed" ? `${contexts.map(fmtCtx).join(" / ")} × ${batchSizes.map((b) => `×${b}`).join(" / ")} 并发 × ${cacheModes.length} 种缓存场景` : `评测 ${suite}`}）`,
+    detail: { runId, kind, serverMode, engine, model, contexts, batchSizes, cacheModes, genLength, suite, sampleSize, concurrency },
   });
 
   if (kind === "eval") {
     void executeEvalRun(runId, { base, apiKey, model, suite, sampleSize, concurrency, cancel, state });
   } else {
-    void executeRun(runId, { base, apiKey, model, genLength, batchSize, contexts, cacheModes, temperature, cancel, state });
+    void executeRun(runId, { base, apiKey, model, genLength, batchSizes, contexts, cacheModes, temperature, cancel, state });
   }
   return { runId };
 }
@@ -1023,7 +1094,7 @@ async function executeRun(
     apiKey: string;
     model: string;
     genLength: number;
-    batchSize: number;
+    batchSizes: number[];
     contexts: number[];
     cacheModes: BenchmarkCacheMode[];
     temperature: number;
@@ -1032,19 +1103,23 @@ async function executeRun(
   },
 ) {
   const { state, cancel } = env;
-  const { base, apiKey, model, genLength, batchSize, contexts, cacheModes, temperature } = env;
-  // 扫描顺序：档位 × 缓存场景（每个档位先冷启、再部分命中、最后完全命中）。
-  // 同一档位的三种场景连着跑：服务和机器状态最接近，TTFT 的差值才是缓存带来的。
-  const slots = contexts.flatMap((ctx) => cacheModes.map((cache) => ({ ctx, cache })));
+  const { base, apiKey, model, genLength, batchSizes, contexts, cacheModes, temperature } = env;
+  // 扫描顺序：档位 × 并发 × 缓存场景（每个 bucket 先冷启、再部分命中、最后完全命中）。
+  // 同一 bucket 的三种场景连着跑：服务和机器状态最接近，TTFT 的差值才是缓存带来的；
+  // 并发放在缓存外层 —— 缓存对比的倍数只有在同一个并发内才成立。
+  const slots = contexts.flatMap((ctx) =>
+    batchSizes.flatMap((batch) => cacheModes.map((cache) => ({ ctx, batch, cache }))),
+  );
   try {
     for (let i = 0; i < slots.length; i++) {
       if (cancel.signal.aborted) break;
-      const { ctx, cache } = slots[i]!;
+      const { ctx, batch, cache } = slots[i]!;
       state.progress = {
         total: slots.length,
         done: i,
         phase: "warmup",
         currentContext: ctx,
+        currentBatch: batch,
         currentCache: cache,
       };
       const outcome = await runBatch(
@@ -1053,7 +1128,7 @@ async function executeRun(
         model,
         ctx,
         genLength,
-        batchSize,
+        batch,
         temperature,
         cache,
         cancel.signal,
@@ -1066,6 +1141,7 @@ async function executeRun(
         done: i + 1,
         phase: "measure",
         currentContext: ctx,
+        currentBatch: batch,
         currentCache: cache,
       };
       if (outcome.error) {
@@ -1073,8 +1149,8 @@ async function executeRun(
           level: "warn",
           source: "benchmark",
           event: "benchmark.bucket.failed",
-          message: `基准测试 ${fmtCtx(ctx)} · ${cache} 档失败：${outcome.error}`,
-          detail: { runId, contextLength: ctx, cache, kind: outcome.kind, batchSize, error: outcome.error },
+          message: `基准测试 ${fmtCtx(ctx)} · ×${batch} 并发 · ${cache} 档失败：${outcome.error}`,
+          detail: { runId, contextLength: ctx, cache, kind: outcome.kind, batchSize: batch, error: outcome.error },
         });
       }
 
@@ -1082,7 +1158,7 @@ async function executeRun(
       // 已经到了这台机器的 prefill 极限 —— 再翻一倍只是把同样的等待重来一遍。
       // 同一档位的其它缓存场景也没必要再试：prompt 长度一样，窗口不会因此变大。
       if (outcome.kind === "context-overflow" || outcome.kind === "timeout") {
-        state.stopped = { reason: outcome.kind, contextLength: ctx };
+        state.stopped = { reason: outcome.kind, contextLength: ctx, batchSize: batch };
         break;
       }
       // 一整档颗粒无收、而且前面也一档都没成：服务没起 / 模型不对，早点报错，
@@ -1104,7 +1180,7 @@ async function executeRun(
   if (state.rows.length > 0 || state.status === "error") {
     persistRun(state, { kind: "speed", rows: state.rows, summary: state.summary });
   }
-  logRunFinished("speed", state, { contexts, cacheModes });
+  logRunFinished("speed", state, { contexts, batchSizes, cacheModes });
 }
 
 /** 任务收尾统一记一条：长跑几十分钟的失败不能只在内存里。 */

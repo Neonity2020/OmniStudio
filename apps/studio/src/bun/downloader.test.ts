@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "os";
 import path from "path";
 
-import { downloadWithResume, partialBytesFor, removePartialFiles } from "./downloader";
+import { downloadWithResume, partCountFor, partsBudgetFor, partialBytesFor, removePartialFiles } from "./downloader";
 
 /**
  * 下载内核的离线测试：假服务器支持 Range / 返回 503 / 卡死 / 忽略 Range /
@@ -150,6 +150,46 @@ afterEach(async () => {
 
 /** 8 MiB 起步：并行模式的门槛（PARALLEL_MIN_TOTAL = 4 MiB，每片 8 MiB）。 */
 const BIG = 20 * 1024 * 1024;
+
+describe("并发连接预算", () => {
+  // 分片数此前只在「单个文件」这一层被压到 4，但管理器同时跑 2 个文件，
+  // 对站点的实际并发就是 8 —— 正是 ModelScope 会偶发 500 的档位，用户侧表现为
+  // 「小文件一个个 Download failed: 500」。总量必须恒定，不随并发文件数放大。
+  test("按同时在下的文件数分摊，总连接数不超过全局预算", () => {
+    const one = partsBudgetFor(1);
+    expect(one * 1).toBeLessThanOrEqual(4);
+    const two = partsBudgetFor(2);
+    expect(two * 2).toBeLessThanOrEqual(4);
+    // 两个文件同时下时，每个文件拿到的分片数必须比独占时少。
+    expect(two).toBeLessThan(one);
+    // 真下大文件时的实际分片数也受这份预算约束。
+    expect(partCountFor(BIG, partsBudgetFor(2))).toBe(two);
+  });
+
+  test("无论多少文件并发，每文件至少 1 条连接且总量不超预算", () => {
+    // 预算内的并发：分摊后总量严格不超过全局预算（4）。这就是止住 ModelScope
+    // 500 的那条约束 —— 2 个文件同时下时每个只能拿 2 片，不是各自 4 片。
+    for (const files of [1, 2, 3, 4]) {
+      const parts = partsBudgetFor(files);
+      expect(parts).toBeGreaterThanOrEqual(1);
+      expect(parts * files).toBeLessThanOrEqual(4);
+    }
+    // 极端并发：预算摊薄到 1，不能退化成 0（0 会让文件永远下不动）。
+    expect(partsBudgetFor(100)).toBe(1);
+    // 退化输入（0 个文件）不该把预算放大。
+    expect(partsBudgetFor(0)).toBeLessThanOrEqual(4);
+  });
+
+  test("环境变量能把预算调大", () => {
+    process.env.OMNI_DOWNLOAD_CONNECTIONS = "12";
+    try {
+      expect(partsBudgetFor(2)).toBe(6);
+    } finally {
+      delete process.env.OMNI_DOWNLOAD_CONNECTIONS;
+    }
+    expect(partsBudgetFor(2)).toBe(2);
+  });
+});
 
 describe("多路并发 + 断点续传", () => {
   test("大文件走多分片并发，各请求不同区间，最终文件逐字节正确", async () => {

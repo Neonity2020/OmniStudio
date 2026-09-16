@@ -176,7 +176,91 @@ function normalizeMigrationTimestamps(): void {
   }
 }
 
+/**
+ * 迁移前自愈的第二半：把「时间戳够不着」的迁移补上。
+ *
+ * drizzle 只拿库里**最大** created_at 当比较基准（`sqlite-core/dialect.js` 里读一次
+ * `ORDER BY created_at DESC LIMIT 1`，循环里不再更新），所以一条迁移只要 when 不高于
+ * 那一刻的最大值，就永远不会被应用。上面把伪造时间戳归真之后，**排在伪造值之后的
+ * 迁移反而变成够不着的那条**：
+ *
+ * 合并 main 时，本机 canary 库把三条音乐迁移按伪造时间戳（≈2026-09-22）应用过，而
+ * main 的多模态六列迁移 when 是真实时间（2026-09-15）—— 音乐迁移归真到 2026-09-16
+ * 之后，六列迁移的 when 仍低于库里的最大值，于是在这些库上被永久跳过（又回到
+ * 「知识库多模态报 no such column」）。这里按 hash 找出「when 不高于库内最大值、却
+ * 没有应用记录」的迁移，就地补跑它的 SQL 并记账 —— 等价于时间戳没骗过迁移器时它
+ * 本来会做的事，幂等：补过之后 hash 就在库里，下次启动不再命中。
+ *
+ * 只处理 idx > 12（与 migrations-smoke 同一条历史边界）：0006/0007 的 when 小于前一条
+ * 是历史遗留，且所有发布版本都按数组顺序应用过它们，不去碰那一段。
+ */
+const LEGACY_MAX_IDX = 12;
+
+function repairUnreachableMigrations(): void {
+  try {
+    const hasTable = sqlite
+      .query("select 1 from sqlite_master where type='table' and name='__drizzle_migrations'")
+      .get();
+    if (!hasTable) return;
+    const journalPath = join(migrationsFolder, "meta", "_journal.json");
+    if (!existsSync(journalPath)) return;
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      entries: { idx: number; tag: string; when: number }[];
+    };
+    const rows = sqlite
+      .query("SELECT hash, created_at FROM __drizzle_migrations")
+      .all() as { hash: string; created_at: number | string }[];
+    if (rows.length === 0) return;
+    const maxApplied = Math.max(...rows.map((r) => Number(r.created_at)));
+    const applied = new Set(rows.map((r) => r.hash));
+
+    const unreachable: { tag: string; when: number; hash: string; sql: string[] }[] = [];
+    for (const entry of journal.entries) {
+      if (entry.idx <= LEGACY_MAX_IDX) continue;
+      if (entry.when > maxApplied) continue; // 正常升级路径：交给 migrate 顺序应用
+      const sqlPath = join(migrationsFolder, `${entry.tag}.sql`);
+      if (!existsSync(sqlPath)) continue;
+      const raw = readFileSync(sqlPath, "utf8");
+      const hash = new Bun.CryptoHasher("sha256").update(raw).digest("hex");
+      if (applied.has(hash)) continue;
+      unreachable.push({
+        tag: entry.tag,
+        when: entry.when,
+        hash,
+        sql: raw.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean),
+      });
+    }
+    if (unreachable.length === 0) return;
+
+    sqlite.transaction(() => {
+      for (const m of unreachable) {
+        for (const stmt of m.sql) sqlite.run(stmt);
+        sqlite.run('INSERT INTO __drizzle_migrations ("hash", "created_at") VALUES (?, ?)', [
+          m.hash,
+          m.when,
+        ]);
+      }
+    })();
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "db.migrate.repaired",
+      message: `已补跑 ${unreachable.length} 条被时间戳挡在门外的迁移：${unreachable.map((m) => m.tag).join(", ")}`,
+      detail: { tags: unreachable.map((m) => m.tag), maxApplied },
+    });
+  } catch (e) {
+    // 补跑失败不阻断启动：与时间戳归真同一策略，功能真缺列时会引导查日志。
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "db.migrate.repair_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
 normalizeMigrationTimestamps();
+repairUnreachableMigrations();
 try {
   migrate(db, { migrationsFolder });
 } catch (e) {

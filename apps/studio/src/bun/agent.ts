@@ -72,7 +72,12 @@ import {
 } from "./agent-goals";
 import { onPlanChanged, planHandoffSection, savePlan } from "./agent-plans";
 import { estimateMessagesTokens } from "../shared/token-estimate";
-import { buildHistoryMessages, dropCurrentPrompt, planRegenerate } from "./agent-history";
+import {
+  buildHistoryMessages,
+  dropCurrentPrompt,
+  planRegenerate,
+  planRevertToMessage,
+} from "./agent-history";
 import { currentTime } from "./current-time";
 import { createChunkFlusher } from "./chunk-flusher";
 import { findSummaryCut, summarizeHistory, summaryMessageText } from "./agent-summary";
@@ -3216,4 +3221,51 @@ export async function regenerateAgentMessage(
     content: plan.prompt,
     insertUserMessage: false,
   });
+}
+
+/**
+ * 回退到某条消息：删掉它之后（用户消息则连它一起）的全部消息与工具事件，**不重新生成**。
+ *
+ * 与重新生成的区别是「不再自动跑一轮」—— 用户想自己改一改再说，或者只是想让这条
+ * 岔路消失。删除边界按角色分：
+ * - 落在**用户**消息上（「回到这条提问」）：连它一起删，并把正文回填给输入框，
+ *   否则用户得自己把问题重打一遍；
+ * - 落在**助手**消息上（「保留到这里」）：保留这条回答，只删它后面的内容
+ *   —— 常见场景是「这个回答是对的，后面几轮跑偏了」。
+ *
+ * 只动对话不动工作区文件：文件还原是另一个功能（每轮快照的「撤销本轮」），
+ * 两者混在一起会让「回退」变成一个用户无法预期的破坏性操作。
+ */
+export async function revertAgentSession(
+  conversationId: number,
+  messageId: number,
+): Promise<{ ok: boolean; error?: string; removed?: number; prompt?: string }> {
+  const target = db.select().from(messages).where(eq(messages.id, messageId)).get();
+  if (!target || target.conversationId !== conversationId) {
+    return { ok: false, error: "Message not found" };
+  }
+
+  // 删除边界是纯函数（`planRevertToMessage`）：这条规则错一次的代价是"用户想保留的
+  // 那条回答被删了"，只有单测能盯住，界面上看不出来。
+  const plan = planRevertToMessage(getHistory(conversationId), messageId);
+  if (plan.doomed.length === 0) return { ok: false, error: "Nothing to revert" };
+
+  for (const id of plan.doomed) {
+    db.delete(agentEvents).where(eq(agentEvents.messageId, id)).run();
+    Chat.deleteMessage(conversationId, id);
+  }
+  resetAgentSession(conversationId);
+  logEvent({
+    level: "info",
+    source: "agent",
+    event: "agent.session.reverted",
+    message: `会话 ${conversationId} 回退到消息 ${messageId}，删除 ${plan.doomed.length} 条`,
+    detail: { conversationId, messageId, removed: plan.doomed.length, keepTarget: plan.keepTarget },
+  });
+  return {
+    ok: true,
+    removed: plan.doomed.length,
+    // 只有"连提问一起删"的那种才需要把正文还回去（助手消息的正文还在库里）。
+    prompt: plan.keepTarget ? "" : (target.content ?? ""),
+  };
 }

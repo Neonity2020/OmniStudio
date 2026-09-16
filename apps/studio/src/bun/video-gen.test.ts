@@ -55,7 +55,7 @@ await mockModulePartial<typeof import("./cloud-providers")>("./cloud-providers",
   saveAppModelChoice: () => ({ ok: true }),
 });
 
-const { nearestMinimaxDuration, normalizeApiBase, pollVideoRecords, submitVideoGeneration } =
+const { clampMinimaxDuration, normalizeApiBase, pollVideoRecords, submitVideoGeneration } =
   await import("./video-gen");
 const { readAppLogsInMemory } = await import("./app-log");
 
@@ -87,14 +87,19 @@ afterAll(() => {
   fs.rmSync(IMAGES, { recursive: true, force: true });
 });
 
-/** MiniMax 成功响应：HTTP 200 + base_resp.status_code = 0。 */
+/** v2 提交成功：HTTP 200 + task_id。 */
 function minimaxOk(extra: Record<string, unknown>): string {
-  return JSON.stringify({ base_resp: { status_code: 0, status_msg: "success" }, ...extra });
+  return JSON.stringify({ task_id: "task-1", ...extra });
 }
 
-/** MiniMax 业务错误：HTTP 200 + base_resp.status_code ≠ 0（1004 = 鉴权失败）。 */
-function minimaxBizError(code: number, message: string): string {
-  return JSON.stringify({ base_resp: { status_code: code, status_msg: message } });
+/** v2 查询响应：任务包在 `task` 里（status + content.url）。 */
+function minimaxTask(extra: Record<string, unknown>): string {
+  return JSON.stringify({ task: { status: "running", ...extra } });
+}
+
+/** v2 错误信封：OpenAI 风格，配 4xx/5xx 的 HTTP 状态。 */
+function minimaxError(message: string, over: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: "error", error: { type: "invalid_request_error", message, ...over } });
 }
 
 function seedProcessing(over: Partial<typeof schema.videoRecords.$inferInsert> = {}) {
@@ -104,7 +109,7 @@ function seedProcessing(over: Partial<typeof schema.videoRecords.$inferInsert> =
       status: "processing",
       backend: "cloud",
       providerId: PROVIDER.id,
-      model: "MiniMax-Hailuo-2.3",
+      model: "MiniMax-H3",
       taskId: "task-1",
       prompt: "两只猫在居酒屋",
       createdAt: Date.now(),
@@ -136,12 +141,16 @@ async function withClockAdvanced<T>(ms: number, fn: () => Promise<T>): Promise<T
   }
 }
 
-function submitMiniMax(model = "MiniMax-Hailuo-2.3") {
+type SubmitArgs = Parameters<typeof submitVideoGeneration>[0];
+
+function submitMiniMax(model = "MiniMax-H3", over: Partial<SubmitArgs> = {}) {
   return submitVideoGeneration({
     prompt: "两只猫在居酒屋",
     duration: 5,
+    ratio: "16:9",
     resolution: "768P",
     config: { backend: "cloud", providerId: PROVIDER.id, model },
+    ...over,
   });
 }
 
@@ -166,44 +175,81 @@ test("normalizeApiBase：剥掉误填的 /v1、/v2、/api/v3", () => {
   expect(normalizeApiBase("  ", "")).toBe("");
 });
 
-test("时长收敛到 MiniMax 认可的档位（Hailuo 只吃 6 / 10 秒）", () => {
-  expect(nearestMinimaxDuration(5)).toBe(6);
-  expect(nearestMinimaxDuration(7)).toBe(6);
-  expect(nearestMinimaxDuration(8)).toBe(10);
-  expect(nearestMinimaxDuration(15)).toBe(10);
-  expect(nearestMinimaxDuration(undefined)).toBe(6);
+test("时长收敛到各模型的区间（H3 4~15 秒、H3-Max 5~15 秒）", () => {
+  expect(clampMinimaxDuration(5, "MiniMax-H3")).toBe(5);
+  expect(clampMinimaxDuration(2, "MiniMax-H3")).toBe(4);
+  expect(clampMinimaxDuration(20, "MiniMax-H3")).toBe(15);
+  // H3-Max 的下限是 5：4 秒会被抬上来
+  expect(clampMinimaxDuration(4, "MiniMax-H3-Max")).toBe(5);
+  expect(clampMinimaxDuration(20, "MiniMax-H3-Max")).toBe(15);
+  // 没给时长 / 认不出的模型：落到 H3 系的默认档与协议区间
+  expect(clampMinimaxDuration(undefined, "MiniMax-H3")).toBe(5);
+  expect(clampMinimaxDuration(undefined)).toBe(5);
+  expect(clampMinimaxDuration(99, "some-relay-h3")).toBe(15);
 });
 
 // ---------------------------------------------------------------------------
-// 提交（官方 v1 契约）
+// 提交（v2 契约）
 // ---------------------------------------------------------------------------
 
-test("提交走官方 v1：/v1/video_generation + prompt 字符串；地址带 /v1 也不会重复", async () => {
+test("提交走 v2：/v2/video_generation + content 数组；地址带 /v1 也不会重复", async () => {
   seenUrls.length = 0;
-  reply = () => ({ status: 200, body: minimaxOk({ task_id: "task-submit" }) });
+  reply = () => ({ status: 200, body: minimaxOk({}) });
 
   const res = await submitMiniMax();
   expect(res.error).toBeUndefined();
   expect(res.record?.status).toBe("processing");
-  expect(res.record?.taskId).toBe("task-submit");
-  expect(res.record?.duration).toBe(6); // 库里记的时长要和发出去的一致（5 → 6）
-  expect(seenUrls).toEqual(["https://api.minimax.chat/v1/video_generation"]);
-  expect(lastBody?.model).toBe("MiniMax-Hailuo-2.3");
-  expect(lastBody?.prompt).toBe("两只猫在居酒屋");
-  expect(lastBody?.duration).toBe(6); // 5 秒 → 收敛到 6
+  expect(res.record?.taskId).toBe("task-1");
+  expect(seenUrls).toEqual(["https://api.minimax.chat/v2/video_generation"]);
+  expect(lastBody?.model).toBe("MiniMax-H3");
+  expect(lastBody?.content).toEqual([{ type: "text", text: "两只猫在居酒屋" }]);
+  expect(lastBody?.duration).toBe(5);
   expect(lastBody?.resolution).toBe("768P");
-  expect(lastBody?.content).toBeUndefined(); // content[] 是 v2 私约 / Seedance 的形状
+  expect(lastBody?.ratio).toBe("16:9");
+  // v1 的形状不该再出现：prompt 字符串 / first_frame_image 都是旧接口的字段
+  expect(lastBody?.prompt).toBeUndefined();
+  expect(lastBody?.first_frame_image).toBeUndefined();
 });
 
-test("提交返回 HTTP 200 但 base_resp 报鉴权失败：把上游原话与提示一起抛出来", async () => {
+test("提交：分辨率和时长按模型收敛后再发（H3-Max 选 2K / 4 秒 → 768P / 5 秒）", async () => {
+  reply = () => ({ status: 200, body: minimaxOk({}) });
+
+  const res = await submitMiniMax("MiniMax-H3-Max", { duration: 4, resolution: "2K" });
+  expect(res.error).toBeUndefined();
+  expect(lastBody?.model).toBe("MiniMax-H3-Max");
+  expect(lastBody?.resolution).toBe("768P");
+  expect(lastBody?.duration).toBe(5);
+  // 库里记的也是收敛后的值（卡片上写的必须与上游生成的一致）
+  expect(res.record?.resolution).toBe("768P");
+  expect(res.record?.duration).toBe(5);
+});
+
+test("提交：首帧图按 v2 的形状放进 content（image_url 是对象，带 role）", async () => {
+  fs.mkdirSync(join(IMAGES, "chat"), { recursive: true });
+  fs.writeFileSync(join(IMAGES, "chat", "frame.png"), Buffer.from([1, 2, 3]));
+  reply = () => ({ status: 200, body: minimaxOk({}) });
+
+  const res = await submitMiniMax("MiniMax-H3", { firstFrameRef: "chat/frame.png" });
+  expect(res.error).toBeUndefined();
+  expect(lastBody?.content).toEqual([
+    { type: "text", text: "两只猫在居酒屋" },
+    {
+      type: "image_url",
+      image_url: { url: "data:image/png;base64,AQID" },
+      role: "first_frame",
+    },
+  ]);
+  expect(res.record?.firstFrameUrl).toBe("http://img.local/chat/frame.png");
+});
+
+test("提交撞上 4xx 错误信封：把上游原话与 HTTP 状态一起报出来", async () => {
   reply = () => ({
-    status: 200,
-    body: minimaxBizError(1004, "login fail: Please carry the API secret key in the header"),
+    status: 401,
+    body: minimaxError("invalid api key", { http_code: 401 }),
   });
   const res = await submitMiniMax();
-  expect(res.error).toContain("1004");
-  expect(res.error).toContain("login fail");
-  expect(res.error).toContain("API Key");
+  expect(res.error).toContain("invalid api key");
+  expect(res.error).toContain("HTTP 401");
 });
 
 test("提交撞上 200 + HTML（中转站首页）：直说是网页而不是接口", async () => {
@@ -213,75 +259,82 @@ test("提交撞上 200 + HTML（中转站首页）：直说是网页而不是接
   });
   const res = await submitMiniMax();
   expect(res.error).toContain("网页");
-  expect(res.error).toContain("模型云服务");
+  // 指路要指到模型库的云端模型页签（原「模型云服务」，2026-09 收进模型库）
+  expect(res.error).toContain("云端模型");
 });
 
-test("提交：v1 路由不存在时退回 v2 私约，成功拿回 task_id", async () => {
-  seenUrls.length = 0;
-  reply = (url) =>
-    url.includes("/v1/video_generation")
-      ? { status: 404, body: "404 page not found" }
-      : { status: 200, body: minimaxOk({ task_id: "task-v2" }) };
-
-  const res = await submitMiniMax();
-  expect(res.error).toBeUndefined();
-  expect(res.record?.taskId).toBe("task-v2");
-  expect(seenUrls).toEqual([
-    "https://api.minimax.chat/v1/video_generation",
-    "https://api.minimax.chat/v2/video_generation",
-  ]);
-});
-
-test("提交：两套路径都不存在时，报错要说清这地址不是 MiniMax 视频服务", async () => {
+test("提交：路由不存在时，报错要说清这地址不是 MiniMax v2 视频服务", async () => {
   reply = () => ({ status: 404, body: "404 page not found" });
   const res = await submitMiniMax();
-  expect(res.error).toContain("MiniMax 视频接口");
-  expect(res.error).toContain("/v1/video_generation");
+  expect(res.error).toContain("MiniMax v2 视频接口");
   expect(res.error).toContain("/v2/video_generation");
+  expect(res.error).toContain("云端模型");
 });
 
 // ---------------------------------------------------------------------------
 // 轮询
 // ---------------------------------------------------------------------------
 
-test("轮询成功：只有 file_id 时再查 /files/retrieve 拿下载地址并落盘", async () => {
+test("轮询成功：直接取 task.content.url 下载落盘（不再有 files/retrieve 换链）", async () => {
   const seeded = seedProcessing({ taskId: "task-ok" });
   seenUrls.length = 0;
-  reply = (url) => {
-    if (url.includes("/query/video_generation")) {
-      return { status: 200, body: minimaxOk({ status: "Success", file_id: "file-1" }) };
-    }
-    if (url.includes("/files/retrieve")) {
-      return {
-        status: 200,
-        body: minimaxOk({ file: { download_url: "https://cdn.example/abc.mp4" } }),
-      };
-    }
-    return { status: 200, bytes: new Uint8Array([1, 2, 3, 4]) };
-  };
+  reply = (url) =>
+    url.includes("/query/video_generation")
+      ? {
+          status: 200,
+          body: minimaxTask({ status: "succeeded", content: { url: "https://cdn.example/abc.mp4" } }),
+        }
+      : { status: 200, bytes: new Uint8Array([1, 2, 3, 4]) };
 
   const row = await pollOne(seeded.id);
   expect(row.status).toBe("done");
   expect(row.videoPath).toMatch(/^videos\/.+\.mp4$/);
   expect(row.videoUrl).toBe(`http://img.local/${row.videoPath}`);
-  expect(seenUrls[0]).toBe("https://api.minimax.chat/v1/query/video_generation?task_id=task-ok");
-  expect(seenUrls[1]).toBe("https://api.minimax.chat/v1/files/retrieve?file_id=file-1");
+  expect(seenUrls).toEqual([
+    "https://api.minimax.chat/v2/query/video_generation/task-ok",
+    "https://cdn.example/abc.mp4",
+  ]);
 });
 
-test("轮询遇 200 + base_resp 1004：宽限期内亮出原因，过期才标失败", async () => {
-  const seeded = seedProcessing({ taskId: "task-1004" });
-  reply = () => ({ status: 200, body: minimaxBizError(1004, "login fail: ...") });
+test("轮询：queued / running 都算在跑，保持 processing", async () => {
+  const seeded = seedProcessing({ taskId: "task-running" });
+  reply = () => ({ status: 200, body: minimaxTask({ status: "queued" }) });
+
+  const row = await pollOne(seeded.id);
+  expect(row.status).toBe("processing");
+  expect(row.pollError).toBeFalsy();
+});
+
+test("轮询：任务失败时把 task.error 的码与原话透出来", async () => {
+  const seeded = seedProcessing({ taskId: "task-failed" });
+  reply = () => ({
+    status: 200,
+    body: minimaxTask({
+      status: "failed",
+      error: { code: 2013, message: "invalid params" },
+    }),
+  });
+
+  const row = await pollOne(seeded.id);
+  expect(row.status).toBe("failed");
+  expect(row.error).toContain("2013");
+  expect(row.error).toContain("invalid params");
+});
+
+test("轮询遇 401：宽限期内亮出原因，过期才标失败", async () => {
+  const seeded = seedProcessing({ taskId: "task-401" });
+  reply = () => ({ status: 401, body: minimaxError("invalid api key") });
 
   const first = await pollOne(seeded.id);
   expect(first.status).toBe("processing");
-  expect(first.pollError).toContain("1004");
+  expect(first.pollError).toContain("401");
   expect(first.pollError).toContain("API Key");
-  expect(lastLog("video.poll.http", "task-1004")).toContain('"level":"error"');
+  expect(lastLog("video.poll.http", "task-401")).toContain('"level":"error"');
 
   const late = await withClockAdvanced(4 * 60_000, () => pollOne(seeded.id));
   expect(late.status).toBe("failed");
-  expect(late.error).toContain("1004");
-  expect(lastLog("video.poll.failed", "task-1004")).toContain("task-1004");
+  expect(late.error).toContain("401");
+  expect(lastLog("video.poll.failed", "task-401")).toContain("task-401");
 });
 
 test("轮询遇 5xx：保留 processing，把原因透到界面并记 warn 日志", async () => {
@@ -294,13 +347,13 @@ test("轮询遇 5xx：保留 processing，把原因透到界面并记 warn 日�
   expect(lastLog("video.poll.http", "task-503")).toContain('"level":"warn"');
 });
 
-test("轮询：两套查询路径都不存在时指向「地址不对」，并给宽限期", async () => {
+test("轮询：查询路径不存在时指向「地址不对」，并给宽限期", async () => {
   const seeded = seedProcessing({ taskId: "task-404" });
   reply = () => ({ status: 404, body: "404 page not found" });
 
   const first = await pollOne(seeded.id);
   expect(first.status).toBe("processing");
-  expect(first.pollError).toContain("任务查询接口");
+  expect(first.pollError).toContain("/v2/query/video_generation/");
   expect(first.pollError).toContain("https://api.minimax.chat");
 
   const late = await withClockAdvanced(4 * 60_000, () => pollOne(seeded.id));
@@ -311,7 +364,7 @@ test("轮询：上游说任务没了（JSON 404）是终态，立刻失败而不
   const seeded = seedProcessing({ taskId: "task-notfound" });
   reply = () => ({
     status: 404,
-    body: JSON.stringify({ base_resp: { status_code: 1013, status_msg: "task not found" } }),
+    body: minimaxError("task not found", { http_code: 404 }),
   });
 
   const row = await pollOne(seeded.id);
@@ -319,27 +372,20 @@ test("轮询：上游说任务没了（JSON 404）是终态，立刻失败而不
   expect(row.error).toContain("任务不存在");
 });
 
-test("轮询：v1 查不到时落到 v2 路径并记住；已完成的记录不再轮询", async () => {
-  const seeded = seedProcessing({ taskId: "task-v2-poll" });
+test("轮询一次只打一个上游地址；已完成的记录不再轮询", async () => {
+  const seeded = seedProcessing({ taskId: "task-once" });
   seenUrls.length = 0;
   reply = (url) =>
-    url.includes("/v1/query/video_generation")
-      ? { status: 404, body: "404 page not found" }
-      : {
+    url.includes("/query/video_generation")
+      ? {
           status: 200,
-          body: JSON.stringify({
-            status: "Success",
-            content: { url: "https://cdn.example/v2.mp4" },
-          }),
-        };
+          body: minimaxTask({ status: "succeeded", content: { url: "https://cdn.example/one.mp4" } }),
+        }
+      : { status: 200, bytes: new Uint8Array([1, 2, 3, 4]) };
 
   const row = await pollOne(seeded.id);
   expect(row.status).toBe("done");
-  expect(seenUrls).toEqual([
-    "https://api.minimax.chat/v1/query/video_generation?task_id=task-v2-poll",
-    "https://api.minimax.chat/v2/query/video_generation/task-v2-poll",
-    "https://cdn.example/v2.mp4",
-  ]);
+  expect(seenUrls[0]).toBe("https://api.minimax.chat/v2/query/video_generation/task-once");
 
   seenUrls.length = 0;
   const again = await pollOne(seeded.id);
@@ -349,7 +395,7 @@ test("轮询：v1 查不到时落到 v2 路径并记住；已完成的记录不�
 
 test("记录里的厂商已被删除：直接失败，不拖到 30 分钟超时", async () => {
   const seeded = seedProcessing({ providerId: "gone-provider", taskId: "task-gone-provider" });
-  reply = () => ({ status: 200, body: minimaxOk({}) });
+  reply = () => ({ status: 200, body: minimaxTask({}) });
 
   const row = await pollOne(seeded.id);
   expect(row.status).toBe("failed");

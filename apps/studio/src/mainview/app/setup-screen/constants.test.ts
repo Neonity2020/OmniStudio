@@ -57,17 +57,80 @@ describe("引导页按机器推荐（真实模型目录）", () => {
     level: FitLevel;
   }[] = [
     // 统一内存（预算 = 内存的 75%）
-    { label: "8GB Mac", machine: apple(8), engine: "llama.cpp", modelId: "qwen35-4b", quant: "Q4_K_M", level: "good" },
-    { label: "16GB Mac", machine: apple(16), engine: "llama.cpp", modelId: "qwen35-9b", quant: "Q4_K_M", level: "good" },
-    { label: "32GB Mac", machine: apple(32), engine: "llama.cpp", modelId: "qwen35-35b", quant: "Q3_K_M", level: "good" },
-    { label: "64GB Mac", machine: apple(64), engine: "llama.cpp", modelId: "qwen35-35b", quant: "Q5_K_M", level: "comfortable" },
-    { label: "512GB Mac", machine: apple(512), engine: "llama.cpp", modelId: "qwen35-35b", quant: "Q8_0", level: "comfortable" },
+    {
+      label: "8GB Mac",
+      machine: apple(8),
+      engine: "llama.cpp",
+      modelId: "qwen35-4b",
+      quant: "Q4_K_M",
+      level: "good",
+    },
+    {
+      label: "16GB Mac",
+      machine: apple(16),
+      engine: "llama.cpp",
+      modelId: "qwen35-9b",
+      quant: "Q4_K_M",
+      level: "good",
+    },
+    {
+      label: "32GB Mac",
+      machine: apple(32),
+      engine: "llama.cpp",
+      modelId: "qwen35-35b",
+      quant: "Q3_K_M",
+      level: "good",
+    },
+    {
+      label: "64GB Mac",
+      machine: apple(64),
+      engine: "llama.cpp",
+      modelId: "qwen35-35b",
+      quant: "Q5_K_M",
+      level: "comfortable",
+    },
+    {
+      label: "512GB Mac",
+      machine: apple(512),
+      engine: "llama.cpp",
+      modelId: "qwen35-35b",
+      quant: "Q8_0",
+      level: "comfortable",
+    },
     // vLLM 只有 bf16 权重：大机器才装得下大模型
-    { label: "512GB Mac（vLLM）", machine: apple(512), engine: "vllm", modelId: "qwen35-35b", quant: "BF16", level: "comfortable" },
+    {
+      label: "512GB Mac（vLLM）",
+      machine: apple(512),
+      engine: "vllm",
+      modelId: "qwen35-35b",
+      quant: "BF16",
+      level: "comfortable",
+    },
     // 独显（预算 = 显存的 90%）
-    { label: "8GB 显存（llama.cpp）", machine: machine({ totalGB: 32, gpu: nvidia(8) }), engine: "llama.cpp", modelId: "qwen35-4b", quant: "Q4_K_M", level: "good" },
-    { label: "24GB 显存（llama.cpp）", machine: machine({ totalGB: 64, gpu: nvidia(24) }), engine: "llama.cpp", modelId: "qwen36-27b", quant: "Q3_K_M", level: "good" },
-    { label: "80GB 显存（vLLM）", machine: machine({ totalGB: 256, gpu: nvidia(80) }), engine: "vllm", modelId: "qwen35-9b", quant: "BF16", level: "comfortable" },
+    {
+      label: "8GB 显存（llama.cpp）",
+      machine: machine({ totalGB: 32, gpu: nvidia(8) }),
+      engine: "llama.cpp",
+      modelId: "qwen35-4b",
+      quant: "Q4_K_M",
+      level: "good",
+    },
+    {
+      label: "24GB 显存（llama.cpp）",
+      machine: machine({ totalGB: 64, gpu: nvidia(24) }),
+      engine: "llama.cpp",
+      modelId: "qwen36-27b",
+      quant: "Q3_K_M",
+      level: "good",
+    },
+    {
+      label: "80GB 显存（vLLM）",
+      machine: machine({ totalGB: 256, gpu: nvidia(80) }),
+      engine: "vllm",
+      modelId: "qwen35-9b",
+      quant: "BF16",
+      level: "comfortable",
+    },
   ];
 
   for (const testCase of cases) {
@@ -116,16 +179,31 @@ describe("候选表的形状", () => {
     }
   });
 
-  test("llama.cpp 用 GGUF 量化档，vLLM 用整仓库 bf16，MLX 不参与估算", () => {
+  test("llama.cpp 用 GGUF 量化档，vLLM / SGLang / MLX 用整仓库 bf16", () => {
     const gguf = setupModelCandidates("llama.cpp");
     expect(gguf.map((m) => m.variants.length)).toEqual(SETUP_MODELS.map((m) => m.quants.length));
     expect(gguf[0]!.defaultQuant).toBe(SETUP_MODELS[0]!.defaultQuant);
 
-    const vllm = setupModelCandidates("vllm");
-    expect(vllm.every((m) => m.variants.length === 1 && m.variants[0]!.name === "BF16")).toBe(true);
-    expect(vllm[0]!.variants[0]!.sizeBytes).toBe(SETUP_MODELS[0]!.hfSizeBytes);
+    for (const engine of ["vllm", "sglang", "mlx"] as const) {
+      const candidates = setupModelCandidates(engine);
+      expect(
+        candidates.every((m) => m.variants.length === 1 && m.variants[0]!.name === "BF16"),
+      ).toBe(true);
+      expect(candidates[0]!.variants[0]!.sizeBytes).toBe(SETUP_MODELS[0]!.hfSizeBytes);
+    }
+  });
 
-    // MLX 预设只有仓库名，没有体积信息 → 不编数字
-    expect(setupModelCandidates("mlx")).toEqual([]);
+  test("MLX 与其它引擎共用千问目录：32GB 机器上推的是装得下的 Qwen，不是大 MoE", () => {
+    // 以前 MLX 返回空表（"预设只有仓库名"），界面因此固定把 DeepSeek 大 MoE 标成推荐 ——
+    // 32GB 的机器上推一个装不下的模型等于没推。
+    const fits = fitModelsForMachine(apple(32), setupModelCandidates("mlx"));
+    const best = recommendModel(fits);
+    // bf16 没有量化档可挑：9B 的整仓库 19.3GB 在 24GB 预算里已经是"偏紧"，推荐落回 4B；
+    // 偏紧的 9B 仍列在表里（用户想跑可以自己选），装不下的如实标出来。
+    expect(best?.id).toBe("qwen35-4b");
+    expect(best?.recommended.variant.name).toBe("BF16");
+    expect(best?.level).toBe("comfortable");
+    expect(fits.find((f) => f.id === "qwen35-9b")!.level).toBe("tight");
+    expect(fits.find((f) => f.id === "qwen35-35b")!.level).toBe("too-large");
   });
 });

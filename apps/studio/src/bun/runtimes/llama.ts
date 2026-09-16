@@ -47,6 +47,7 @@ const DEFAULT_CUSTOM_SERVER_ARGS: ServerArgs = {
   parallel: 1,
   temp: 0.2,
   topP: 0.9,
+  topK: 40,
   repeatPenalty: 1.12,
   repeatLastN: 256,
   noMmprojOffload: true,
@@ -211,6 +212,10 @@ export class LlamaRuntime implements Runtime {
     const parallel = getSetting("SERVER_PARALLEL") || String(serverArgs.parallel);
     const temp = getSetting("SERVER_TEMP") || String(serverArgs.temp);
     const topP = getSetting("SERVER_TOP_P") || String(serverArgs.topP);
+    // 采样参数一律「设置优先、模型档案兜底」：设置页显示的就是实际发出去的那份。
+    // 用 || 而不是 ?? 是因为空字符串表示「没设过」，要落回档案的默认值。
+    const topK = getSetting("SERVER_TOP_K") || String(serverArgs.topK);
+    const repeatPenalty = getSetting("SERVER_REPEAT_PENALTY") || String(serverArgs.repeatPenalty);
     const gpuLayers = getSetting("SERVER_GPU_LAYERS");
     const cacheTypeK = getSetting("SERVER_CACHE_TYPE_K") || "q8_0";
     const cacheTypeV = getSetting("SERVER_CACHE_TYPE_V") || "q8_0";
@@ -256,7 +261,7 @@ export class LlamaRuntime implements Runtime {
       ctxSize,
     );
 
-    // 嵌入模式裁剪的聊天参数：--temp/--top-p/--repeat-penalty/--repeat-last-n/--image-max-tokens。
+    // 嵌入模式裁剪的聊天参数：--temp/--top-p/--top-k/--repeat-penalty/--repeat-last-n/--image-max-tokens。
     if (!embedding) {
       args.push(
         "--image-max-tokens",
@@ -280,13 +285,15 @@ export class LlamaRuntime implements Runtime {
     if (!embedding) {
       args.push(
         "--repeat-penalty",
-        String(serverArgs.repeatPenalty),
+        repeatPenalty,
         "--repeat-last-n",
         String(serverArgs.repeatLastN),
         "--temp",
         temp,
         "--top-p",
         topP,
+        "--top-k",
+        topK,
       );
     }
 

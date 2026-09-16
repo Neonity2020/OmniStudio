@@ -599,13 +599,26 @@ describe("迁移默认值", () => {
     const newMigration = JSON.parse(
       readFileSync(join(import.meta.dir, "db/migrations/meta/_journal.json"), "utf8"),
     ) as { entries: { idx: number; tag: string }[] };
-    const last = newMigration.entries[newMigration.entries.length - 1]!;
-    // 多模态六列必须一直排在 journal 末位（合并 main 的 0029-0031 后由 0029 重编号为
-    // 0032，再合并 v0.1.0 的 0032-0036 后重编号为 0037）：位置错了说明编号被别的迁移
-    // 挤到前面，老库升级时会被时间戳比较静默跳过。
-    expect(last.tag).toBe("0037_tired_vanisher");
-    expect(last.idx).toBe(37);
-    replayMigrations(sqlite, last.idx, last.idx);
+    const mm = newMigration.entries.find((e) => e.tag === "0037_tired_vanisher")!;
+    // 这条迁移一度**必须**排在 journal 末位：drizzle 只跟库里最大 created_at 比一次，
+    // 位置被挤到前面就会被静默跳过（老库永远缺这几列）。音乐迁移顺延到它之后
+    // （0038-0040）以后这条位置约束不再成立，改由 db/index.ts 的
+    // repairUnreachableMigrations() 兜住所有「when 够不着」的迁移（回归用例见
+    // db-migrate-timestamps.tests.ts 的「本机 canary 库」）。所以这里断言的是这条
+    // 迁移的**内容**：六个加列语句一条不少 —— 它是旧库补齐这些列的唯一途径。
+    expect(mm.idx).toBe(37);
+    const mmSql = readFileSync(join(import.meta.dir, "db/migrations/0037_tired_vanisher.sql"), "utf8");
+    for (const col of [
+      "embed_image",
+      "embed_audio",
+      "embed_video",
+      "modality",
+      "media_path",
+      "media_index",
+    ]) {
+      expect(mmSql).toContain(`\`${col}\``);
+    }
+    replayMigrations(sqlite, mm.idx, mm.idx);
 
     const kbRow = sqlite.query("SELECT embed_image, embed_audio, embed_video FROM knowledge_bases WHERE id = 1").get() as Record<string, number>;
     expect(kbRow.embed_image).toBe(0);

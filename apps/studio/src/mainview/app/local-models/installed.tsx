@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2Icon, PlayIcon, TerminalIcon, CheckIcon, CheckCircle2Icon, StarIcon, Trash2Icon, HardDriveIcon, FolderOpenIcon, AlertTriangleIcon, SparklesIcon, FolderIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
@@ -277,7 +277,50 @@ const INSTALLED_TABS: readonly InstalledTab[] = [
   "video",
 ];
 
-export function InstalledModels({ engine }: { engine: InferenceEngine }) {
+/** 已安装模型列表的空态：一个模型都没有 / 收藏里还空着 / 该分类下没有 —— 三处共用一个样子。 */
+export function ModelsEmptyState({
+  title,
+  hint,
+  action,
+}: {
+  title: string;
+  hint?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed px-4 py-8 text-center">
+      <HardDriveIcon className="size-6 text-muted-foreground/50" />
+      <p className="text-xs font-medium">{title}</p>
+      {hint && <p className="max-w-md text-[11px] leading-5 text-muted-foreground">{hint}</p>}
+      {action}
+    </div>
+  );
+}
+
+export function InstalledModels({
+  engine,
+  favoritesOnly = false,
+  allEngines = false,
+  emptyTitle,
+  emptyHint,
+  emptyAction,
+}: {
+  engine: InferenceEngine;
+  /** 只列收藏的模型（模型库 → 我的收藏）。 */
+  favoritesOnly?: boolean;
+  /**
+   * 不按当前引擎过滤（模型库 → 运行模型）。
+   *
+   * 严格过滤看着整洁，代价是切一次引擎就有模型从列表里消失（GGUF 在 vLLM 下、
+   * MLX 权重在 llama.cpp 下），而它们其实照样能跑 —— 启动时会自动把引擎切过去
+   *（`models.autoSwitchEngine`），这样的行带一个提示徽标。
+   */
+  allEngines?: boolean;
+  /** 空态文案：默认是"还没有下载任何本地模型"，收藏页与「运行模型」各自给话术。 */
+  emptyTitle?: string;
+  emptyHint?: string;
+  emptyAction?: ReactNode;
+}) {
   const t = useT();
   const [tab, setTab] = useState<InstalledTab>("all");
   const [origin, setOrigin] = useState<ModelOrigin | "all">("all");
@@ -294,11 +337,14 @@ export function InstalledModels({ engine }: { engine: InferenceEngine }) {
     );
   }
 
-  // 严格按当前引擎过滤：只显示该引擎能加载的推理模型；`other`（TTS/ASR/生图
-  // 等非推理模型）不属于推理引擎加载，始终展示，由分类 tab 分组。
-  const allModels = (data?.models ?? []).filter(
-    (m) => m.kind === "other" || engineSupports(engine, m.kind),
-  );
+  // 收藏页只留收藏（跨引擎、跨来源的一份清单）；运行模型页默认全列（见 allEngines）；
+  // 其余情况按引擎过滤：只显示该引擎能加载的推理模型，`other`（TTS/ASR/生图等非推理模型）
+  // 不经过推理引擎加载，始终展示，由分类 tab 分组。
+  const allModels = (data?.models ?? []).filter((m) => {
+    if (favoritesOnly) return m.favorite;
+    if (allEngines) return true;
+    return m.kind === "other" || engineSupports(engine, m.kind);
+  });
   const byOrigin =
     origin === "all" ? allModels : allModels.filter((m) => m.origin === origin);
   const models =
@@ -310,29 +356,32 @@ export function InstalledModels({ engine }: { engine: InferenceEngine }) {
   return (
     <div className="flex flex-col gap-3">
       {/* 来源筛选：应用下载 / 本地目录 / HF 缓存 —— 一眼看出模型是从哪儿来的。
-          尺寸与下面那条分类筛选对齐（同款药丸、同高），两行叠在一起才像一套。 */}
-      <div className="flex flex-wrap items-center gap-1">
-        {(["all", "managed", "external", "hf-cache"] as const).map((o) => {
-          const active = origin === o;
-          const count = o === "all" ? allModels.length : originCount(o);
-          return (
-            <button
-              key={o}
-              type="button"
-              onClick={() => setOrigin(o)}
-              className={cn(
-                "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                active
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-              )}
-            >
-              {o === "all" ? t("models.cat.all") : t(ORIGIN_LABEL_KEYS[o])}
-              <span className="tabular-nums opacity-60">{count}</span>
-            </button>
-          );
-        })}
-      </div>
+          尺寸与下面那条分类筛选对齐（同款药丸、同高），两行叠在一起才像一套。
+          收藏页不摆这一行：收藏本来就跨来源，按来源再切一次只是噪音。 */}
+      {!favoritesOnly && (
+        <div className="flex flex-wrap items-center gap-1">
+          {(["all", "managed", "external", "hf-cache"] as const).map((o) => {
+            const active = origin === o;
+            const count = o === "all" ? allModels.length : originCount(o);
+            return (
+              <button
+                key={o}
+                type="button"
+                onClick={() => setOrigin(o)}
+                className={cn(
+                  "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors",
+                  active
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+                )}
+              >
+                {o === "all" ? t("models.cat.all") : t(ORIGIN_LABEL_KEYS[o])}
+                <span className="tabular-nums opacity-60">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
       {/* 分类筛选：图标 + 两字短名 + 计数 —— 一行放得下，排不下就换行，不拉滚动条 */}
       <ModelCategoryChips
         values={INSTALLED_TABS}
@@ -341,12 +390,11 @@ export function InstalledModels({ engine }: { engine: InferenceEngine }) {
         onChange={setTab}
       />
       {models.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-8 text-center">
-          <HardDriveIcon className="size-6 text-muted-foreground/50" />
-          <p className="text-xs text-muted-foreground">
-            {allModels.length === 0 ? t("models.noInstalled") : t("models.noInstalledInCat")}
-          </p>
-        </div>
+        <ModelsEmptyState
+          title={emptyTitle ?? (allModels.length === 0 ? t("models.noInstalled") : t("models.noInstalledInCat"))}
+          hint={emptyHint}
+          action={emptyAction}
+        />
       ) : (
         <div className="flex flex-col gap-2">
           {models.map((m) => (

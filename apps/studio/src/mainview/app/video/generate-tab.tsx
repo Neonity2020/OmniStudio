@@ -17,7 +17,7 @@ import { ResultError } from "@components/media-result";
 import { useVideoStore } from "@stores/video";
 import type { VideoGenBackend } from "../../../bun/video-gen";
 import { cn } from "@/mainview/lib/utils";
-import { RATIOS, COMFY_SIZES, DURATION_RANGE, DURATION_OPTIONS, DEFAULT_RESOLUTION, RESOLUTIONS, BACKEND_ITEMS, snapDuration, VideoTaskCard, VideoFailedCard, VideoPlayerCard, RecentStrip } from "./parts";
+import { RATIOS, COMFY_SIZES, DURATION_RANGE, DEFAULT_RESOLUTION, RESOLUTIONS, BACKEND_ITEMS, snapDuration, VideoTaskCard, VideoFailedCard, VideoPlayerCard, RecentStrip } from "./parts";
 
 export function GenerateTab() {
   const t = useT();
@@ -47,7 +47,7 @@ export function GenerateTab() {
 
   // ---------- 后端配置 ----------
   const [backend, setBackend] = useState<VideoGenBackend>("cloud");
-  // 云端只记厂商 + 模型：地址 / 密钥 / 接口协议都在「设置 → 模型云服务」里。
+  // 云端只记厂商 + 模型：地址 / 密钥 / 接口协议都在「设置 → 云端模型」里。
   const [providerId, setProviderId] = useState("");
   const [cloudModel, setCloudModel] = useState("");
   const [comfyBase, setComfyBase] = useState("");
@@ -231,7 +231,6 @@ export function GenerateTab() {
 
   const protocolKey = backend === "comfyui" ? "comfyui" : protocol;
   const range = DURATION_RANGE[protocolKey];
-  const durationOptions = DURATION_OPTIONS[protocolKey];
   const clampedDuration = snapDuration(protocolKey, duration);
   const ratio = RATIOS[ratioIdx]!;
   const comfySize = COMFY_SIZES[ratio] ?? COMFY_SIZES["16:9"]!;
@@ -472,44 +471,19 @@ export function GenerateTab() {
                   {clampedDuration}s
                 </span>
               </div>
-              {durationOptions ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {durationOptions.map((d) => (
-                    <button
-                      key={d}
-                      type="button"
-                      onClick={() => setDuration(d)}
-                      className={cn(
-                        "rounded-md border px-2.5 py-1 text-[11px] tabular-nums transition-colors",
-                        clampedDuration === d
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                      )}
-                    >
-                      {d}s
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <input
-                  type="range"
-                  min={range.min}
-                  max={range.max}
-                  step={1}
-                  value={clampedDuration}
-                  onChange={(e) => setDuration(Number(e.target.value))}
-                  className="w-full accent-primary"
-                />
-              )}
+              <input
+                type="range"
+                min={range.min}
+                max={range.max}
+                step={1}
+                value={clampedDuration}
+                onChange={(e) => setDuration(Number(e.target.value))}
+                className="w-full accent-primary"
+              />
               <p className="mt-1 text-[10px] text-muted-foreground tabular-nums">
-                {durationOptions
-                  ? t("video.params.durationFixed").replace(
-                      "{values}",
-                      durationOptions.map((d) => `${d}s`).join(" / "),
-                    )
-                  : t("video.params.durationRange")
-                      .replace("{min}", String(range.min))
-                      .replace("{max}", String(range.max))}
+                {t("video.params.durationRange")
+                  .replace("{min}", String(range.min))
+                  .replace("{max}", String(range.max))}
                 {backend === "comfyui" && ` · ${t("video.params.fps16")}`}
               </p>
             </div>

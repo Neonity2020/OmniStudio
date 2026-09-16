@@ -5,7 +5,8 @@ import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
-import { decryptSecret, encryptSecret, isEncryptedSecret } from "../secrets";
+import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "../secrets";
+import { logEvent } from "../app-log";
 
 export type SettingsKey =
   | "SETUP_COMPLETE"
@@ -43,6 +44,10 @@ export type SettingsKey =
   | "SERVER_PARALLEL"
   | "SERVER_TEMP"
   | "SERVER_TOP_P"
+  | "SERVER_TOP_K"
+  | "SERVER_REPEAT_PENALTY"
+  | "SERVER_IDLE_UNLOAD_MINUTES"
+  | "SERVER_FALLBACK_MODELS"
   | "SERVER_GPU_LAYERS"
   | "SERVER_CACHE_TYPE_K"
   | "SERVER_CACHE_TYPE_V"
@@ -311,6 +316,13 @@ const DEFAULTS: Record<SettingsKey, string> = {
   SERVER_PARALLEL: "1",
   SERVER_TEMP: "0.2",
   SERVER_TOP_P: "0.9",
+  SERVER_TOP_K: "40",
+  SERVER_REPEAT_PENALTY: "1.12",
+  // 0 = 关闭（默认）：空闲卸载是给「机器小、模型多」的人省显存用的，
+  // 默认打开会让「昨晚还跑着的模型今天不见了」变成一个需要解释的意外。
+  SERVER_IDLE_UNLOAD_MINUTES: "0",
+  // 备选模型链：配置的模型起不来时按顺序试（逗号分隔），空 = 不回退。
+  SERVER_FALLBACK_MODELS: "",
   SERVER_GPU_LAYERS: "-1",
   SERVER_CACHE_TYPE_K: "q8_0",
   SERVER_CACHE_TYPE_V: "q8_0",
@@ -388,7 +400,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   IMG_COMFY_BASE: "",
   // MLX 生图常驻 worker 空闲多少分钟后自动卸载（0 = 一直常驻）：模型会占数 GB 内存。
   IMG_MLX_IDLE_MINUTES: "10",
-  // 云端生视频：厂商与模型在「设置 → 模型云服务」里配（VIDEO_PROVIDER_ID / VIDEO_MODEL）。
+  // 云端生视频：厂商与模型在「设置 → 云端模型」里配（VIDEO_PROVIDER_ID / VIDEO_MODEL）。
   VIDEO_BACKEND: "cloud",
   VIDEO_PROVIDER_ID: "",
   VIDEO_MODEL: "",
@@ -403,7 +415,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VIDEO_COMFY_CKPT: "",
   VIDEO_COMFY_CLIP: "",
   VIDEO_COMFY_VAE: "",
-  // 云端生音乐：与生视频同一套做法 —— 厂商与模型在「设置 → 模型云服务」里配
+  // 云端生音乐：与生视频同一套做法 —— 厂商与模型在「设置 → 云端模型」里配
   // （MUSIC_PROVIDER_ID / MUSIC_MODEL），地址与密钥都来自厂商行。
   MUSIC_BACKEND: "cloud",
   MUSIC_PROVIDER_ID: "",
@@ -567,7 +579,34 @@ const settingsCache = new Map<string, { value: string; at: number }>();
  * `EMPTY` 哨兵值不加密也不解密（它就是"无 key"的约定占位，解密会把它当成
  * 普通明文透传）。
  */
-const ENCRYPTED_KEYS = new Set<SettingsKey>(["VLLM_API_KEY", "GATEWAY_API_KEY", "TUNNEL_TOKEN"]);
+export const ENCRYPTED_SETTINGS_KEYS: readonly SettingsKey[] = [
+  "VLLM_API_KEY",
+  "GATEWAY_API_KEY",
+  "TUNNEL_TOKEN",
+  // 第二批（FUT-02）：以前只有上面三类落盘加密，其余同样属于「凭据」的键是明文躺着的，
+  // 分成两批的唯一原因是第一批先做。判定标准只有一条 —— **这个值落到别人手里，
+  // 他就等于能替你花钱或替你写代码**：各家云厂商的 Key（语音 / OCR / 生图 / 视频 /
+  // 联网搜索 / 记忆向量）、Skills 仓库的 PAT、备份远端的访问密钥。
+  // 漏一个的后果是「拷走 omni-studio.db 就能拿到全部凭据」，而加进来的成本只是一个字符串。
+  "TTS_PROVIDER_API_KEY",
+  "ASR_PROVIDER_API_KEY",
+  "OCR_PROVIDER_API_KEY",
+  "IMG_API_KEY",
+  "VIDEO_MINIMAX_API_KEY",
+  "VIDEO_SEEDANCE_API_KEY",
+  "WEB_SEARCH_API_KEY",
+  "MEMORY_EMBEDDING_API_KEY",
+  "VOICE_CALL_REALTIME_API_KEY",
+  "SKILLS_GIT_PAT",
+  "BACKUP_REMOTE_ACCESS_KEY",
+  "BACKUP_REMOTE_SECRET_KEY",
+];
+
+/**
+ * 唯一真源就是上面那个数组：测试直接遍历它（新增一个键，测试自动覆盖到），
+ * 所以这里只做一次 Set 包装，不再抄一遍名单。
+ */
+const ENCRYPTED_KEYS = new Set<SettingsKey>(ENCRYPTED_SETTINGS_KEYS);
 
 function maybeEncrypt(key: SettingsKey, value: string): string {
   if (!ENCRYPTED_KEYS.has(key)) return value;
@@ -578,7 +617,29 @@ function maybeEncrypt(key: SettingsKey, value: string): string {
 function maybeDecrypt(key: SettingsKey, value: string): string {
   if (!ENCRYPTED_KEYS.has(key)) return value;
   if (!value || value === "EMPTY") return value;
-  return decryptSecret(value);
+  const result = tryDecryptSecret(value);
+  if (result.ok) return result.value;
+  // 解不开**不抛**：读设置是启动路上的第一个调用，抛出去等于引导页永远走不完、
+  // 进不去主界面（点「跳过」也救不回来 —— 它写完 SETUP_COMPLETE，界面还要再读一次设置）。
+  // 最常见来源是"恢复了一份别处机器的备份"：归档不含 secrets.key，库里那些密文
+  // 本机钥匙解不开。按空值处理并留一条日志，语义就是"这台机器上没有这个凭据"。
+  warnDecryptFailure(key, result.error);
+  return "";
+}
+
+/** 同一个键在一次进程内只报一条：读设置是热路径，不这样收一下会把日志刷满。 */
+const decryptWarned = new Set<string>();
+
+function warnDecryptFailure(key: string, error: string): void {
+  if (decryptWarned.has(key)) return;
+  decryptWarned.add(key);
+  logEvent({
+    level: "warn",
+    source: "settings",
+    event: "settings.decrypt.failed",
+    message: `设置项 ${key} 的密文在本机解不开（多来自别的机器 / 数据目录的备份），已按空值处理`,
+    detail: { key, reason: error.slice(0, 200) },
+  });
 }
 
 /** 清空设置缓存（跨进程写入后需要立即生效时手动调用）。 */

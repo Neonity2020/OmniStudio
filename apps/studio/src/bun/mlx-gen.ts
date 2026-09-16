@@ -120,6 +120,11 @@ function getEngineDir(): string {
   return getDataDir("engines", "mflux");
 }
 
+/** 托管目录（引擎管理页探测占用 / 路径，以及卸载的目标）。 */
+export function engineDirPath(): string {
+  return getEngineDir();
+}
+
 function getVenvBinDir(): string {
   return path.join(getEngineDir(), "bin");
 }
@@ -1150,6 +1155,20 @@ export async function stopMlxModel(): Promise<{ ok: boolean }> {
   } catch {}
   clearTimeout(t);
   emitPhase({ modelId, phase: "idle" });
+  return { ok: true };
+}
+
+/**
+ * 卸载 mflux 引擎（venv 整个删掉），先停掉常驻 worker —— 删掉解释器的同时它还在跑，
+ * 只会留下一个"进程还在、文件已没了"的僵尸。已下载的生成模型保留（图片页单独管理）。
+ */
+export async function removeMlxEngine(): Promise<{ ok: boolean; error?: string }> {
+  await stopMlxModel();
+  try {
+    rmSync(getEngineDir(), { recursive: true, force: true });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
   return { ok: true };
 }
 

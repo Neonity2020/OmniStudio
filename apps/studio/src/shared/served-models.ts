@@ -1,4 +1,5 @@
 import type { InferenceEngine } from "./engines";
+import type { StartupErrorKind } from "./engine-errors";
 
 /** 本地模型服务实例的状态（与单实例时代的 ServerStatus 同名同义）。 */
 export type ServedModelStatus = "stopped" | "starting" | "downloading" | "running" | "error";
@@ -34,6 +35,13 @@ export type ServedModelInfo = {
   status: ServedModelStatus;
   pid?: number;
   error?: string;
+  /**
+   * `error` 的类型（缺依赖 / 显存不足 / 端口被占 / 权重问题 / 权限）。
+   *
+   * 原文只说明「怎么坏的」，类型才决定「下一步做什么」—— 界面按它给可执行的建议，
+   * 所以分类在主进程完成（那里有日志上下文），webview 只负责翻译成当前语言。
+   */
+  errorKind?: StartupErrorKind;
   startedAt?: number;
   /**
    * 端口就是该引擎设置里的端口：各 App、`omi`、外部集成默认连它，

@@ -19,6 +19,16 @@ export function engineLabelOf(result: DisplayResult, t: ReportT): string {
 
 export type ReportNote = { key: string; text: string; tone: "error" | "warn" };
 
+/** 这次扫描是否测了多个并发档（只有多档时才需要把并发单列出来）。 */
+export function hasMultipleBatches(result: DisplayResult): boolean {
+  return new Set(result.rows.map((r) => r.batchSize)).size > 1;
+}
+
+/** 并发档的短标签：明细表、缓存对比、导出报告都用同一套写法。 */
+export function batchTag(batchSize: number): string {
+  return `×${batchSize}`;
+}
+
 /**
  * 档位级的"为什么没数据 / 数据为什么不可信"。
  *
@@ -27,6 +37,10 @@ export type ReportNote = { key: string; text: string; tone: "error" | "warn" };
  */
 export function speedReportNotes(result: DisplayResult, t: ReportT): ReportNote[] {
   const notes: ReportNote[] = [];
+  const multi = hasMultipleBatches(result);
+  /** 档位标签：扫了多个并发时带上 ×N —— 每条提示都得说清是哪个 bucket。 */
+  const at = (contextLength: number, batchSize?: number) =>
+    `${fmtCtx(contextLength)}${multi && batchSize != null ? ` ${batchTag(batchSize)}` : ""}`;
   const stopped = result.summary?.stopped;
   if (stopped) {
     notes.push({
@@ -36,38 +50,38 @@ export function speedReportNotes(result: DisplayResult, t: ReportT): ReportNote[
         stopped.reason === "context-overflow"
           ? "benchmark.note.stopped.overflow"
           : "benchmark.note.stopped.timeout",
-        { ctx: fmtCtx(stopped.contextLength) },
+        { ctx: at(stopped.contextLength, stopped.batchSize) },
       ),
     });
   }
   for (const r of result.rows) {
     if (r.error) {
       notes.push({
-        key: `error-${r.contextLength}-${r.cache ?? ""}`,
+        key: `error-${r.contextLength}-${r.batchSize}-${r.cache ?? ""}`,
         tone: "error",
-        text: t("benchmark.note.failed", { ctx: fmtCtx(r.contextLength), error: r.error }),
+        text: t("benchmark.note.failed", { ctx: at(r.contextLength, r.batchSize), error: r.error }),
       });
     }
     if (r.truncated) {
       notes.push({
-        key: `truncated-${r.contextLength}`,
+        key: `truncated-${r.contextLength}-${r.batchSize}`,
         tone: "warn",
         text: t("benchmark.note.truncated", {
-          ctx: fmtCtx(r.contextLength),
+          ctx: at(r.contextLength, r.batchSize),
           actual: r.promptTokens.toLocaleString(),
         }),
       });
     }
   }
-  // 缓存对比：同一档位下"冷启 vs 命中"的差就是缓存买到的速度。命中档没有变快时
-  // 单独提示 —— 那说明这台服务端根本没吃到前缀缓存，是排查配置的第一步。
+  // 缓存对比：同一 档位 × 并发 下"冷启 vs 命中"的差就是缓存买到的速度。命中档没有
+  // 变快时单独提示 —— 那说明这台服务端根本没吃到前缀缓存，是排查配置的第一步。
   for (const c of cacheRowsOf(result)) {
     if (c.warmSpeedup != null && c.warmSpeedup < 1.2) {
       notes.push({
-        key: `nocache-${c.contextLength}`,
+        key: `nocache-${c.contextLength}-${c.batchSize}`,
         tone: "warn",
         text: t("benchmark.note.noCacheGain", {
-          ctx: fmtCtx(c.contextLength),
+          ctx: at(c.contextLength, c.batchSize),
           speedup: String(c.warmSpeedup),
         }),
       });

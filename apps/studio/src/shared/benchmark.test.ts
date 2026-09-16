@@ -3,13 +3,18 @@ import { describe, expect, test } from "bun:test";
 import {
   BENCHMARK_DEFAULT_CACHE_MODES,
   BENCHMARK_DEFAULT_CONTEXTS,
+  BENCHMARK_MAX_BATCH,
   BENCHMARK_MAX_CONTEXT,
   BENCHMARK_MIN_CONTEXT,
   BENCHMARK_PRESET_CONTEXTS,
+  batchSizesFromParams,
   cacheComparison,
   fmtCtx,
+  normalizeBatchSizes,
   normalizeCacheModes,
   normalizeContexts,
+  parseBatch,
+  parseBatchSizes,
   parseCacheModes,
   parseContext,
   parseContexts,
@@ -85,6 +90,44 @@ describe("normalizeContexts", () => {
 
   test("非有限值被丢掉（RPC / 控制 socket 传来 NaN / Infinity 不能变成 prompt 长度）", () => {
     expect(normalizeContexts([Number.NaN, Number.POSITIVE_INFINITY, 8192])).toEqual([8192]);
+  });
+});
+
+describe("normalizeBatchSizes / parseBatchSizes", () => {
+  test("去重升序，夹在 [1, 64]；空集回落到 [1]（扫描不能静默变成零个并发）", () => {
+    expect(normalizeBatchSizes([4, 1, 4, 2])).toEqual([1, 2, 4]);
+    expect(normalizeBatchSizes([])).toEqual([1]);
+    expect(normalizeBatchSizes([0, 999])).toEqual([1, BENCHMARK_MAX_BATCH]);
+    expect(BENCHMARK_MAX_BATCH).toBe(64);
+  });
+
+  test("非有限值被丢掉（RPC / 控制 socket 传来 NaN / Infinity 不能变成并发数）", () => {
+    expect(normalizeBatchSizes([Number.NaN, Number.POSITIVE_INFINITY, 2])).toEqual([2]);
+    expect(normalizeBatchSizes([Number.NaN])).toEqual([1]);
+  });
+
+  test("parseBatch 只认正整数：小数与 0 不算并发档", () => {
+    expect(parseBatch("8")).toBe(8);
+    expect(parseBatch(" 4 ")).toBe(4);
+    expect(parseBatch("0")).toBeNull();
+    expect(parseBatch("-2")).toBeNull();
+    expect(parseBatch("2.5")).toBeNull();
+    expect(parseBatch("abc")).toBeNull();
+  });
+
+  test("CLI 的 --batches 文本：逗号 / 空格分隔，输出已规范化", () => {
+    expect(parseBatchSizes("1,2,4")).toEqual([1, 2, 4]);
+    expect(parseBatchSizes("4 2,1,2")).toEqual([1, 2, 4]);
+    expect(parseBatchSizes("")).toEqual([1]);
+  });
+
+  test("batchSizesFromParams：新记录读 batchSizes，老记录读单值 batchSize", () => {
+    expect(batchSizesFromParams({ batchSizes: [1, 2] })).toEqual([1, 2]);
+    expect(batchSizesFromParams({ batchSize: 3 })).toEqual([3]);
+    // 两个都有时新字段优先（老字段只是简写）
+    expect(batchSizesFromParams({ batchSize: 3, batchSizes: [1, 8] })).toEqual([1, 8]);
+    expect(batchSizesFromParams({})).toEqual([1]);
+    expect(batchSizesFromParams(null)).toEqual([1]);
   });
 });
 
@@ -177,5 +220,24 @@ describe("cacheComparison", () => {
   test("不报 cache_n 的引擎（vLLM / SGLang）复用比例留空，不猜一个数出来", () => {
     const noTelemetry = [row({ contextLength: 1024, cache: "warm", ttftMs: 50 })];
     expect(cacheComparison(noTelemetry)[0]!.warmReuseRatio).toBeNull();
+  });
+
+  test("不同并发分开比：×1 的冷启不会去比 ×8 的命中（差值里混着并发的代价）", () => {
+    const mixed = [
+      row({ contextLength: 8192, batchSize: 1, cache: "cold", ttftMs: 800 }),
+      row({ contextLength: 8192, batchSize: 1, cache: "warm", ttftMs: 80 }),
+      row({ contextLength: 8192, batchSize: 8, cache: "cold", ttftMs: 4000 }),
+      row({ contextLength: 8192, batchSize: 8, cache: "warm", ttftMs: 1000 }),
+    ];
+    const entries = cacheComparison(mixed);
+    expect(entries.map((e) => `${e.contextLength}@${e.batchSize}`)).toEqual(["8192@1", "8192@8"]);
+    expect(entries[0]!.warmSpeedup).toBe(10);
+    // 若把两个并发混成一组，会算出 800/1000 < 1 这种"命中反而更慢"的假结论
+    expect(entries[1]!.warmSpeedup).toBe(4);
+  });
+
+  test("老记录没有 batchSize 字段：按 ×1 看待，仍按档位分行", () => {
+    const legacy = [row({ contextLength: 1024, cache: "cold" }), row({ contextLength: 4096, cache: "warm" })];
+    expect(cacheComparison(legacy).map((e) => `${e.contextLength}@${e.batchSize}`)).toEqual(["1024@1", "4096@1"]);
   });
 });
