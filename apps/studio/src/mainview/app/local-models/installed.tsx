@@ -82,7 +82,9 @@ function InstalledModelRow({
   );
   const startMutation = useMutation({
     mutationFn: async () => {
-      if (!model.isActive) {
+      // 嵌入模型不写聊天活动状态（LOCAL_MODEL_PATH / CHAT_MODEL 只跟聊天模型走），
+      // 跳过 setActiveModel 前置步骤，直接按路径启动 / 重启嵌入实例。
+      if (!model.isActive && model.category !== "embedding") {
         const act = await rpcClient.setActiveModel({ path: model.path });
         if (!act.ok) throw new Error(act.error || "Failed to activate model");
       }
@@ -221,20 +223,23 @@ function InstalledModelRow({
           )}
           {serverStatus === "running" ? t("models.restart") : t("models.run")}
         </Button>
-        <Button
-          variant={model.isActive ? "default" : "outline"}
-          size="sm"
-          className="h-7 text-xs"
-          disabled={model.isActive || setActiveMutation.isPending}
-          onClick={() => setActiveMutation.mutate()}
-        >
-          {setActiveMutation.isPending ? (
-            <Loader2Icon data-icon="inline-start" className="animate-spin" />
-          ) : (
-            <CheckCircle2Icon data-icon="inline-start" />
-          )}
-          {model.isActive ? t("models.inUse") : t("models.activate")}
-        </Button>
+        {/* 嵌入模型不能设为当前聊天模型（后端会拒），按钮藏掉别给死入口。 */}
+        {model.category !== "embedding" && (
+          <Button
+            variant={model.isActive ? "default" : "outline"}
+            size="sm"
+            className="h-7 text-xs"
+            disabled={model.isActive || setActiveMutation.isPending}
+            onClick={() => setActiveMutation.mutate()}
+          >
+            {setActiveMutation.isPending ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <CheckCircle2Icon data-icon="inline-start" />
+            )}
+            {model.isActive ? t("models.inUse") : t("models.activate")}
+          </Button>
+        )}
         <Button
           variant="ghost"
           size="icon-sm"

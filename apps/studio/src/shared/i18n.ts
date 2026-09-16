@@ -1278,11 +1278,22 @@ const zh: Record<string, string> = {
   "kb.create.descPlaceholder": "这个库存什么资料、给谁用",
   "kb.create.notUse": "不使用",
   "kb.create.loadingModels": "获取模型列表…",
+  // 模型选择器手填模式（默认模型面板开启 allowCustom 时的提示与「使用」项文案）。
+  "kb.modelSelect.searchOrType": "搜索或输入模型名，回车确认…",
+  "kb.modelSelect.useTyped": "使用「{model}」",
   "kb.create.embedding": "嵌入模型",
   "kb.create.embeddingHint": "可选。不使用 = 纯关键词检索；选择后文档入库时自动向量化，支持口语化提问。",
+  "kb.create.embeddingDefaultUnreachable": "已配置默认嵌入模型 {model}，但当前不可达；可启动嵌入服务后重新打开此窗口",
   "kb.create.rerank": "重排模型",
   "kb.create.rerankHint": "可选。检索结果经重排模型二次打分，精度更高但每次检索多一次请求。",
   "kb.create.submit": "新建知识库",
+  // 创建失败反馈：mutation 无 onError 的静默故障教训（RPC 拒绝时界面曾零反馈）。
+  "kb.create.error": "创建失败：{message}",
+  // 模态能力勾选（建库弹窗与 KB 设置页共用文案）；语音/视频直嵌本地 llama.cpp 暂不支持。
+  "kb.create.embedImage": "图片",
+  "kb.create.embedAudio": "语音",
+  "kb.create.embedVideo": "视频",
+  "kb.create.embedLocalOnlyHint": "本地 llama.cpp 暂不支持语音/视频直嵌，勾选需配置远程嵌入服务。",
 
   "kb.docs.addFile": "添加文件",
   "kb.docs.addNote": "添加笔记",
@@ -1322,6 +1333,20 @@ const zh: Record<string, string> = {
   "kb.chunks.embedded": "已向量化",
   "kb.chunks.notEmbedded": "未向量化",
 
+  // 媒体直嵌块标识（分块列表 / 召回测试 / 聊天引用共用）。
+  "kb.docs.mediaChunk.image": "图片",
+  "kb.docs.mediaChunk.audio": "音频",
+  "kb.docs.mediaChunk.video": "视频",
+  // 恶意/损坏数据里 modality 是未知串时的通用回退标签（UI 防崩树）。
+  "kb.docs.mediaChunk.unknown": "媒体",
+  "kb.docs.mediaChunk.openOriginal": "点击打开原文件",
+  "kb.docs.mediaChunk.loadFailed": "缩略图加载失败",
+
+  // 图片查看弹窗（共享组件 KbImageViewer）。
+  "kb.viewer.title": "查看图片",
+  "kb.viewer.openExternal": "用系统程序打开",
+  "kb.viewer.zoomHint": "滚轮缩放 · 双击复位",
+
   "kb.status.pending": "等待中",
   "kb.status.parsing": "解析中",
   "kb.status.chunking": "切片中",
@@ -1357,6 +1382,8 @@ const zh: Record<string, string> = {
   "kb.settings.advancedOn": "已自定义",
   "kb.settings.noCandidates": "暂无候选模型：本地推理服务未运行，也未配置云端模型",
   "kb.settings.noCandidatesRemote": "该服务未返回模型列表：检查地址与密钥，或在设置里配置云端模型",
+  "kb.settings.noEmbeddingServer":
+    "本地暂无运行中的嵌入服务：先在模型页将嵌入模型的类别改为「嵌入 Embedding」并启动，或改用云端 / 自定义地址",
   "kb.settings.apiKey": "API Key",
   "kb.settings.provider": "云服务商",
   "kb.settings.providerNone": "不使用（本地 / 自定义）",
@@ -1369,6 +1396,25 @@ const zh: Record<string, string> = {
   "kb.settings.keyHint": "仅保存在本机 SQLite，不会上传。",
   "kb.settings.keywordOnlyNote":
     "当前为纯关键词检索：口语化问法命中率有限。配置嵌入模型后需重新向量化。",
+  "kb.settings.embeddingServeHint":
+    "嵌入模型需先在模型页以「嵌入 Embedding」类别启动；本地嵌入服务未运行时，可展开「自定义接口与密钥」改用云端 / 自定义地址。",
+  // 空配置库的「启用向量检索」：把「设置 → 默认模型 → 向量嵌入」里的全局默认
+  // 快照进本库，并真的重新嵌入全部文档（不是只清空向量）。
+  "kb.settings.enableEmbedding": "启用向量检索",
+  "kb.settings.enableEmbeddingDesc":
+    "把「默认模型」里的全局嵌入配置写入本库，并重新嵌入全部文档 —— 文档多时耗时较长，期间会占用推理服务。",
+  "kb.settings.enableEmbeddingNoGlobal": "先到「设置 → 默认模型」选定嵌入模型",
+  "kb.settings.enableEmbeddingNoBackend":
+    "先启动嵌入模型（模型页把类别改为「嵌入」）或在默认模型里填写服务地址",
+  "kb.settings.enableEmbeddingBusy": "正在重新嵌入…",
+  "kb.settings.enableEmbeddingDone": "已启用，本轮补齐 {count} 个分块",
+  "kb.settings.enableEmbeddingFailed": "启用失败：{error}",
+  // 模态能力声明：三布尔随库行快照；变更不触发向量重置，但已入库媒体需重导。
+  "kb.settings.embedModalities": "模态能力",
+  "kb.settings.embedModalitiesHint":
+    "勾选后，对应模态的媒体文件导入时走「媒体 + OCR 文本联合嵌入」；未勾选的库添加媒体文件仍走 OCR 转文本。",
+  "kb.settings.embedModalitiesChangeNote":
+    "模态能力变更后，已导入的媒体文件需重新导入才会按新能力重建向量。",
 
   "kb.settings.rerank": "重排模型",
   "kb.settings.rerankHint":
@@ -1649,6 +1695,9 @@ const zh: Record<string, string> = {
   // 按分类筛选模型时，服务端清单里一个都没认出该分类 → 退回全量
   "models.filter.relaxed": "未能从服务返回的模型里识别出该类模型，已列出全部。",
   "models.noPresetInCat": "该分类暂无推荐模型，可从「我的模型」或市场搜索里下载。",
+  // 类别改键（模型详情页）：改完重启模型即按新类别服务
+  "models.categoryLabel": "模型类别",
+  "models.categoryManagedOnly": "仅市场下载的模型支持修改类别",
   "models.viewDetail": "查看详情",
   "models.noGguf": "未找到可下载的模型文件",
   "models.noFiles": "未找到可下载的模型文件",
@@ -2031,6 +2080,17 @@ const zh: Record<string, string> = {
   "defaults.notSet": "未设置",
   "defaults.switching": "切换中…",
   "defaults.hint": "各场景的服务商地址与密钥在对应工具页或「模型云服务」页配置。",
+  // 全局默认嵌入模型：只在「写入时」生效（新建 KB 预填、KB 设置页点启用），
+  // 对既有 KB 没有追溯效果 —— 文案必须讲清楚，否则用户以为已经生效。
+  "defaults.embedding": "向量嵌入",
+  "defaults.embeddingDesc":
+    "全局默认嵌入模型：新建知识库会预填它，共享记忆按它做向量检索。",
+  "defaults.embeddingBase": "服务地址",
+  "defaults.embeddingKey": "API Key",
+  "defaults.embeddingNote":
+    "设置后共享记忆开始向量检索（既有记忆在后续写入或「整理记忆」时补向量）；只想用关键词检索时，把记忆嵌入模型设为 none。",
+  "defaults.embeddingExistingKb":
+    "既有知识库不会被自动切换：到该库的设置页点「启用向量检索」才生效。",
 
   "settings.modelPicker": "模型",
   "settings.customHf": "自定义 HuggingFace 模型",
@@ -2115,6 +2175,11 @@ const zh: Record<string, string> = {
   "settings.gateway.endpoints.hint": "端点仅监听本机（127.0.0.1），不暴露公网；在浏览器打开 /docs 可查看 Swagger UI 文档。",
   "settings.gateway.endpoints.responses": "对话补全（OpenAI Responses）",
   "settings.gateway.endpoints.messages": "对话补全（Anthropic Messages）",
+  "settings.gateway.endpoints.embeddings": "向量嵌入（Embeddings）",
+  "settings.gateway.endpoints.embeddingsDirect": "直连嵌入实例",
+  "settings.gateway.endpoints.embeddingsOffline": "未运行",
+  "settings.gateway.endpoints.embeddingsHint":
+    "直连地址指向本机正在运行的嵌入实例，与网关无关；在模型页以「嵌入 Embedding」类别启动模型后即可复制使用。",
   "settings.gateway.protocol.hint": "三套协议同一网关：OpenAI Chat Completions（/v1/chat/completions）、OpenAI Responses（/v1/responses）、Anthropic Messages（/v1/messages）。本地与云端模型按模型 ID 自动路由，/v1/models 统一列出全部可用模型。",
   "settings.gateway.keys.title": "API Key（鉴权）",
   "settings.gateway.keys.desc": "一把 Key 给一个使用方（「笔记本」「CI」「Claude Code」…）。网关接受所有「已启用」的 Key，停用或删除立即生效，不需要重启网关。",
@@ -4217,13 +4282,24 @@ const en: Record<string, string> = {
   "kb.create.descPlaceholder": "What this base stores and who uses it",
   "kb.create.notUse": "Not used",
   "kb.create.loadingModels": "Loading models…",
+  "kb.modelSelect.searchOrType": "Search or type a model name, press Enter…",
+  "kb.modelSelect.useTyped": "Use “{model}”",
   "kb.create.embedding": "Embedding model",
   "kb.create.embeddingHint":
     "Optional. Not used = keyword search only; a model enables semantic recall for conversational queries.",
+  "kb.create.embeddingDefaultUnreachable":
+    "Default embedding model {model} is configured but unreachable. Start the embedding service and reopen this dialog.",
   "kb.create.rerank": "Rerank model",
   "kb.create.rerankHint":
     "Optional. Candidates get a second-stage relevance pass for better precision (one extra request per search).",
   "kb.create.submit": "Create",
+  "kb.create.error": "Create failed: {message}",
+  // Modality capability checkboxes (shared copy between create dialog and KB settings).
+  "kb.create.embedImage": "Image",
+  "kb.create.embedAudio": "Voice",
+  "kb.create.embedVideo": "Video",
+  "kb.create.embedLocalOnlyHint":
+    "Local llama.cpp can't embed audio/video directly yet — configure a remote embedding service.",
 
   "kb.docs.addFile": "Add files",
   "kb.docs.addNote": "Add note",
@@ -4264,6 +4340,20 @@ const en: Record<string, string> = {
   "kb.chunks.embedded": "Embedded",
   "kb.chunks.notEmbedded": "Not embedded",
 
+  // Media chunk markers (shared by chunk list / recall test / chat citations).
+  "kb.docs.mediaChunk.image": "Image",
+  "kb.docs.mediaChunk.audio": "Audio",
+  "kb.docs.mediaChunk.video": "Video",
+  // Generic fallback label for an unknown modality string in corrupted data (UI crash guard).
+  "kb.docs.mediaChunk.unknown": "Media",
+  "kb.docs.mediaChunk.openOriginal": "Click to open the original file",
+  "kb.docs.mediaChunk.loadFailed": "Failed to load thumbnail",
+
+  // Image viewer dialog (shared KbImageViewer component).
+  "kb.viewer.title": "View image",
+  "kb.viewer.openExternal": "Open with system app",
+  "kb.viewer.zoomHint": "Scroll to zoom · Double-click to reset",
+
   "kb.status.pending": "Pending",
   "kb.status.parsing": "Parsing",
   "kb.status.chunking": "Chunking",
@@ -4301,6 +4391,8 @@ const en: Record<string, string> = {
     "No candidates: the local inference server is not running and no cloud model is configured",
   "kb.settings.noCandidatesRemote":
     "This endpoint returned no model list: check the URL and key, or configure a cloud model in Settings",
+  "kb.settings.noEmbeddingServer":
+    "No local embedding server running: set an installed model's category to Embedding in Models and start it, or use a cloud / custom endpoint",
   "kb.settings.apiKey": "API Key",
   "kb.settings.provider": "Provider",
   "kb.settings.providerNone": "None (local / custom)",
@@ -4314,6 +4406,27 @@ const en: Record<string, string> = {
   "kb.settings.keyHint": "Stored only in local SQLite, never uploaded.",
   "kb.settings.keywordOnlyNote":
     "Currently keyword-only: conversational queries may miss. Pick an embedding model and re-embed.",
+  "kb.settings.embeddingServeHint":
+    "Start an embedding model in Models with the “Embedding” category first; when no local embedding server is running, expand “Custom endpoint & key” to use a cloud / custom endpoint.",
+  // "Enable vector search" on keyword-only KBs: snapshots the global default from
+  // Settings → Default models → Embeddings into this KB and actually re-embeds every doc.
+  "kb.settings.enableEmbedding": "Enable vector search",
+  "kb.settings.enableEmbeddingDesc":
+    "Writes the global embedding config from Default models into this KB and re-embeds every document — slow on large libraries, and it occupies the inference server meanwhile.",
+  "kb.settings.enableEmbeddingNoGlobal": "Pick an embedding model in Settings → Default models first",
+  "kb.settings.enableEmbeddingNoBackend":
+    "Start an embedding model first (set its category to Embedding in Models), or fill in a service URL in Default models",
+  "kb.settings.enableEmbeddingBusy": "Re-embedding…",
+  "kb.settings.enableEmbeddingDone": "Enabled; embedded {count} chunks in this pass",
+  "kb.settings.enableEmbeddingFailed": "Failed to enable: {error}",
+  // Modality capability declaration: snapshotted into the KB row; changes don't reset
+  // vectors, but already imported media files must be re-imported to rebuild under the
+  // new capability.
+  "kb.settings.embedModalities": "Modalities",
+  "kb.settings.embedModalitiesHint":
+    "Checked modality: media files import with joint media + OCR text embedding. Unchecked: media files still go through OCR-to-text.",
+  "kb.settings.embedModalitiesChangeNote":
+    "After changing modality settings, already imported media files must be re-imported to rebuild vectors under the new capability.",
 
   "kb.settings.rerank": "Rerank model",
   "kb.settings.rerankHint":
@@ -4601,6 +4714,9 @@ const en: Record<string, string> = {
     "None of the models returned by the service could be identified as this kind, so the full list is shown.",
   "models.noPresetInCat":
     "No recommended models in this category yet — download one from My Models or the marketplace.",
+  // 类别改键（模型详情页）：改完重启模型即按新类别服务
+  "models.categoryLabel": "Model category",
+  "models.categoryManagedOnly": "Only models downloaded from the marketplace support category changes",
   "models.viewDetail": "View details",
   "models.noGguf": "No downloadable model files found.",
   "models.noFiles": "No downloadable model files found.",
@@ -4980,6 +5096,17 @@ const en: Record<string, string> = {
   "defaults.notSet": "Not set",
   "defaults.switching": "Switching…",
   "defaults.hint": "Provider URLs and keys for each scenario live on their tool page or in Model Cloud Services.",
+  // Global default embedding model: applies only at write time (new KB prefill, the KB
+  // "Enable vector search" button). Existing KBs are never touched — say so explicitly.
+  "defaults.embedding": "Embeddings",
+  "defaults.embeddingDesc":
+    "Global default embedding model: new knowledge bases are prefilled with it, and shared memory uses it for vector search.",
+  "defaults.embeddingBase": "Service URL",
+  "defaults.embeddingKey": "API Key",
+  "defaults.embeddingNote":
+    "Shared memory will start vector search (existing memories get vectors on later writes or a memory tidy-up); set the memory embedding model to none to keep keywords only.",
+  "defaults.embeddingExistingKb":
+    "Existing knowledge bases are never switched automatically: open that KB's settings and click “Enable vector search”.",
 
   "settings.modelPicker": "Model",
   "settings.customHf": "Custom HuggingFace model",
@@ -5071,6 +5198,11 @@ const en: Record<string, string> = {
   "settings.gateway.endpoints.hint": "Endpoints listen on 127.0.0.1 only (not exposed publicly). Open /docs in your browser for the Swagger UI.",
   "settings.gateway.endpoints.responses": "Chat (OpenAI Responses API)",
   "settings.gateway.endpoints.messages": "Chat (Anthropic Messages API)",
+  "settings.gateway.endpoints.embeddings": "Embeddings",
+  "settings.gateway.endpoints.embeddingsDirect": "Direct embedding instance",
+  "settings.gateway.endpoints.embeddingsOffline": "Not running",
+  "settings.gateway.endpoints.embeddingsHint":
+    "The direct address points at a locally running embedding instance (not the gateway). Start a model with the Embedding category in Models to use it.",
   "settings.gateway.protocol.hint": "Three protocols on one gateway: OpenAI Chat Completions (/v1/chat/completions), OpenAI Responses (/v1/responses), Anthropic Messages (/v1/messages). Local and cloud models are routed by model ID; /v1/models lists everything.",
   "settings.gateway.keys.title": "API Key (auth)",
   "settings.gateway.keys.desc": "One key per client (\"laptop\", \"CI\", \"Claude Code\"…). The gateway accepts every enabled key; disabling or deleting one takes effect immediately, no restart needed.",

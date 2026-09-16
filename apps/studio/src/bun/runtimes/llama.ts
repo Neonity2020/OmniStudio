@@ -1,9 +1,11 @@
 import type { Subprocess } from "bun";
-import { existsSync } from "fs";
+import { existsSync, readdirSync } from "fs";
+import { dirname, join } from "path";
+import { EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
 import { llamaCppBinaryPath } from "../engine-paths";
-import { modelNameForPath } from "../model-scan";
+import { isMmprojFile, modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -195,7 +197,12 @@ export class LlamaRuntime implements Runtime {
     | { kind: "hf"; ref: string },
     serverArgs: ServerArgs): string[] {
     // llama.cpp 的端口设置键就是 SERVER_PORT（见 shared/engines.ts）。
-    const port = this.overrides.port ?? (getSetting("SERVER_PORT") || "8080");
+    // 嵌入实例（purpose=embedding）回落到嵌入端口段（EMBEDDING_PORT，默认 18190），
+    // 不碰聊天默认端点；聊天实例保持 SERVER_PORT 不变。
+    const embedding = this.overrides.purpose === "embedding";
+    const port = this.overrides.port ?? (embedding
+      ? (getSetting("EMBEDDING_PORT") || String(EMBEDDING_PORT_BASE))
+      : (getSetting("SERVER_PORT") || "8080"));
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const ctxSize = getSetting("SERVER_CTX_SIZE") || String(serverArgs.ctxSize);
     const imageMaxTokens = getSetting("SERVER_IMAGE_MAX_TOKENS") || String(serverArgs.imageMaxTokens);
@@ -207,11 +214,35 @@ export class LlamaRuntime implements Runtime {
     const gpuLayers = getSetting("SERVER_GPU_LAYERS");
     const cacheTypeK = getSetting("SERVER_CACHE_TYPE_K") || "q8_0";
     const cacheTypeV = getSetting("SERVER_CACHE_TYPE_V") || "q8_0";
+    // 池化方式：设置键（set 时枚举校验，见 db/settings.ts）回落 "last"。
+    const pooling = getSetting("EMBEDDING_POOLING") || "last";
+    // 嵌入模式的物理 batch（n_batch = n_ubatch）：取 ctx-size，即「塞得进上下文的
+    // 文本就一定嵌得进去」。**不能沿用聊天调优的 256/64** —— llama.cpp 在
+    // `--embeddings` 下会强制 n_batch = n_ubatch（显式传值才不会被压到 512），
+    // 而物理 batch 就是单次能喂进模型的 token 上限：超过它的文档在 pooling=last 时
+    // 触发 GGML 断言直接崩进程（SIGTRAP / exit 5），pooling=mean 时返回 500。
+    // KB 导入的 markdown 轻松超过 512 token，这正是「导入即崩」的根因。
+    const embedBatch = String(Number(ctxSize) || 8192);
 
     const args: string[] = [];
 
     if (model.kind === "local") {
       args.push("-m", model.path, "--alias", model.alias);
+      // 多模态嵌入（mmproj）：嵌入实例 + 本地模型时，按模型同目录自动配对投影文件。
+      // spike（llama-server b9410）实证 `--embeddings --pooling last --mmproj` 共存可用；
+      // 聊天实例永不注入；hf ref 走 -hf 自管缓存拿不到本地路径，不注入（Non-Goal）。
+      if (embedding) {
+        const dir = dirname(model.path);
+        try {
+          const candidates = readdirSync(dir).filter(isMmprojFile).sort();
+          // 多文件优先 f16：bf16 的名字里也含 "f16" 子串，直接 includes 会选错
+          const f16 = candidates.find((n) => /(?:^|[^a-z])f16/i.test(n));
+          const picked = f16 ?? candidates[0];
+          if (picked) args.push("--mmproj", join(dir, picked));
+        } catch {
+          // 目录读不到（模型文件被移走等）就不注入，行为与「无投影文件」一致
+        }
+      }
     } else if (model.ref) {
       args.push("-hf", model.ref);
     }
@@ -223,27 +254,50 @@ export class LlamaRuntime implements Runtime {
       port,
       "--ctx-size",
       ctxSize,
-      "--image-max-tokens",
-      imageMaxTokens,
+    );
+
+    // 嵌入模式裁剪的聊天参数：--temp/--top-p/--repeat-penalty/--repeat-last-n/--image-max-tokens。
+    if (!embedding) {
+      args.push(
+        "--image-max-tokens",
+        imageMaxTokens,
+      );
+    }
+
+    args.push(
       "--parallel",
       parallel,
       "--batch-size",
-      batchSize,
+      embedding ? embedBatch : batchSize,
       "--ubatch-size",
-      ubatchSize,
+      embedding ? embedBatch : ubatchSize,
       "--cache-type-k",
       cacheTypeK,
       "--cache-type-v",
       cacheTypeV,
-      "--repeat-penalty",
-      String(serverArgs.repeatPenalty),
-      "--repeat-last-n",
-      String(serverArgs.repeatLastN),
-      "--temp",
-      temp,
-      "--top-p",
-      topP,
     );
+
+    if (!embedding) {
+      args.push(
+        "--repeat-penalty",
+        String(serverArgs.repeatPenalty),
+        "--repeat-last-n",
+        String(serverArgs.repeatLastN),
+        "--temp",
+        temp,
+        "--top-p",
+        topP,
+      );
+    }
+
+    // 嵌入实例追加嵌入开关与池化方式（llama.cpp 默认禁用嵌入端点，这就是 501 的根因）。
+    if (embedding) {
+      args.push(
+        "--embeddings",
+        "--pooling",
+        pooling,
+      );
+    }
 
     if (gpuLayers && gpuLayers !== "-1") {
       args.push("--n-gpu-layers", gpuLayers);

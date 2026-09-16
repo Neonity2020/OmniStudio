@@ -181,6 +181,7 @@ import type {
 } from "../../shared/modelscope";
 import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
+import { updateModelCategory } from "../model-category";
 import { getServerStats, type ServerStats } from "../stats";
 import { getUsageStats } from "../usage";
 import type { UsageStats } from "../../shared/usage";
@@ -266,7 +267,14 @@ import type {
 import type { BackupStatus as SkillsBackupStatus } from "../skills/git-backup";
 import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/installer";
 import * as Knowledge from "../knowledge";
-import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
+import type {
+  KbCitation,
+  KbEventEntry,
+  KbHit,
+  KbIndexStats,
+  KbModality,
+} from "../../shared/knowledge";
+import { chunkMediaForRpc } from "./kb-media";
 import * as Backup from "../backup";
 import { isDialogPickedPath, rememberDialogPickedPaths } from "../dialog-paths";
 import { MAX_UPLOAD_BYTES, formatUploadLimit } from "../../shared/uploads";
@@ -1697,6 +1705,11 @@ export type AppRPC = {
         params: { path: string };
         response: { ok: boolean; error?: string };
       };
+      /** 更新已下载模型的类别（模型详情页下拉）：只对应用下载目录里的模型生效。 */
+      setModelCategory: {
+        params: { path: string; category: ModelCategory };
+        response: { ok: boolean; error?: string; model?: InstalledModel };
+      };
       deleteLocalModel: {
         params: { path: string };
         response: { ok: boolean; error?: string; freed?: number };
@@ -2590,6 +2603,10 @@ export type AppRPC = {
           rerankModel?: string;
           embeddingProviderId?: string;
           rerankProviderId?: string;
+          /** 模态能力声明：随建库快照（数据层缺省 false，不从全局继承）。 */
+          embedImage?: boolean;
+          embedAudio?: boolean;
+          embedVideo?: boolean;
         };
         response: { kb: Knowledge.KbView };
       };
@@ -2645,6 +2662,13 @@ export type AppRPC = {
         params: { base?: string; apiKey?: string; providerId?: string; model: string };
         response: { ok: boolean; dim?: number; error?: string };
       };
+      /** 探测全局默认嵌入配置当前是否可用（新建弹窗预填门控；未配置不发起嵌入请求）。 */
+      kbDefaultEmbeddingProbe: {
+        params: undefined;
+        response:
+          | { configured: false }
+          | { configured: true; reachable: boolean; model: string; dim?: number; error?: string };
+      };
       kbEmbeddingModels: {
         params: { base?: string; apiKey?: string; providerId?: string } | undefined;
         response: Knowledge.KbModelCandidates;
@@ -2656,6 +2680,17 @@ export type AppRPC = {
       kbRerankModels: {
         params: { base?: string; apiKey?: string; providerId?: string } | undefined;
         response: Knowledge.KbModelCandidates;
+      };
+      /** 分块媒体表示：图片=按 size 档位缩放的 dataUrl（thumb 512/full 2048）；音视频/文本/文件缺失 dataUrl=null（UI 图标兜底；打开原文件复用 openPath）。 */
+      kbChunkMedia: {
+        params: { chunkId: number; size?: "thumb" | "full" };
+        response: {
+          dataUrl: string | null;
+          modality: KbModality | null;
+          fileName: string;
+          mediaPath: string | null;
+          text: string | null;
+        };
       };
       /** 审计流水（谁在什么时候导入/删除/检索了什么）+ 各动作计数。 */
       kbEvents: {
@@ -4444,6 +4479,10 @@ const rpcRequests: NonNullable<
     return ModelStore.setActiveModel(path);
   },
 
+  setModelCategory: async ({ path, category }) => {
+    return updateModelCategory(path, category);
+  },
+
   scanModelDir: async ({ dir }) => {
     return ModelScan.previewModelDir(dir);
   },
@@ -5688,6 +5727,9 @@ const rpcRequests: NonNullable<
         rerankModel: params.rerankModel,
         embeddingProviderId: params.embeddingProviderId,
         rerankProviderId: params.rerankProviderId,
+        embedImage: params.embedImage,
+        embedAudio: params.embedAudio,
+        embedVideo: params.embedVideo,
       }),
     };
   },
@@ -5733,6 +5775,9 @@ const rpcRequests: NonNullable<
   kbTestEmbedding: async ({ base, apiKey, providerId, model }) => {
     return Knowledge.testEmbedding({ base, apiKey, providerId, model });
   },
+  kbDefaultEmbeddingProbe: async () => {
+    return Knowledge.probeDefaultEmbedding();
+  },
   kbEmbeddingModels: async (params) => {
     return Knowledge.suggestEmbeddingModels(params ?? undefined);
   },
@@ -5741,6 +5786,10 @@ const rpcRequests: NonNullable<
   },
   kbRerankModels: async (params) => {
     return Knowledge.suggestRerankModels(params ?? undefined);
+  },
+
+  kbChunkMedia: async ({ chunkId, size }) => {
+    return chunkMediaForRpc(chunkId, size);
   },
   kbEvents: async (params) => {
     const kbId = params?.kbId;

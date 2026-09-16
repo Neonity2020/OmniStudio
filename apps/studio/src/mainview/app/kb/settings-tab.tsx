@@ -32,7 +32,9 @@ import { Label } from "@ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { Switch } from "@ui/switch";
 import { useKbStore } from "@stores/kb";
+import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
+import { useServedModelsSync } from "@components/served-models-panel";
 import { cn } from "@/mainview/lib/utils";
 import type { KbView } from "@/bun/knowledge";
 import { providerModelsOfType, type CloudModelType } from "@/shared/cloud-providers";
@@ -55,6 +57,10 @@ type FormState = {
   minScore: string;
   expandNeighbors: boolean;
   mcpExposed: boolean;
+  /** 模态能力声明（KbView 三布尔原样进表单，保存时透传 kbUpdate patch）。 */
+  embedImage: boolean;
+  embedAudio: boolean;
+  embedVideo: boolean;
 };
 
 function formFromKb(kb: KbView): FormState {
@@ -75,6 +81,9 @@ function formFromKb(kb: KbView): FormState {
     minScore: String(kb.minScore),
     expandNeighbors: kb.expandNeighbors,
     mcpExposed: kb.mcpExposed,
+    embedImage: kb.embedImage,
+    embedAudio: kb.embedAudio,
+    embedVideo: kb.embedVideo,
   };
 }
 
@@ -285,6 +294,115 @@ function AdvancedService({
   );
 }
 
+/**
+ * 「启用向量检索」（②-4）：把「设置 → 默认模型 → 向量嵌入」的全局默认**快照**进这个 KB 行，
+ * 并真的按入重嵌 —— 写入行 + `kbEmbedMissing`，不是只清空旧向量。
+ *
+ * 只在空配置（纯关键词）的库上出现；判据全部取自 webview 已有数据，零新 RPC：
+ *   1. 设置里有全局默认模型 —— 否则没有可写入的 model；
+ *   2. 后端可解析 —— 有运行中的嵌入实例（served 快照），或全局服务地址非空。
+ * `resolveEmbeddingBase` 是 bun 侧且永远有返回值（兜底落到聊天活动端口），
+ * 所以「它非空」不能当判据，这里也不引入可达性探针。
+ */
+function EnableEmbeddingButton({ kb }: { kb: KbView }) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const [result, setResult] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useServedModelsSync();
+  const served = useServedStore((s) => s.models);
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const settings = data?.settings;
+  const globalModel = (settings?.EMBEDDING_MODEL ?? "").trim();
+  const globalBase = (settings?.EMBEDDING_BASE ?? "").trim();
+  // 空 base 陷阱防护（与卡片侧 embeddingDefaultsPatch 同一规则）：全局地址留空但嵌入
+  // 实例在跑时，快照进库行的 base 预填该实例地址 —— 否则实例一停，解析会落回聊天
+  // 活动端口（knowledge.ts 自注的「列得出调不通」）。取最后一个 running 实例，与
+  // 主进程 getActiveEmbeddingPort() 同源。
+  let runningEmbedPort: number | undefined;
+  for (const m of served) {
+    if (m.purpose === "embedding" && m.status === "running") runningEmbedPort = m.port;
+  }
+  const runningEmbed = runningEmbedPort !== undefined;
+  const effectiveBase =
+    globalBase || (runningEmbedPort !== undefined ? `http://127.0.0.1:${runningEmbedPort}/v1` : "");
+
+  const enableMutation = useMutation({
+    mutationFn: async () => {
+      // 先写行再重嵌：embedMissing 读的是库行里的配置（模型/地址/密钥三字段一起落库）。
+      await rpcClient.kbUpdate({
+        id: kb.id,
+        patch: {
+          embeddingModel: globalModel,
+          embeddingBase: effectiveBase,
+          embeddingApiKey: settings?.EMBEDDING_API_KEY ?? "",
+        },
+      });
+      return rpcClient.kbEmbedMissing({ kbId: kb.id });
+    },
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ["kb-list"] });
+      setResult(
+        res.ok
+          ? { ok: true, text: t("kb.settings.enableEmbeddingDone", { count: String(res.embedded ?? 0) }) }
+          : { ok: false, text: t("kb.settings.enableEmbeddingFailed", { error: res.error ?? "" }) },
+      );
+    },
+    onError: (e: unknown) =>
+      setResult({ ok: false, text: t("kb.settings.enableEmbeddingFailed", { error: String(e) }) }),
+  });
+
+  // 缺什么说什么：没有全局默认 → 指路默认模型面板；有默认但后端不可解析 → 指路启动模型 / 填地址。
+  const blocked = !globalModel
+    ? t("kb.settings.enableEmbeddingNoGlobal")
+    : !runningEmbed && !globalBase
+      ? t("kb.settings.enableEmbeddingNoBackend")
+      : null;
+
+  return (
+    <div className="flex flex-col gap-1.5 rounded-lg border border-foreground/10 bg-muted/40 px-2.5 py-2">
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 shrink-0 gap-1.5 text-xs"
+          disabled={blocked !== null || enableMutation.isPending}
+          onClick={() => {
+            setResult(null);
+            enableMutation.mutate();
+          }}
+        >
+          {enableMutation.isPending ? (
+            <Loader2Icon className="size-3.5 animate-spin" />
+          ) : (
+            <RefreshCwIcon className="size-3.5" />
+          )}
+          {enableMutation.isPending
+            ? t("kb.settings.enableEmbeddingBusy")
+            : t("kb.settings.enableEmbedding")}
+        </Button>
+        <span className="min-w-0 text-[10px] leading-4 text-muted-foreground">
+          {t("kb.settings.enableEmbeddingDesc")}
+        </span>
+      </div>
+      {blocked && <p className="text-[10px] leading-4 text-muted-foreground/80">{blocked}</p>}
+      {result && (
+        <p
+          className={cn(
+            "text-[10px] leading-4",
+            result.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive",
+          )}
+        >
+          {result.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function KbSettingsTab({ kb }: { kb: KbView }) {
   const t = useT();
   const queryClient = useQueryClient();
@@ -351,6 +469,9 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
           minScore: Number(form.minScore) || 0,
           expandNeighbors: form.expandNeighbors,
           mcpExposed: form.mcpExposed,
+          embedImage: form.embedImage,
+          embedAudio: form.embedAudio,
+          embedVideo: form.embedVideo,
         },
       }),
     onSuccess: (data) => {
@@ -435,7 +556,11 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
               }}
             />
           </FormRow>
-          <FormRow label={t("kb.settings.model")} htmlFor="kb-settings-embedding-model">
+          <FormRow
+            label={t("kb.settings.model")}
+            htmlFor="kb-settings-embedding-model"
+            hint={t("kb.settings.embeddingServeHint")}
+          >
             <div className="flex items-center gap-2">
               <KbModelSelect
                 id="kb-settings-embedding-model"
@@ -519,6 +644,53 @@ export function KbSettingsTab({ kb }: { kb: KbView }) {
               {t("kb.settings.keywordOnlyNote")}
             </p>
           )}
+          {/* 空配置的库最常见的诉求就是「用全局默认把它打开」：给一个按钮，一键写入 + 重嵌。
+              已有模型的库用上面的表单即可，不重复出这个入口。 */}
+          {!kb.embeddingModel && <EnableEmbeddingButton kb={kb} />}
+
+          {/* 模态能力声明：三布尔随库行快照，保存时透传 kbUpdate patch；变更不触发向量重置
+              （模型没换向量仍可比），但已入库媒体需重新导入才走新路径。 */}
+          <FormRow label={t("kb.settings.embedModalities")}>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={form.embedImage}
+                  onChange={(e) => setForm((prev) => ({ ...prev, embedImage: e.target.checked }))}
+                />
+                {t("kb.create.embedImage")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={form.embedAudio}
+                  onChange={(e) => setForm((prev) => ({ ...prev, embedAudio: e.target.checked }))}
+                />
+                {t("kb.create.embedAudio")}
+              </label>
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs">
+                <input
+                  type="checkbox"
+                  className="size-3.5 accent-primary"
+                  checked={form.embedVideo}
+                  onChange={(e) => setForm((prev) => ({ ...prev, embedVideo: e.target.checked }))}
+                />
+                {t("kb.create.embedVideo")}
+              </label>
+            </div>
+            <p className="text-[10px] leading-4 text-muted-foreground/80">
+              {t("kb.settings.embedModalitiesHint")}
+            </p>
+            <p className="flex items-start gap-1.5 rounded-lg border border-foreground/10 bg-muted/40 px-2.5 py-1.5 text-[10px] leading-4 text-muted-foreground">
+              <TriangleAlertIcon className="mt-0.5 size-3 shrink-0" />
+              {t("kb.settings.embedModalitiesChangeNote")}
+            </p>
+            <p className="text-[10px] leading-4 text-muted-foreground/80">
+              {t("kb.create.embedLocalOnlyHint")}
+            </p>
+          </FormRow>
         </Section>
 
         <Section icon={<ArrowDownWideNarrowIcon className="size-3.5 text-muted-foreground" />} title={t("kb.settings.rerank")}>

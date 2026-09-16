@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { InferenceEngine } from "../../shared/modelscope";
-import { ENGINE_IDS, ENGINE_SPECS } from "../../shared/engines";
+import { ENGINE_IDS, ENGINE_SPECS, EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
@@ -262,7 +262,17 @@ export type SettingsKey =
   | "OCR_PROVIDER_ID"
   | "CLOUD_APP_PROVIDERS_MIGRATED"
   // 已启动模型注册表：当前活动实例 id（本地模式请求的目标），见 bun/model-servers.ts
-  | "SERVED_ACTIVE_ID";
+  | "SERVED_ACTIVE_ID"
+  // 嵌入服务（llama.cpp `--embeddings`）的端口段基址与池化方式；嵌入实例不占聊天端口段，
+  // 也不参与聊天活动状态（见 shared/engines.ts 的 EMBEDDING_PORT_BASE）。
+  | "EMBEDDING_PORT"
+  | "EMBEDDING_POOLING"
+  // 全局默认嵌入配置（设置 → 默认模型 → 向量嵌入）。**只在写入时快照**：
+  // 新建 KB 预填进 KB 行、KB 设置页「启用向量检索」按入重嵌，共享记忆在解析时兜底。
+  // 唯一读取点见 bun/embeddings.ts 的 globalEmbeddingDefaults()。
+  | "EMBEDDING_MODEL"
+  | "EMBEDDING_BASE"
+  | "EMBEDDING_API_KEY";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -522,6 +532,15 @@ const DEFAULTS: Record<SettingsKey, string> = {
   OCR_PROVIDER_ID: "",
   CLOUD_APP_PROVIDERS_MIGRATED: "",
   SERVED_ACTIVE_ID: "",
+  // 嵌入服务：端口段基址（实例从它起 +100 顺延，与聊天段语义一致）+ 池化方式
+  // （set 时校验枚举 last|mean|none|cls，非法值直接拒，见 updateSettings）。
+  EMBEDDING_PORT: String(EMBEDDING_PORT_BASE),
+  EMBEDDING_POOLING: "last",
+  // 全局默认嵌入配置：留空 = 不设默认（新建 KB 仍为空配置的纯关键词库，
+  // 记忆也保持关键词检索）。地址与密钥可选；地址留空时解析按既有四层链走。
+  EMBEDDING_MODEL: "",
+  EMBEDDING_BASE: "",
+  EMBEDDING_API_KEY: "",
 };
 
 /**
@@ -594,8 +613,21 @@ export function getAllSettings(): Record<string, string> {
   return result;
 }
 
+/**
+ * llama.cpp `--pooling` 的合法取值。设置非法值直接拒（不写库、不进缓存），
+ * 别把坏参数塞给 llama-server —— 读侧回落 DEFAULTS 的 "last"。
+ */
+export const EMBEDDING_POOLING_VALUES = ["last", "mean", "none", "cls"] as const;
+
 export function updateSettings(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
+// EMBEDDING_POOLING 只认枚举值：非法值直接跳过（静默拒掉，读侧回落默认 last）。
+    if (
+      key === "EMBEDDING_POOLING" &&
+      !(EMBEDDING_POOLING_VALUES as readonly string[]).includes(value)
+    ) {
+      continue;
+    }
     const encrypted = maybeEncrypt(key as SettingsKey, value);
     db.insert(settingsTable)
       .values({ key, value: encrypted })

@@ -6,7 +6,6 @@ import { memo, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
-  BookOpenIcon,
   BrainIcon,
   CheckIcon,
   ChevronDownIcon,
@@ -21,7 +20,6 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import type { ChatMessage } from "../../../bun/chat";
-import type { KbCitation } from "../../../shared/knowledge";
 import { useChatStore } from "@stores/chat";
 import { useT, useUILang } from "@stores/ui-lang";
 import { Markdown } from "@components/markdown";
@@ -40,6 +38,7 @@ import { noteDraftFromMessage } from "@/mainview/lib/note-draft";
 import { persistedErrorMessage, serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 import { chatImageUrl } from "../../../shared/server-info";
+import { CitationBar } from "./citation-bar";
 
 function MessageImages({ images }: { images: string[] }) {
   if (images.length === 0) return null;
@@ -389,31 +388,6 @@ function GeneratingRow() {
           {t("chat.generating.elapsed", { duration: formatDuration(t, elapsedMs) })}
         </span>
       ) : null}
-    </div>
-  );
-}
-
-/** 助手消息底部的知识库引用溯源：编号 + 来源文档，悬浮显示片段预览。 */
-function CitationBar({ citations }: { citations: KbCitation[] }) {
-  const t = useT();
-  if (citations.length === 0) return null;
-  return (
-    <div className="flex flex-wrap items-center gap-1 pt-0.5">
-      <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
-        <BookOpenIcon className="size-3" />
-        {t("chat.citations")}
-      </span>
-      {citations.map((c) => (
-        <span
-          key={`${c.docId}-${c.seq}-${c.n}`}
-          title={c.snippet}
-          className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-        >
-          <span className="font-mono text-primary/80">[{c.n}]</span>
-          <span className="truncate">{c.docName}</span>
-          <span className="shrink-0 font-mono text-muted-foreground/60">#{c.seq}</span>
-        </span>
-      ))}
     </div>
   );
 }

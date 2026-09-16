@@ -21,7 +21,14 @@ import { cn } from "@/mainview/lib/utils";
  * 只列出当前引擎能加载的模型，避免在 MLX 下选到 GGUF 等不兼容文件。 */
 export function LaunchBar({ installedModels, engine }: { installedModels: InstalledModel[]; engine: InferenceEngine }) {
   // 目录条目（HF 缓存里的整仓库）按它自己的格式判断兼容性，文件名没有扩展名。
-  const compatibleModels = installedModels.filter((m) => engineSupports(engine, m.kind));
+  // 启动条是聊天模型的启动器：嵌入 / 重排模型不能设为当前聊天模型（后端直接拒），
+  // 别把它们列进下拉框 —— 选了也设不上，还挤占聊天模型的列表。
+  const compatibleModels = installedModels.filter(
+    (m) =>
+      engineSupports(engine, m.kind) &&
+      m.category !== "embedding" &&
+      m.category !== "rerank",
+  );
   const t = useT();
   const queryClient = useQueryClient();
   const setRoute = useRouter((s) => s.setRoute);
