@@ -297,6 +297,83 @@ test("点「通用」进得去代理卡：模式、本地网络开关、采样�
   await cleanup();
 });
 
+/**
+ * 设置 → 外观 → 左侧一级菜单：15 条都在，顺序与显隐都能落进 `APP_RAIL_LAYOUT`。
+ *
+ * 拖动靠指针几何判定，而 happy-dom 里布局尺寸全是 0 —— 测不了拖动本身，所以排序这条
+ * 链路走手柄上的 ↑ / ↓：它和拖动共用同一个 `moveRailEntry` + `persist`，证明了
+ * 「排序 → 写库」这段是通的；指针那一层只有"落在哪一行的上半"这一个几何判断没被覆盖。
+ */
+test("外观里的左侧一级菜单：条目齐全，方向键排序与显示开关都写回 APP_RAIL_LAYOUT", async () => {
+  const { defaultRailLayout, moveRailEntry, serializeRailLayout, toggleRailEntry, APP_RAIL_IDS } =
+    await import("../../../shared/app-rail");
+  const { cleanup } = await renderSettings();
+  const nav = document.querySelector("nav[aria-label]");
+  const appearance = [...nav!.querySelectorAll("button")].find(
+    (b) => b.textContent?.trim() === "外观",
+  );
+  expect(appearance).not.toBeUndefined();
+  await act(async () => {
+    (appearance as unknown as HTMLElement).click();
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const rows = () => [...document.querySelectorAll('[data-slot="rail-menu-row"]')];
+  const order = () => rows().map((row) => row.getAttribute("data-app"));
+  expect(order()).toEqual([...APP_RAIL_IDS]);
+  expect(document.querySelectorAll('[data-slot="rail-menu-handle"]')).toHaveLength(
+    APP_RAIL_IDS.length,
+  );
+  expect(document.querySelectorAll('[data-slot="switch"]')).toHaveLength(APP_RAIL_IDS.length);
+
+  // 还没改过 = 默认布局，此时「恢复默认」没有意义，是禁用状态
+  const reset = [...document.querySelectorAll("button")].find((b) =>
+    b.textContent?.includes(zh("settings.appearance.menu.reset")),
+  );
+  expect(reset).not.toBeUndefined();
+  expect(reset!.hasAttribute("disabled")).toBe(true);
+
+  // 方向键排序：第一条往下挪一位（拖动走的是同一条 persist）
+  settingsPatches.length = 0;
+  const firstHandle = document.querySelector('[data-slot="rail-menu-handle"]');
+  expect(firstHandle).not.toBeNull();
+  await act(async () => {
+    firstHandle!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const moved = moveRailEntry(defaultRailLayout(), 0, 1);
+  expect(settingsPatches).toEqual([
+    { APP_RAIL_LAYOUT: serializeRailLayout(moved) },
+  ]);
+  expect(order()).toEqual(moved.map((entry) => entry.id));
+
+  // 显示开关：关掉第二条 → 落盘的是"当前顺序 + 这一条 hidden"
+  settingsPatches.length = 0;
+  const second = document.querySelectorAll('[data-slot="switch"]')[1];
+  await act(async () => {
+    (second as unknown as HTMLElement).click();
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(settingsPatches).toEqual([
+    {
+      APP_RAIL_LAYOUT: serializeRailLayout(toggleRailEntry(moved, moved[1]!.id, true)),
+    },
+  ]);
+  expect(rows()[1]!.getAttribute("data-hidden")).toBe("true");
+  // 这一行的开关真的关上了（关 = 从左侧菜单里藏掉）
+  expect(rows()[1]!.querySelector('[data-slot="switch"]')!.getAttribute("aria-checked")).toBe(
+    "false",
+  );
+
+  await cleanup();
+});
+
 test("自启动开关落在概览页：默认开启，关掉后写入 AUTO_START_SERVER=0", async () => {
   const { text, cleanup } = await renderSettings();
   expect(text).toContain(zh("settings.autoStart"));

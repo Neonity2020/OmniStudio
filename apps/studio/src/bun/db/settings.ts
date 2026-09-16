@@ -61,6 +61,9 @@ export type SettingsKey =
   | "CHAT_MODEL"
   | "UI_LANG"
   | "UI_THEME"
+  // 左侧一级菜单的顺序与显示 / 隐藏（设置 → 外观）：JSON 数组，解析与容错规则见
+  // shared/app-rail.ts。空串 = 默认布局（默认顺序 + 全部可见）。
+  | "APP_RAIL_LAYOUT"
   // 网络代理（设置 → 通用）：system = 跟随系统 / 环境变量，custom = 手填地址，
   // none = 强制直连。生效范围见 bun/proxy.ts —— 云端模型、模型/引擎下载、联网检索都走它，
   // 回环与（默认的）局域网地址直连。
@@ -339,6 +342,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   UI_LANG: "zh",
   /** 界面主题：system / light / dark，前端据此切换 <html> 的 .dark 类。 */
   UI_THEME: "system",
+  /** 左侧一级菜单布局：空串 = 默认顺序 + 全部可见。 */
+  APP_RAIL_LAYOUT: "",
   // 默认跟随系统：用户 shell 里的 HTTP(S)_PROXY 与 macOS / Windows 的系统代理本来就在生效，
   // 默认值保持这个行为；没有配代理时解析结果为空 = 直连，与以前完全一致。
   PROXY_MODE: "system",

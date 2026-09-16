@@ -31,7 +31,7 @@
 
 ```
 ┌─ Webview（React）──────────────────────────────────────────┐
-│  app-rail（12 个应用）→ app-sidebar → 各 Screen             │
+│  app-rail（一级菜单，默认 15 条，顺序 / 显隐可配）→ sidebar → Screen │
 │  Zustand（25 个 store）+ TanStack Query + 全局 rpcClient    │
 └───────────── RPC（Electroview defineRPC，双向）────────────┘
 ┌─ Bun 主进程 ───────────────────────────────────────────────┐
@@ -421,9 +421,10 @@ SERVER_MODE=remote 的 VLLM_API_BASE > 聊天活动端口** 依次解析（embed
 
 **导航是显式的双层状态，没有 URL 路由**：
 
-- `stores/app.ts` 管 `activeApp`（14 个应用：chat / agent / voicecall / voice / image / video / music / ocr / translate / prompt / skills / kb / memory / automations）
+- `stores/app.ts` 管 `activeApp`。应用 id（一级菜单的每一条）与**菜单的顺序 / 显隐**一起定义在 `shared/app-rail.ts`（`APP_RAIL_IDS` 默认 15 条：chat / agent / voicecall / voice / image / video / music / ocr / translate / prompt / skills / kb / memory / benchmark / apps），`AppId` 由那里再导出 —— 菜单本体与「设置 → 外观 → 左侧一级菜单」那张配置卡共用同一份清单，不会出现"配得到、看不到"
 - `stores/router.ts` 管 8 种路由（index / settings / server / stats / models / model-detail / chat / document）
 - `AppRail`（左侧 48px 图标栏）切应用并把路由重置为 index；`AppSidebar` 按 `activeApp` 渲染不同的列表；`main-layout/index.tsx` 的 Outlet 里，settings / models / model-detail / document 这类覆盖整个内容区，其余兜底 `renderActiveApp(activeApp)`
+- **一级菜单的顺序与显隐是用户设置**（`APP_RAIL_LAYOUT`，一条 JSON：`[{"id":"music"},{"id":"chat","hidden":true}]`）：数组顺序即展示顺序，隐藏的条目仍留在数组里（下次放出来回到原位），空串 = 默认布局。桌面上拖动排序、开关显隐（`main-layout/app-rail-config.tsx`），底部设置入口固定、不参与排序。解析容错三条写在 `shared/app-rail.ts`：认不出的 id 丢掉、重复只认第一次、存储里没有的 id 按默认顺序补在末尾且可见（升级新增的应用不该因为一份老配置而"装上了找不到"）
 
 **状态管理是双轨制**：
 

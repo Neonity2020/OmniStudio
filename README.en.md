@@ -163,7 +163,7 @@ Every app shares one workstation layout: a global icon rail on the far left, a c
 - **Benchmarks** — Context-length (1K–1M) × concurrency × cache-scenario (cold / partial / full hit) sweeps reporting TTFT, TPOT, TPS, aggregate throughput and prefill per rung, plus a **cache hit comparison** that turns the cold-versus-hit gap into a multiplier (llama.cpp additionally reports how much of the prompt the server reused, so a ×1 result points straight at a server that never hit its cache). Runs against local or remote servers, stores every result, exports to HTML, and `omi benchmark --contexts 32k --cache cold,warm` drives the same matrix from the CLI.
 - **Server logs** — Live tail with ANSI colors, auto-scroll, truncation guard, copy / clear.
 - **CLI integrations** — One-click launch commands for Claude Code (local / cloud, Opus–Sonnet–Haiku mapping), Codex, OpenCode, OpenClaw, Hermes, Pi, and Copilot CLI, each bound to a default model and wired into shared memory.
-- **Updates & i18n** — Stable / beta channels with in-app updates, automatic or manual update checks (the About page reports the latest release and links to the download), light / dark / follow-system themes, a setup wizard, zh / en UI language, SQLite-backed session stores.
+- **Updates & i18n** — Stable / beta channels with in-app updates, automatic or manual update checks (the About page reports the latest release and links to the download), light / dark / follow-system themes, **a customizable left primary menu** (Settings → Appearance: drag to reorder, show or hide each entry — the order there is the order of the menu), a setup wizard, zh / en UI language, SQLite-backed session stores.
 
 ## 🚀 Getting Started
 
