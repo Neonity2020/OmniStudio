@@ -190,7 +190,7 @@ apps/
 
 **整仓库下载规则**：safetensors / MLX 这类模型，"下载全部"会额外带上 `config.json` / tokenizer 等加载必需文件（`SUPPORT_FILE_RE`）—— 只下权重分片是跑不起来的；GGUF 是单文件模型，只需要那一个量化文件。
 
-**出站请求统一过代理层**（设置 → 偏好 → 通用，`bun/proxy.ts`）：启动时给 `globalThis.fetch` 挂一层包装，按目标主机决定要不要带 Bun 的 `proxy` 参数，于是云端模型调用、市场搜索、权重与引擎下载、联网检索、远端备份全部自动生效，不必在每个调用点重复接线。判定规则（回环恒直连、局域网看 `PROXY_ALLOW_LOCAL_NETWORK`、其余走代理）与设置页的「谁走代理」展示共用 `shared/proxy.ts` 同一份实现。子进程（pip / python worker / git lfs / brew / 各引擎拉权重）只认环境变量，由 `syncProxyEnv()` 与下载 spawn 点的 `proxyChildEnv()` 负责；WebSocket（Edge TTS / 实时通话）走 `proxyWebSocketOptions()`。
+**出站请求统一过代理层**（设置 → 通用，`bun/proxy.ts`）：启动时给 `globalThis.fetch` 挂一层包装，按目标主机决定要不要带 Bun 的 `proxy` 参数，于是云端模型调用、市场搜索、权重与引擎下载、联网检索、远端备份全部自动生效，不必在每个调用点重复接线。判定规则（回环恒直连、局域网看 `PROXY_ALLOW_LOCAL_NETWORK`、其余走代理）与设置页的「谁走代理」展示共用 `shared/proxy.ts` 同一份实现。子进程（pip / python worker / git lfs / brew / 各引擎拉权重）只认环境变量，由 `syncProxyEnv()` 与下载 spawn 点的 `proxyChildEnv()` 负责；WebSocket（Edge TTS / 实时通话）走 `proxyWebSocketOptions()`。
 
 ### 4.4 智能层
 

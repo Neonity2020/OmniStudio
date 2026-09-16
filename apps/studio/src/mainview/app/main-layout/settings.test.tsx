@@ -5,7 +5,7 @@ import { Window } from "happy-dom";
  * 设置导航的回归测试。
  *
  * 两件事：
- *   1. 「偏好 → 通用」这一页在加进代理设置时**整页被删过一次**，页里的设置没跟着丢
+ *   1. 「通用」这一页在加进代理设置时**整页被删过一次**，页里的设置没跟着丢
  *      （更新通道 / 自动检查更新在「关于」页，启动时自动拉起推理服务搬到了服务器概览页）。
  *      现在它回来了 —— 承载代理设置 —— 这里锁住导航条目与点进去能渲染出代理卡；
  *   2. 概览页上那条自启动开关仍能改到设置。
@@ -162,6 +162,8 @@ test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云�
   const labels = [...nav!.querySelectorAll("button")].map((b) => b.textContent?.trim());
   expect(labels).toEqual([
     "概览",
+    "通用",
+    "外观",
     "模型库",
     "运行模型",
     "云端模型",
@@ -175,15 +177,41 @@ test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云�
     "Agent 权限",
     "Agent 能力",
     "命令行",
-    "通用",
-    "外观",
-    "关于我们",
     "使用统计",
     "控制台",
     "备份与恢复",
+    "关于我们",
   ]);
   // 删掉的页面没有留下把 i18n key 原样渲染出来的残留。
   expect(text).not.toContain("settings.prefs.");
+  await cleanup();
+});
+
+/**
+ * 分组结构：首组（概览 / 通用 / 外观）不带标题，「关于我们」单独落在最底部的「系统」组。
+ * 原来的「偏好」组解散 —— 通用 / 外观 上移跟着概览，关于我们下沉成只查不改的一条，
+ * 别再把它们塞回一个组里。
+ */
+test("分组：首组无标题且是 概览 / 通用 / 外观，最底部的「系统」只有关于我们", async () => {
+  const { cleanup } = await renderSettings();
+  const nav = document.querySelector("nav[aria-label]");
+  // 组的第一个元素子节点是标题 span（没有标题的组开头就是按钮）。
+  const groups = Array.from(nav!.children).map((el) =>
+    el.firstElementChild?.tagName === "SPAN" ? el.firstElementChild.textContent?.trim() : null,
+  );
+  expect(groups).toEqual([null, "模型", "服务", "工具", "数据", "系统"]);
+
+  const top = nav!.children[0]!;
+  expect([...top.querySelectorAll("button")].map((b) => b.textContent?.trim())).toEqual([
+    "概览",
+    "通用",
+    "外观",
+  ]);
+  const last = nav!.children[nav!.children.length - 1]!;
+  expect([...last.querySelectorAll("button")].map((b) => b.textContent?.trim())).toEqual(["关于我们"]);
+  // 老的分组标题（i18n 键也一并删了）不会以任何形式留在菜单里。
+  expect(nav!.textContent).not.toContain("偏好");
+  expect(nav!.textContent).not.toContain("settings.group.prefs");
   await cleanup();
 });
 

@@ -34,7 +34,7 @@ import { installProxy } from "./proxy";
 // `<数据目录>/logs/app.log`（排查入口见 `omi logs` / `omi diag`）。
 mirrorConsole("app");
 
-// 代理（设置 → 偏好 → 通用）要在任何网络请求之前接上：这一行之后，云端模型、
+// 代理（设置 → 通用）要在任何网络请求之前接上：这一行之后，云端模型、
 // 模型/引擎下载、联网检索与子进程都会按设置走代理，回环与局域网直连。
 installProxy();
 

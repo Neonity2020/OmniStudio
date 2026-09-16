@@ -104,9 +104,16 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   about: { icon: <GithubIcon className="size-4" />, labelKey: "settings.aboutTab.title" },
 };
 
-/** 设置导航分组（参照主流客户端的设置页：分组标题 + 条目）。概览置顶且无分组标题。 */
+/**
+ * 设置导航分组（参照主流客户端的设置页：分组标题 + 条目）。
+ *
+ * 首组无标题：概览（这个应用现在在跑什么）+ 通用 / 外观（这个应用长什么样、走不走代理）
+ * 同属"打开就能看、顺手就能改"的一层，再套一个标题只是噪声。
+ * 末尾的「系统」只有关于我们一条：版本 / 更新 / 开源信息是查的，不是调的，
+ * 混在可改的设置里反而找不到。
+ */
 const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
-  { tabs: ["stats"] },
+  { tabs: ["stats", "general", "appearance"] },
   {
     labelKey: "settings.group.models",
     // 模型这一组五条，各管一段：有哪些模型（模型库）/ 怎么跑（运行模型）/
@@ -118,8 +125,8 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
     tabs: ["gateway", "tunnel", "integrations"],
   },
   { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "agentcaps", "cli"] },
-  { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
   { labelKey: "settings.group.data", tabs: ["usage", "logs", "backup"] },
+  { labelKey: "settings.group.system", tabs: ["about"] },
 ];
 
 /**

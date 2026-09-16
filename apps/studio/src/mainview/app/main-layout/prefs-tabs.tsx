@@ -20,7 +20,7 @@ export function applyTheme(theme: string) {
   document.documentElement.classList.toggle("dark", dark);
 }
 
-/** 设置 → 偏好 → 外观：主题与界面语言。 */
+/** 设置 → 外观：主题与界面语言。 */
 export function AppearanceTab({
   form,
   updateField,

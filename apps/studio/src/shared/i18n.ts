@@ -677,7 +677,7 @@ const zh: Record<string, string> = {
 
 
   "settings.group.tools": "工具",
-  "settings.group.prefs": "偏好",
+  "settings.group.system": "系统",
   "settings.general.title": "通用",
   "settings.general.desc": "网络与本地服务的通用设置。",
   "settings.proxy.title": "代理模式",
@@ -3964,7 +3964,7 @@ const en: Record<string, string> = {
 
 
   "settings.group.tools": "Tools",
-  "settings.group.prefs": "Preferences",
+  "settings.group.system": "System",
   "settings.general.title": "General",
   "settings.general.desc": "Networking and local-service options.",
   "settings.proxy.title": "Proxy",

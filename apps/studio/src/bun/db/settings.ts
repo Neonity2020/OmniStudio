@@ -61,7 +61,7 @@ export type SettingsKey =
   | "CHAT_MODEL"
   | "UI_LANG"
   | "UI_THEME"
-  // 网络代理（设置 → 偏好 → 通用）：system = 跟随系统 / 环境变量，custom = 手填地址，
+  // 网络代理（设置 → 通用）：system = 跟随系统 / 环境变量，custom = 手填地址，
   // none = 强制直连。生效范围见 bun/proxy.ts —— 云端模型、模型/引擎下载、联网检索都走它，
   // 回环与（默认的）局域网地址直连。
   | "PROXY_MODE"

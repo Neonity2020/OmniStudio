@@ -460,7 +460,7 @@ export type AppRPC = {
         params: { settings: Record<string, string> };
         response: { ok: boolean };
       };
-      /** 代理（设置 → 偏好 → 通用）：当前生效的地址与「谁走代理、谁直连」的采样。 */
+      /** 代理（设置 → 通用）：当前生效的地址与「谁走代理、谁直连」的采样。 */
       getProxyStatus: {
         params: undefined;
         response: ProxyStatus;
