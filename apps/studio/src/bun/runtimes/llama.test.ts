@@ -109,6 +109,18 @@ describe("buildCommandLine / chat", () => {
     );
   });
 
+  test("加载模式：设置值不会以原始形态进 argv（白名单之外一律不发，防参数注入）", () => {
+    setChatSettings();
+    // 这个值最终进 argv，所以合法取值是白名单；手改设置行塞进来的坏值必须被丢掉。
+    SETTINGS.SERVER_LOAD_MODE = "--evil-flag";
+    const cmd = new LlamaRuntime().buildCommandLine(chatModel);
+    expect(cmd).not.toContain("--evil-flag");
+    // 合法值在「还没探测过这台 llama-server」时也不发 —— 宁可按默认启动，不赌开关存在
+    // （探测结果按二进制路径缓存，一旦启动过就会带上；映射规则见 llama-load-mode.test.ts）。
+    SETTINGS.SERVER_LOAD_MODE = "mlock";
+    expect(new LlamaRuntime().buildCommandLine(chatModel)).not.toContain("--evil-flag");
+  });
+
   test("采样参数「设置优先、模型档案兜底」：设置页显示的就是发出去的那份（ENG-04）", () => {
     setChatSettings();
     // 档案默认值（模型自带的那套）

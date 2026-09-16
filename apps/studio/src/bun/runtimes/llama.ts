@@ -3,12 +3,19 @@ import { existsSync, readdirSync } from "fs";
 import { dirname, join } from "path";
 import { EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
+import { logEvent } from "../app-log";
 import { getSetting } from "../db/settings";
 import { llamaCppBinaryPath } from "../engine-paths";
 import { isMmprojFile, modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
+import {
+  loadModeArgs,
+  loadModeUnsupported,
+  parseLoadModeSupport,
+  type LoadModeSupport,
+} from "./llama-load-mode";
 import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
 import type {
   BinaryCheckResult,
@@ -26,6 +33,55 @@ const COMMON_BINARY_PATHS = [
   "/opt/homebrew/bin/llama-server",
   "/usr/local/bin/llama-server",
 ];
+
+/**
+ * `llama-server --help` 里是 `--load-mode`（新版）还是只有 `--mlock` / `--no-mmap`（旧版）。
+ *
+ * 按二进制路径缓存：应用托管的那份与 `brew install` 那份版本可能不同，各自探各自的，
+ * 同一份二进制则不必每次启动都跑一遍 --help。探测失败记 `unknown`，参数按默认发
+ * （宁可按默认启动，也不赌一个可能不存在的开关）。
+ */
+const loadModeSupportCache = new Map<string, LoadModeSupport>();
+
+export async function probeLoadModeSupport(binaryPath: string): Promise<LoadModeSupport> {
+  const cached = loadModeSupportCache.get(binaryPath);
+  if (cached) return cached;
+  let support: LoadModeSupport = "unknown";
+  try {
+    const proc = Bun.spawn({ cmd: [binaryPath, "--help"], stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => {
+      try {
+        proc.kill();
+      } catch {
+        // 已经退出了
+      }
+    }, 2_000);
+    try {
+      const [out, err] = await Promise.all([
+        new Response(proc.stdout).text().catch(() => ""),
+        new Response(proc.stderr).text().catch(() => ""),
+      ]);
+      support = parseLoadModeSupport(`${out}\n${err}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    support = "unknown";
+  }
+  if (support !== "unknown") loadModeSupportCache.set(binaryPath, support);
+  return support;
+}
+
+/**
+ * 同步读已探测到的结果（null = 还没探过）。
+ *
+ * 给 `buildCommandLine` 用：那个函数是同步的（界面要「可复制的命令」立刻出字），而探测
+ * 要跑一次 `--help`。只要本次会话里启动过一次（探测结果按路径缓存），界面复制的命令就
+ * 与实际发出去的一致；没启动过则按默认（不发参数）显示 —— 不为了好看去赌版本。
+ */
+export function cachedLoadModeSupport(binaryPath: string): LoadModeSupport | null {
+  return loadModeSupportCache.get(binaryPath) ?? null;
+}
 
 function getSearchPath(): string {
   const home = process.env.HOME ?? "";
@@ -112,6 +168,12 @@ export class LlamaRuntime implements Runtime {
   getLastError(): string {
     return this.lastError;
   }
+
+  /**
+   * `--load-mode` 的支持形态（null = 还没探测过）。探测在 start() 里、buildArgs 之前做，
+   * 结果按二进制路径缓存在进程级（同一份 llama-server 不必每次启动都跑 --help）。
+   */
+  private loadModeSupport: LoadModeSupport | null = null;
 
   clearLogs() {
     this.serverLogs = "";
@@ -310,6 +372,18 @@ export class LlamaRuntime implements Runtime {
       args.push("--n-gpu-layers", gpuLayers);
     }
 
+    // 加载模式（PERF-02）：权重 mmap / 锁内存的取舍 —— 系统内存紧张时是「换出去一点」
+    // 还是「整机卡住」，由它决定。按 --help 探测结果决定发新版 --load-mode 还是旧版
+    // 的 --mlock / --no-mmap（见 llama-load-mode.ts 的等价表）；界面复制的命令读同一份
+    // 缓存，所以只要启动过一次，显示与实际发出去的就是同一串。
+    const loadModeSupport =
+      this.loadModeSupport ??
+      cachedLoadModeSupport(
+        [llamaCppBinaryPath(), ...COMMON_BINARY_PATHS].find((p) => existsSync(p)) ?? "llama-server",
+      ) ??
+      "unknown";
+    args.push(...loadModeArgs(getSetting("SERVER_LOAD_MODE"), loadModeSupport));
+
     if (serverArgs.noMmprojOffload) {
       args.push("--no-mmproj-offload");
     }
@@ -336,6 +410,22 @@ export class LlamaRuntime implements Runtime {
     if (!binary.found) {
       return { ok: false, error: "llama-server not found on PATH" };
     }
+    const llamaPath = binary.path!;
+
+    // 加载模式要先探测（新版 --load-mode / 旧版 --mlock），再拼参数。
+    this.loadModeSupport = await probeLoadModeSupport(llamaPath);
+    const loadMode = getSetting("SERVER_LOAD_MODE");
+    if (loadModeUnsupported(loadMode, this.loadModeSupport)) {
+      const message = `加载模式 ${loadMode} 在这台 llama-server（${this.loadModeSupport}）上不支持，本次按默认加载模式启动`;
+      this.appendLog(`\n[omni] ${message}\n`);
+      logEvent({
+        level: "warn",
+        source: "server",
+        event: "engine.load_mode.unsupported",
+        message,
+        detail: { mode: loadMode, support: this.loadModeSupport, binary: llamaPath },
+      });
+    }
 
     const args = this.buildArgs(model, serverArgs);
     this.lastError = "";
@@ -343,7 +433,6 @@ export class LlamaRuntime implements Runtime {
     this.appendLog(`$ llama-server ${args.join(" ")}\n`);
 
     try {
-      const llamaPath = binary.path!;
       const usePty = process.platform === "darwin";
       const cmd = usePty
         ? ["script", "-q", "/dev/null", llamaPath, ...args]

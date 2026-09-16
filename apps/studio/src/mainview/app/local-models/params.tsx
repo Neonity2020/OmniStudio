@@ -13,7 +13,20 @@ import { cn } from "@/mainview/lib/utils";
 // ---------------------------------------------------------------------------
 
 export type ParamNumberField = { key: string; labelKey: string; step?: string };
-type ParamSelectField = { key: string; labelKey: string; options: { value: string; label: string }[] };
+type ParamSelectOption = {
+  value: string;
+  /** 语言无关的技术值（`q8_0` / `mmap+mlock`），也是落库的值。 */
+  label: string;
+  /** 需要解释的选项给词条；纯技术值（q8_0）用它反而啰嗦，留 label 就够。 */
+  labelKey?: string;
+};
+type ParamSelectField = {
+  key: string;
+  labelKey: string;
+  /** 选项下面那行说明（有风险的参数写在这里，别让用户凭名字猜）。 */
+  hintKey?: string;
+  options: ParamSelectOption[];
+};
 type ParamField = (ParamNumberField & { options?: undefined }) | (ParamSelectField & { step?: undefined });
 
 export const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
@@ -36,6 +49,23 @@ export const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
         { value: "q4_0", label: "q4_0" },
       ],
     },
+    {
+      key: "SERVER_LOAD_MODE",
+      labelKey: "models.params.loadMode",
+      hintKey: "models.params.loadModeHint",
+      options: [
+        { value: "auto", label: "auto", labelKey: "models.params.loadMode.auto" },
+        { value: "mmap", label: "mmap", labelKey: "models.params.loadMode.mmap" },
+        { value: "mlock", label: "mlock", labelKey: "models.params.loadMode.mlock" },
+        {
+          value: "mmap+mlock",
+          label: "mmap+mlock",
+          labelKey: "models.params.loadMode.mmapMlock",
+        },
+        { value: "none", label: "none", labelKey: "models.params.loadMode.none" },
+        { value: "dio", label: "dio", labelKey: "models.params.loadMode.dio" },
+      ],
+    },
   ],
   vllm: [
     { key: "VLLM_MAX_MODEL_LEN", labelKey: "models.params.maxModelLen" },
@@ -56,6 +86,9 @@ export const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SGLANG_CONTEXT_LENGTH", labelKey: "models.params.ctx" },
     { key: "SGLANG_TP_SIZE", labelKey: "models.params.tp" },
     { key: "SGLANG_MEM_FRACTION_STATIC", labelKey: "models.params.memFraction", step: "0.02" },
+    // 分块预填充（PERF-05）：设置键一直存在，但此前只能手改数据库 —— 长 prompt 场景
+    // 要压住预填充的显存峰值就得改它。
+    { key: "SGLANG_CHUNKED_PREFILL_SIZE", labelKey: "models.params.chunkedPrefill" },
   ],
   mlx: [{ key: "MLX_CACHE_SIZE_GB", labelKey: "models.params.mlxCacheGb", step: "1" }],
 };
@@ -164,11 +197,16 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
                     <SelectContent>
                       {f.options.map((o) => (
                         <SelectItem key={o.value} value={o.value}>
-                          {o.label}
+                          {o.labelKey ? t(o.labelKey) : o.label}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
+                  {f.hintKey && (
+                    <span className="text-[10px] leading-relaxed text-muted-foreground/70">
+                      {t(f.hintKey)}
+                    </span>
+                  )}
                 </label>
               ) : (
                 <ParamInput

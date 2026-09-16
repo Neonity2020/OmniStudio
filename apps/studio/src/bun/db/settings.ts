@@ -51,6 +51,10 @@ export type SettingsKey =
   | "SERVER_GPU_LAYERS"
   | "SERVER_CACHE_TYPE_K"
   | "SERVER_CACHE_TYPE_V"
+  // 模型加载模式（llama.cpp 的 mmap / mlock 取舍，PERF-02）：auto 之外的取值按
+  // llama-server 是 `--load-mode`（新版）还是 `--mlock`（旧版）折算，见
+  // bun/runtimes/llama-load-mode.ts。合法取值在 set 时校验，非法值直接拒。
+  | "SERVER_LOAD_MODE"
   | "CUSTOM_HF_MODEL"
   | "LOCAL_MODEL_PATH"
   | "LOCAL_MODEL_NAME"
@@ -326,6 +330,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   SERVER_GPU_LAYERS: "-1",
   SERVER_CACHE_TYPE_K: "q8_0",
   SERVER_CACHE_TYPE_V: "q8_0",
+  // auto = 不传参数（llama.cpp 自己的默认：能用 mmap 就用）。
+  SERVER_LOAD_MODE: "auto",
   CUSTOM_HF_MODEL: "",
   LOCAL_MODEL_PATH: "",
   LOCAL_MODEL_NAME: "",
@@ -680,12 +686,25 @@ export function getAllSettings(): Record<string, string> {
  */
 export const EMBEDDING_POOLING_VALUES = ["last", "mean", "none", "cls"] as const;
 
+/**
+ * llama.cpp `--load-mode` 的合法取值（`llama-server --help` 的原文枚举）。非法值直接拒
+ * —— 这个值最终会进 argv，白名单是「手改设置行也塞不进别的参数」的那道闸。
+ */
+export const LOAD_MODE_SETTING_VALUES = ["auto", "mmap", "mlock", "mmap+mlock", "none", "dio"] as const;
+
 export function updateSettings(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
 // EMBEDDING_POOLING 只认枚举值：非法值直接跳过（静默拒掉，读侧回落默认 last）。
     if (
       key === "EMBEDDING_POOLING" &&
       !(EMBEDDING_POOLING_VALUES as readonly string[]).includes(value)
+    ) {
+      continue;
+    }
+    // 同上：加载模式只认枚举值（读侧回落默认 auto，等于不传参数）。
+    if (
+      key === "SERVER_LOAD_MODE" &&
+      !(LOAD_MODE_SETTING_VALUES as readonly string[]).includes(value)
     ) {
       continue;
     }

@@ -3289,7 +3289,9 @@ const rpcRequests: NonNullable<
   },
 
   getServerStats: async () => {
-    return getServerStats();
+    // 实例清单由这里传进去：stats.ts 不反向依赖 model-servers（会绕成循环 import），
+    // 而逐模型显存要按实例的 pid 去归属。
+    return getServerStats(Served.getServedModels().models);
   },
 
   getUsageStats: async ({ rangeDays } = {}) => {

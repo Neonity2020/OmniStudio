@@ -70,6 +70,9 @@ mock.module("@lib/rpc", () => ({
       prefillTokensPerSec: 0,
       generationTokensPerSec: 0,
       activeModels: [],
+      // 概览页现在还会读这两个字段：整卡采样（读不到时带 reason）与逐实例显存。
+      instances: [],
+      gpu: { available: false as const, reason: "unified-memory" as const },
       system: {
         loadAvg: [0, 0, 0],
         totalMem: 16e9,

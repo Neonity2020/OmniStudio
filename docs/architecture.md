@@ -140,6 +140,8 @@ apps/
 
 内存预算有三个口径，界面上的「推理可用预算」是后面所有"约占多少内存"的比较基准：Apple 统一内存取物理内存的 **75%**（macOS 默认的 GPU wired 上限）、独显取显存的 **90%**、纯 CPU / 核显取内存的 **60%**。模型占用 = 权重（量化的真实体积）+ KV 缓存（层数 × KV 头 × head_dim × 2(K/V) × 2B × 上下文，引导页按 8K 估）+ 运行期开销（权重的 5%，下限 512MB）；占用 / 预算的比例分四档：≤60% 流畅、≤80% 可用、≤100% 偏紧、超过即装不下。
 
+**运行期采样与机器画像是两件事**（OPS-05 / OPS-06）：画像答「这台机器是什么」（探测一次、永久缓存、随引导页下发），采样答「此刻在发生什么」（服务统计页每 2 秒问一次）。采样在 `bun/gpu-stats.ts`（解析在 `shared/gpu-stats.ts`）：`nvidia-smi --query-gpu=…` 拿整卡利用率 / 显存 / 温度 / 功耗，`--query-compute-apps=pid,used_memory` 把显存按 pid 归属到具体实例 —— 这就是「逐模型显存」的唯一实测来源（`stats.ts` 的 `servedInstanceStats()` 按实例 pid 取值）。与画像的三点差别都是刻意的：走**异步** `Bun.spawn`（同步跑 nvidia-smi 会把这期间所有 RPC 一起卡住）、结果只缓存 2 秒、读不到时返回 `reason`（`unified-memory` / `non-nvidia` / `no-tool` / `probe-failed`）而不是猜一个数 —— 界面按 reason 出文案，显存显示「—」。Apple 芯片与其它 Mac 直接短路，连命令都不跑。
+
 推荐规则全在 `shared/hardware.ts`（引擎推荐只回理由代号，文案在界面侧）：
 
 - **引擎**：装了 mlx-lm 的 Apple 芯片 → MLX，≥48GB 显存的 NVIDIA 且装了 vLLM → vLLM，其余 → llama.cpp。vLLM 的门槛偏高是刻意的：它的预设只有 bf16 权重（没有量化档），显存不够大时"上 vLLM"反而把能跑的模型砍小一档（24GB 卡上 llama.cpp + 量化能装下 27B，vLLM 只装得下 4B）。

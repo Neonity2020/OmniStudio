@@ -109,8 +109,8 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 当前完成度概览（截至 0.0.7-canary.0）：
 
 - ✅ **已落地**：仪表盘、网络/服务配置、模型市集 + 下载器（含任务持久化与断点续传）、模型分类、多 App 结构 + 多模态聊天、集成 Launcher（`omi launch`）、基准测试（吞吐）、日志查看器（基础）、更新通道 / i18n、语音工作台（TTS / ASR / 克隆 / 实时通话）、**图片生图闭环**、**视频生成**、**OCR 三引擎 + 文档管线**、**知识库（本地 RAG）**、**共享记忆**、**MCP 客户端 + 服务端**、**Skills 管理**、云端厂商多配置、**Agent 能力面对齐 OpenWork**（授权 / 待办 / 反问 / 子智能体 / 产出物面板 / 会话侧栏 / 自动化，见 M0）、**Agent 工程能力对齐 Codex**（apply_patch 补丁 / AGENTS.md 项目指令 / 看图工具 / 命令归一化 / 回合快照与回退 / 上下文占用可见 / 命令沙箱 / 外部通知回调 / 生命周期 hooks / 主动申请权限 / `omi agent run` 无头执行 / 会话内 `/model` 换模型 / 快照仓库维护 / `/compact` 与 `/status`，见 M0b）、**Agent 能力面对齐 oh-my-pi**（系统提示去抖动 / 摘要式压缩 + 记忆拼接 / 重复读取去重 / 探索打点收网 / Skills 按需读取 / Goal 与 Plan 两个模式做实 / **瞬时失败自愈（重试 + 空回合提醒）/ 工具输出转存 / 多层 AGENTS.md 段落去重**，见 M0c）。
-- 🟡 **部分完成**：vLLM / SGLang 运行时（参数组装 + 托管安装 + 统一管理页已实现，**仍缺真实环境实测**）、引擎健康度（版本 / 路径 / 占用 / 使用中已有，缺可连性与显存探测）、平台支持（配置与发布流程已覆盖 Linux / Windows 构建，未做端到端验证）、Agent 沙箱（M0b 的 CX-06：macOS 三档 + Linux 的 bubblewrap / Landlock 双后端已落地并有端到端，剩 Windows 后端一项）、API Key 存储（静态加密已全覆盖，缺系统凭据库与不回显）、会话分叉（回退已补，缺分叉时的上下文压缩）。
-- ❌ **未启动**：外观（托盘 / Dock 指标）、服务统计的显存 / 温度（OPS-05 / 06）、KV 缓存分层与分块预填充（PERF-04 / 05）、日志查看器的服务端分片。日志脱敏（FUT-03）与 API Key 静态加密（FUT-02 主体）已完成，见 M6。
+- 🟡 **部分完成**：vLLM / SGLang 运行时（参数组装 + 托管安装 + 统一管理页已实现，**仍缺真实环境实测**）、引擎健康度（版本 / 路径 / 占用 / 使用中已有，缺可连性与显存探测）、平台支持（配置与发布流程已覆盖 Linux / Windows 构建，未做端到端验证）、Agent 沙箱（M0b 的 CX-06：macOS 三档 + Linux 的 bubblewrap / Landlock 双后端已落地并有端到端，剩 Windows 后端一项）、API Key 存储（静态加密已全覆盖，缺系统凭据库与不回显）、会话分叉（回退已补，缺分叉时的上下文压缩）、分块预填充（PERF-05：llama.cpp 与 SGLang 已可调，vLLM 的两个开关等真机）。
+- ❌ **未启动**：外观（托盘 / Dock 指标）、KV 缓存分层（PERF-04，等上游出现"KV 卸载到 SSD"的能力）、日志查看器的服务端分片。日志脱敏（FUT-03）、API Key 静态加密（FUT-02 主体）、服务统计的显存 / 温度（OPS-05 / 06）与预填充内存防护（PERF-02）已完成。
 
 ---
 
@@ -148,10 +148,10 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
 | PERF-01 | 空闲超时自动卸载 | ✅ | **推理服务器层已做**：`model-servers.ts` 的空闲定时器（`SERVER_IDLE_UNLOAD_MINUTES`，默认 0 = 关闭，设置页「服务生命周期」可改）。三个活动信号：应用内推理调用（`recordUsage` / `recordUsageEvent` 打点，后者是网关那一路的收口，外部 agent 的请求也在这里被看见）、实例输出是否变化、llama.cpp 的 `/slots` `is_processing`（唯一精确的「正在忙」信号）。**故意没做在飞请求计数**：一个请求就是一条可能很长的 SSE 流，要正确计数得在正常结束 / 客户端断开 / 引擎报错每条路径上都减回去，漏一条就是永久性的「再也不会卸载」；读数不准的闸门比没有更危险，所以改成把局限写进设置页说明。MLX 生图 worker 的 `IMG_MLX_IDLE_MINUTES` 照旧（默认 10 分钟） |
-| PERF-02 | 预填充内存防护与防护层级 | ❌ | 验证 llama.cpp `--mlock` 等能力后设计 |
+| PERF-02 | 预填充内存防护与防护层级 | ✅ | **落地形态是「加载模式」的选择**（`SERVER_LOAD_MODE` + `bun/runtimes/llama-load-mode.ts`）：权重在物理内存里的驻留方式才是这类防护真正能拨的旋钮 —— `mmap`（内存紧张时可被系统回收）/ `mlock`（锁在内存，不换出）/ `mmap+mlock` / `none`（整块读进内存）/ `dio`；KV 缓存那一层由既有的 `--cache-type-k/v` 管，两者合起来才是分层防护。取值经**白名单**校验（这个值最终进 argv，手改设置行塞不进别的参数），非法值直接拒。**版本差异按事实处理**：上游已把 `--mlock` / `--no-mmap` 标为 DEPRECATED、改为 `--load-mode`（本机 llama-server 0.4.0 / build 10809 的 `--help` 原文），所以启动前探一次 `--help`（按二进制路径缓存 —— 应用托管的那份与 brew 那份各探各的）：新版发 `--load-mode <值>`，旧版按 --help 措辞逐条折算成 `--mlock` / `--no-mmap`（旧版默认就是 mmap，所以 `mmap` 不发参数；`dio` 旧版没有 → 不发并记日志说明不支持，不静默降级成别的模式）。设置页写明取舍与 mlock 的风险（模型比内存大时不要开）。真机验证：本机探测结果为 `load-mode`，`SERVER_LOAD_MODE=mlock` → `--load-mode mlock` |
 | PERF-03 | 模型回退路由 | ✅ | `server-manager.ts` 的 `startWithFallback()` + 设置 `SERVER_FALLBACK_MODELS`（控制台「备选模型」卡片里从已下载模型里挑，可排序删除）。**只在模型侧失败时回退**（架构 / 权重 / 显存，`isModelSideFailure`）—— 端口被占、缺依赖、权限不足换哪个模型都一样，回退只会盖住真原因。回退不静默：写 app.log + 进通知中心。7 项单测 |
-| PERF-04 | KV 缓存热/冷分层与 SSD 溢出 | ❌ | 缓存分层 + SSD 溢出目录，先做能力验证 |
-| PERF-05 | 分块预填充 / 预填充优先级 | ❌ | 按引擎支持情况接入设置 |
+| PERF-04 | KV 缓存热/冷分层与 SSD 溢出 | ❌ | 缓存分层 + SSD 溢出目录，先做能力验证。**能力验证的结论（2026-09）**：llama.cpp 至今没有「KV 缓存卸载到 SSD」这类开关，只有 `--no-kv-offload`（不把 KV 放显存）与缓存量化（已接入）—— 这一项要等上游能力真正出现，不自己造一个假的"分层" |
+| PERF-05 | 分块预填充 / 预填充优先级 | 🟡 | **三个引擎逐个对照**：llama.cpp 没有单独的分块预填充开关 —— 它就是 `--batch-size` / `--ubatch-size` 这一对（已可调；物理 batch 决定单次喂进模型的 token 上限，嵌入实例另按 ctx-size 放大）；SGLang 的 `SGLANG_CHUNKED_PREFILL_SIZE` 设置键一直在，但**此前只能手改数据库**，现在进了启动参数面板；vLLM 的 `--enable-chunked-prefill` / `--max-num-batched-tokens` **仍缺** —— 与 LIE-03 同一个阻塞点（没有能实测的 vLLM 机器），不先赌一个开关存在 |
 
 ## M4 · 运维增强（P1）—— 日志 / 基准 / 统计补齐
 
@@ -161,8 +161,8 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 | OPS-02 | 日志查看器：最近 N 条筛选 | ✅ | 来源切换器右侧共用的 100 / 500 / 2000 档位：应用日志走 `AppLogQuery.limit`（主进程按「取最新 N 条再排序」，`oldestFirst` 只影响顺序），实例输出按行裁（`split("\n").slice(-limit)`，仍受 ANSI 渲染上限约束）。另加级别筛选、搜索、跟随最新（1s 轮询 `memoryOnly + since`，不重读整份文件） |
 | OPS-03 | 基准测试：batch × ctx 扫描矩阵 | ✅ | `BenchmarkParams.batchSizes[]`（保留 `batchSize` 单值作旧载荷兼容），扫描顺序 ctx × batch × cache，`progress.total` 三维相乘；`summary.byBatch` 按并发档分开汇总（跨档的平均值在界面上明确标注口径），`cacheComparison` 按 `ctx@batch` 分组；UI 并发档位 chips + 逗号批量输入，CLI `--batches 1,2,4`（`--batch N` 仍是简写），HTML 报告加「按并发」表 |
 | OPS-04 | 基准测试：准确度 / 质量基准 | ✅ | 已实现「能力评测」模式（`bun/eval.ts`，8 套件：mmlu / cmmlu / gsm8k / mmlu_pro / humaneval / mbpp / ifeval / longctx，支持抽样、并发跑题与按类别得分），结果落 `benchmark_records` |
-| OPS-05 | 服务统计：逐模型显存 / VRAM | ❌ | `/slots` 已能拿实际加载模型，但仅 llama-server 支持；其他引擎靠"最近使用即视作 loaded"兜底 |
-| OPS-06 | 服务统计：GPU 温度与显存锁定量 | ❌ | |
+| OPS-05 | 服务统计：逐模型显存 / VRAM | ✅ | 概览页多一张「运行中的实例」：每个在跑的实例给出引擎 / 端口 / 用途 / 状态 + **权重体积**（扫描得到的真数，哪个平台都有）+ **显存占用**。显存是实测 —— `nvidia-smi --query-compute-apps=pid,used_memory` 按实例 pid 归属（`servedInstanceStats()`），这是唯一能回答"哪个模型占了多少"的来源；读不到就是 `null`（界面显示「—」并在「硬件占用」里写明原因），**不拿别人的数顶上**。顺带补掉旧实现的两个洞：实例清单来自注册表（status ≠ stopped）而不是"最近用过就算 loaded"，`/slots` 只用于活跃模型那栏的 loaded 判定 |
+| OPS-06 | 服务统计：GPU 温度与显存锁定量 | ✅ | 整卡采样 `bun/gpu-stats.ts`（解析在 `shared/gpu-stats.ts`）：显存已用 / 总量条 + 利用率的采样卡，另有温度与功耗两个读数，一行一张卡（多卡各画一张）。读不到的字段留「—」（驱动可能不暴露功耗、虚拟机可能没有温度：`[N/A]` 就是 null）。与机器画像的三点差别是刻意的：**异步** `Bun.spawn`（同步跑 nvidia-smi 会把 2 秒轮询期间的所有 RPC 一起卡住）、只缓存 2 秒、读不到时给 `reason`（`unified-memory` / `non-nvidia` / `no-tool` / `probe-failed`）而不是猜一个数 —— Apple 芯片与其它 Mac 直接短路，连命令都不跑（那里的"没有显存"是统一内存这一设计事实，不是探测失败）。「显存锁定量」这一半由 PERF-02 的加载模式承担：mlock 把权重锁在内存里，锁不锁得住看的是加载模式而不是一个反查出来的数字 |
 
 ## M5 · 工程与平台（P1 / P2）
 
@@ -190,6 +190,6 @@ snapcompact（历史栅格化成图）、`xd://` 工具设备、协作中继、L
 ## 迭代节奏建议
 
 - **M2 剩下的缺口是实测**：vLLM / SGLang 的一键安装与统一管理页已落地（LIE-02 / LIE-06），还差的是一台带 NVIDIA 显卡的机器上把参数组装跑通（LIE-03/04）与分类型启动诊断（LIE-05）。
-- **M3 的 PERF-01 有现成参照**：MLX 生图 worker 的空闲卸载逻辑可以照搬到 `server-manager` 层。
+- **M3 只剩 PERF-04**：PERF-01 的空闲卸载与 PERF-02 的加载模式都已落地；PERF-04（KV 缓存分层 / SSD 溢出）在 llama.cpp 上**没有对应能力可接**，别自己造假的"分层"。PERF-05 差 vLLM 的两个开关，与 LIE-03 同一台机器。
 - 每个里程碑结束跑一次回归：`cd apps/studio && bun run build:dev` + 手工过 P0 路径（聊天 → 生图 → OCR → 语音）。
 - 提交前跑：`bun run lint && bun run typecheck && bun run test && bun run --cwd apps/studio test:smoke`（与 CI 一致）。
