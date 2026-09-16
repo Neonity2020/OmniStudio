@@ -19,6 +19,7 @@ import {
   ArchiveIcon,
   SparklesIcon,
   SlidersHorizontalIcon,
+  StarIcon,
   ChartColumnIcon,
 } from "lucide-react";
 
@@ -62,6 +63,7 @@ type SettingsTab =
   | "library"
   | "run"
   | "cloud"
+  | "defaults"
   | "engines"
   | "gateway"
   | "tunnel"
@@ -83,6 +85,7 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   library: { icon: <BoxIcon className="size-4" />, labelKey: "library.title" },
   run: { icon: <CpuIcon className="size-4" />, labelKey: "run.title" },
   cloud: { icon: <ServerIcon className="size-4" />, labelKey: "cloud.title" },
+  defaults: { icon: <StarIcon className="size-4" />, labelKey: "defaults.title" },
   engines: { icon: <CircuitBoardIcon className="size-4" />, labelKey: "settings.engines.title" },
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
   tunnel: { icon: <CloudIcon className="size-4" />, labelKey: "settings.tunnel" },
@@ -106,9 +109,9 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   { tabs: ["stats"] },
   {
     labelKey: "settings.group.models",
-    // 模型这一组四条，各管一段：有哪些模型（模型库）/ 怎么跑（运行模型）/
-    // 用云端 API（云端模型）/ 引擎本体的安装升级（模型引擎）。
-    tabs: ["library", "run", "cloud", "engines"],
+    // 模型这一组五条，各管一段：有哪些模型（模型库）/ 怎么跑（运行模型）/
+    // 用云端 API（云端模型）/ 各场景默认用哪个（默认模型）/ 引擎本体的安装升级（模型引擎）。
+    tabs: ["library", "run", "cloud", "defaults", "engines"],
   },
   {
     labelKey: "settings.group.services",
@@ -124,14 +127,13 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
  * 小应用 `omni.openSettings("network")`、CLI navigate 的 `models`、各式错误回退。
  * 这里映射一次，旧 id 不会落到空白页。
  *
- *   network / defaults（模型云服务、默认模型）→ 云端模型
- *   model（本地模型）                        → 运行模型
- *   store（模型库）                          → 模型库（默认页签）
- *   market（在线模型市场）                    → 模型库 → 模型市场页签
+ *   network（模型云服务）→ 云端模型（`defaults` 现在是独立页签，不再走这里）
+ *   model（本地模型）     → 运行模型
+ *   store（模型库）       → 模型库（默认页签）
+ *   market（在线模型市场）→ 模型库 → 模型市场页签
  */
 const LEGACY_TABS: Record<string, { tab: SettingsTab; libraryTab?: LibraryTab }> = {
   network: { tab: "cloud" },
-  defaults: { tab: "cloud" },
   model: { tab: "run" },
   store: { tab: "library" },
   market: { tab: "library", libraryTab: "market" },
@@ -161,6 +163,7 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "library",
   "run",
   "cloud",
+  "defaults",
   "about",
   "websearch",
   "mcp",
@@ -314,13 +317,9 @@ export function SettingsScreen() {
               </div>
             )}
 
-            {activeTab === "cloud" && (
-              <div className="flex flex-col gap-8">
-                <CloudProviderPanel />
-                <div className="border-t" />
-                <DefaultModelsPanel />
-              </div>
-            )}
+            {activeTab === "cloud" && <CloudProviderPanel />}
+
+            {activeTab === "defaults" && <DefaultModelsPanel />}
 
             {/* 「管理模型 →」回到模型库的默认页签（本地已下载） */}
             {activeTab === "engines" && <EnginesTab onOpenModelsTab={() => pickTab("library")} />}

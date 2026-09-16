@@ -155,7 +155,7 @@ async function renderSettings() {
   };
 }
 
-test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云端模型 / 模型引擎，没有「性能」「记忆」这类重复入口", async () => {
+test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云端模型 / 默认模型 / 模型引擎，没有「性能」「记忆」这类重复入口", async () => {
   const { text, cleanup } = await renderSettings();
   const nav = document.querySelector("nav[aria-label]");
   expect(nav).not.toBeNull();
@@ -165,6 +165,7 @@ test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云�
     "模型库",
     "运行模型",
     "云端模型",
+    "默认模型",
     "模型引擎",
     "网关",
     "远程访问",
@@ -190,10 +191,11 @@ test("设置导航就是这一份：模型组是 模型库 / 运行模型 / 云�
  * 旧标签 id 不能变成空白页。
  *
  * 模型组这轮改过名也挪过位置（本地模型 → 运行模型、模型云服务 → 云端模型、在线模型市场
- * 收进模型库），外部跳转还在用旧 id：小应用 `omni.openSettings("network")`、CLI navigate
- * 的 `models`、各式错误回退。这里钉住它们各自落到今天的那一页。
+ * 收进模型库、默认模型从云端模型页里拆出来自成一条），外部跳转还在用旧 id：
+ * 小应用 `omni.openSettings("network")`、CLI navigate 的 `models`、各式错误回退。
+ * 这里钉住它们各自落到今天的那一页。
  */
-test("旧标签 id 仍落在对应页面（network → 云端模型，model → 运行模型，market → 模型市场页签）", async () => {
+test("旧标签 id 仍落在对应页面（network → 云端模型，defaults → 默认模型，model → 运行模型，market → 模型市场页签）", async () => {
   const { cleanup } = await renderSettings();
   const { useRouter } = await import("@stores/router");
 
@@ -218,12 +220,15 @@ test("旧标签 id 仍落在对应页面（network → 云端模型，model → 
       .replace(/\s*\d+$/, "");
 
   try {
-    // 模型云服务 / 默认模型 → 云端模型（厂商面板渲染出来了）
-    for (const legacy of ["network", "defaults"]) {
-      await routeTo(legacy);
-      expect({ legacy, nav: activeNav() }).toEqual({ legacy, nav: zh("cloud.title") });
-      expect(document.body.textContent ?? "").toContain(zh("defaults.title"));
-    }
+    // 模型云服务 → 云端模型（厂商面板渲染出来了）
+    await routeTo("network");
+    expect(activeNav()).toBe(zh("cloud.title"));
+    expect(document.body.textContent ?? "").toContain(zh("cloud.desc"));
+    // 默认模型：自己一页（不再挂在云端模型页里），也认这个老 id
+    await routeTo("defaults");
+    expect(activeNav()).toBe(zh("defaults.title"));
+    expect(document.body.textContent ?? "").toContain(zh("defaults.desc"));
+    expect(document.body.textContent ?? "").not.toContain(zh("cloud.desc"));
     // 本地模型 → 运行模型（引擎选择 + 空态指路模型库）
     await routeTo("model");
     expect(activeNav()).toBe(zh("run.title"));

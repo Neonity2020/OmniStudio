@@ -82,23 +82,29 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   for engines whose version is pinned in code); progress reuses the setup-screen push channel
   (`engineInstallLog` / `engineInstallPhase`), and `startEngineLogBridge()` folds the other
   installers' own logs into it rather than adding a second channel.
-- **The 模型 group is four entries, one per question — don't add a fifth** (设置 → 模型):
-  **模型库** (`library`), **运行模型** (`run`), **云端模型** (`cloud`), **模型引擎** (`engines`).
+- **The 模型 group is five entries, one per question — don't add a sixth** (设置 → 模型):
+  **模型库** (`library`), **运行模型** (`run`), **云端模型** (`cloud`), **默认模型** (`defaults`),
+  **模型引擎** (`engines`).
   `mainview/app/model-library/` answers "what models do I have / where do they come from" with three
   horizontal tabs — **market** (ModelScope / HF search + recommended presets; downloads happen in
   model-detail), **downloaded** (the installed list, default tab) and **favorites** — and nothing
   else: engine choice and launch parameters are `mainview/app/local-models/` (运行模型), providers
-  and per-app defaults are `CloudProviderPanel` + `DefaultModelsPanel` (云端模型), engine
-  install/upgrade/uninstall is `main-layout/engines-tab.tsx` (模型引擎). A model-related surface
-  belongs in one of those four, not in a new entry — the earlier six parallel entries
-  (模型云服务 / 默认模型 / 本地模型 / 引擎 / 模型库 / 在线模型市场) forced users to hop pages for
-  one task. Two rules that cost real bugs if broken: external jump targets still use the old ids
-  (`network` / `defaults` → cloud, `model` → run, `store` → library, `market` → library's market
-  tab, plus mini-app `omni.openSettings("network")` and `omi`'s `navigate` with `tab` / `sub`),
+  and their API keys are `CloudProviderPanel` (云端模型), the per-scene defaults (chat / embedding /
+  voice call / TTS / ASR) are `main-layout/default-models-panel.tsx` (默认模型 — its own entry,
+  *not* stacked under the cloud panel: credentials and "which model for which job" are two
+  different questions), engine install/upgrade/uninstall is `main-layout/engines-tab.tsx`
+  (模型引擎). A model-related surface belongs in one of those five, not in a new entry — the earlier
+  six parallel entries (模型云服务 / 默认模型 / 本地模型 / 引擎 / 模型库 / 在线模型市场) forced users
+  to hop pages for one task. Two rules that cost real bugs if broken: external jump targets still use
+  the old ids
+  (`network` → cloud, `model` → run, `store` → library, `market` → library's market
+  tab, plus mini-app `omni.openSettings("network")` and `omi`'s `navigate` with `tab` / `sub`;
+  `defaults` is a real tab again, so it no longer needs a legacy hop),
   so `settings.tsx`'s `LEGACY_TABS` must keep resolving them — an unmapped id lands on a blank pane;
   and every user-facing "configure it over in …" string (bun error messages, `cloud.where`, CLI
   help, the omni-doctor playbooks, whose left column matches raw error text) must name
-  设置 → 云端模型 / 设置 → 模型引擎, not the retired names.
+  设置 → 云端模型 (厂商与密钥) / 设置 → 默认模型 (各场景用哪个模型) / 设置 → 模型引擎, not the
+  retired names.
 - **Cloud models are picked as `provider → model`, never as a per-page URL + key**: image,
   image-edit, video, TTS, ASR, live-translate and VLM OCR each store only a provider id
   (`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / …) plus a model name; base URL and key come from
