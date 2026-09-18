@@ -158,6 +158,25 @@ export function listInstalledModels(): InstalledModel[] {
       m.origin === "hf-cache"
         ? {}
         : readRepoMetaFor(m.path, roots.get(m.origin) ?? getModelsBaseDir(), m.isDir);
+    
+    // 从 config.json 读取上下文窗口长度
+    let contextLength: number | undefined;
+    try {
+      const configPath = path.join(m.runtimeTarget, "config.json");
+      if (existsSync(configPath)) {
+        const config = JSON.parse(readFileSync(configPath, "utf8"));
+        if (typeof config?.max_position_embeddings === "number") {
+          contextLength = config.max_position_embeddings;
+        } else if (typeof config?.context_length === "number") {
+          contextLength = config.context_length;
+        } else if (typeof config?.llama_context_window_size === "number") {
+          contextLength = config.llama_context_window_size;
+        }
+      }
+    } catch {
+      // config.json 解析失败时不报错，contextLength 保持 undefined
+    }
+    
     return {
       repo: m.repo,
       fileName: m.fileName,
@@ -176,6 +195,8 @@ export function listInstalledModels(): InstalledModel[] {
       kind: m.kind,
       runtimeTarget: m.runtimeTarget,
       files: m.files,
+      supportFiles: m.supportFiles,
+      contextLength,
     };
   });
 }

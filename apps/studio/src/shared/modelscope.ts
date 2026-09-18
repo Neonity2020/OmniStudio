@@ -281,6 +281,13 @@ export type InstalledModel = {
    * 市场页用它判断"这个文件下过没有"：目录条目只有一条记录，只比 fileName 会漏。
    */
   files?: string[];
+  /**
+   * 同一仓库目录里的非权重文件（config.json / tokenizer / chat_template…）。
+   * 整仓库下载会把它们一起下，"已下载"的判定缺了它们就永远差几个文件。
+   */
+  supportFiles?: string[];
+  /** 模型的上下文窗口长度（从 config.json 解析），未解析时为 undefined。 */
+  contextLength?: number;
 };
 
 /**

@@ -21,6 +21,7 @@ import { buildChatContext } from "./knowledge";
 import { memoryEnabled, memoryRecallSection } from "./memory";
 import type { KbCitation } from "../shared/knowledge";
 import { mainT } from "./i18n";
+import * as ModelStore from "./model-store";
 
 export type ChatMessage = {
   id: number;
@@ -557,12 +558,24 @@ async function probeLocalServer(): Promise<boolean> {
  *
  * 必须显式给：不传时各引擎用自己的默认值，而 mlx-lm 的 `--max-tokens` 默认只有 512 ——
  * 推理模型光"思考"就能用光它，正文一个字都出不来，界面上就是「空白回复 + 0 tokens」。
- * 这里跟随「上下文长度」（SERVER_CTX_SIZE，默认 8192）并夹在 1k~32k：
- * 上限只是封顶，模型正常会自己 EOS 收尾。
+ *
+ * 优先使用已安装模型的 contextLength（从 config.json 解析），如果未解析则回退到
+ * SERVER_CTX_SIZE 设置（默认 8192）。这样大上下文模型（如 131072）不会被钳制在小窗口。
  */
 export function maxOutputTokens(): number {
-  const ctx = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
-  return Math.min(Math.max(1024, ctx), 32768);
+  // 尝试从当前模型读取 contextLength
+  const model = getChatRequestModelId();
+  let ctx = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  
+  if (model) {
+    const models = ModelStore.listInstalledModels();
+    const currentModel = models.find((m: ModelStore.InstalledModel) => m.runtimeTarget === model || m.path === model);
+    if (currentModel?.contextLength && currentModel.contextLength > ctx) {
+      ctx = currentModel.contextLength;
+    }
+  }
+  
+  return Math.min(Math.max(1024, ctx), 262144);
 }
 
 /**
