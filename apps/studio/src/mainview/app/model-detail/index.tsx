@@ -16,7 +16,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { PageShell } from "@components/setting-ui";
 import { SourceBadge } from "@components/source-badge";
 import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
-import { installedFileNames } from "@/mainview/lib/installed-models";
+import { installedFilesForRepo } from "@/mainview/lib/installed-models";
 import { cn } from "@/mainview/lib/utils";
 import { FileRow } from "./file-row";
 import { ModelDownloadCard } from "./download-button";
@@ -96,8 +96,8 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     queryFn: () => rpcClient.listInstalledModels(),
   });
   const installedNames = useMemo(
-    () => installedFileNames(installedData?.models ?? []),
-    [installedData],
+    () => installedFilesForRepo(installedData?.models ?? [], repo ?? ""),
+    [installedData, repo],
   );
 
   // 类别改键（③-C2）：只对应用下载目录（managed）里的模型生效 —— setModelMeta 按仓库

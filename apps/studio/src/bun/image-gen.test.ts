@@ -69,7 +69,13 @@ await mockModulePartial<typeof import("./cloud-providers")>("./cloud-providers",
 // ---------------------------------------------------------------------------
 const originalFetch = globalThis.fetch;
 const PNG = "iVBORw0KGgoAAAANSUhEUg=="; // 1x1 占位 PNG（base64）
-globalThis.fetch = mock(async (url: URL | string) => {
+
+/** 打开后模拟 OpenAI 原生 gpt-image 端点：不认 response_format / negative_prompt。 */
+let rejectOptionalParams = false;
+/** 每次 /images/generations 请求的 body，用来断言"降级重试真的去掉了那个参数"。 */
+const generationBodies: Record<string, unknown>[] = [];
+
+globalThis.fetch = mock(async (url: URL | string, init?: RequestInit) => {
   const u = String(url);
   if (u.includes("/models")) {
     return new Response(JSON.stringify({ data: [{ id: "Kwai-Kolors/Kolors" }] }), {
@@ -78,6 +84,17 @@ globalThis.fetch = mock(async (url: URL | string) => {
     });
   }
   if (u.includes("/images/generations")) {
+    const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+    generationBodies.push(body);
+    if (rejectOptionalParams) {
+      const bad = ["response_format", "negative_prompt"].find((key) => key in body);
+      if (bad) {
+        return new Response(
+          JSON.stringify({ error: { message: `Unknown parameter: '${bad}'.` } }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+    }
     return new Response(
       JSON.stringify({ data: [{ b64_json: PNG }] }),
       { status: 200, headers: { "Content-Type": "application/json" } },
@@ -173,4 +190,57 @@ test("generateImage 使用页面实时配置，杜绝连到旧配置", async () 
   // 生成的模型应来自页面实时配置。
   expect(res.records[0]!.model).toBe("Kwai-Kolors/Kolors");
   expect(res.records[0]!.imageUrl).toContain("http://img.local/");
+});
+
+test("上游不认 response_format / negative_prompt 时去掉重试（gpt-image-2 原生端点）", async () => {
+  rejectOptionalParams = true;
+  generationBodies.length = 0;
+
+  const res = await generateImage({
+    prompt: "a cute sticker",
+    negativePrompt: "watermark, extra text",
+    width: 1024,
+    height: 1024,
+    config: { backend: "api", providerId: "live-provider", model: "gpt-image-2", comfyBase: "" },
+  });
+
+  expect(res.error).toBeUndefined();
+  expect(res.records.length).toBe(1);
+  // 三次请求：带两个参数被拒 → 去一个再被拒 → 两个都去掉后成功
+  expect(generationBodies.length).toBe(3);
+  expect(generationBodies[0]!.response_format).toBe("b64_json");
+  expect(generationBodies[0]!.negative_prompt).toBe("watermark, extra text");
+  expect("response_format" in generationBodies[1]!).toBe(false);
+  expect("negative_prompt" in generationBodies[2]!).toBe(false);
+  // 该有的还在
+  expect(generationBodies[2]!.prompt).toBe("a cute sticker");
+  expect(generationBodies[2]!.model).toBe("gpt-image-2");
+
+  rejectOptionalParams = false;
+});
+
+test("上游不认参数之外的 400 直接报错，不做无谓重试", async () => {
+  generationBodies.length = 0;
+  const bad = mock(async (url: URL | string, init?: RequestInit) => {
+    if (String(url).includes("/images/generations")) {
+      generationBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify({ error: { message: "Invalid size: '2048x2048'." } }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("Not Found", { status: 404 });
+  });
+  const previous = globalThis.fetch;
+  globalThis.fetch = bad as never;
+  try {
+    const res = await generateImage({
+      prompt: "x",
+      config: { backend: "api", providerId: "live-provider", model: "gpt-image-2", comfyBase: "" },
+    });
+    expect(res.error).toContain("Invalid size");
+    expect(generationBodies.length).toBe(1);
+  } finally {
+    globalThis.fetch = previous;
+  }
 });

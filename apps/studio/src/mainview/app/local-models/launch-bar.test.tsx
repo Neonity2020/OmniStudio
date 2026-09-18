@@ -61,12 +61,18 @@ let startServer: () => Promise<unknown> = async () => {
 };
 const engineMissingStart = startServer;
 
+/** 选中模型时后端收到了哪个路径（下拉检索用例断言用）。 */
+const activeCalls: string[] = [];
+
 mock.module("@lib/rpc", () => ({
   rpcClient: {
     getSettings: async () => ({
       settings: { LOCAL_MODEL_PATH: "/models/Ornith-1.5-35B-Q4_K_M.gguf" },
     }),
-    setActiveModel: async () => ({ ok: true }),
+    setActiveModel: async (args: { path: string }) => {
+      activeCalls.push(args.path);
+      return { ok: true };
+    },
     startServedModel: () => startServer(),
     restartServedModel: () => startServer(),
     getSetupEnvironment: async () => ({
@@ -85,34 +91,6 @@ mock.module("@lib/rpc", () => ({
       vllm: { found: false },
       sglang: { found: false },
       mlx: { found: false },
-    }),
-    // 失败卡片上的「诊断信息」要读引擎版本与实例日志（issue #16）。
-    listLocalEngines: async () => ({
-      engines: [
-        {
-          id: "llama.cpp",
-          state: "managed",
-          version: "b10976",
-          path: "/data/engines/llamacpp/llama-server",
-          managedDir: "/data/engines/llamacpp",
-          sizeBytes: 1,
-          running: false,
-          canInstall: true,
-          installNote: null,
-          approxBytes: null,
-          requirement: null,
-          canUninstall: true,
-          upgradeKind: "latest",
-        },
-      ],
-      busy: null,
-    }),
-    getServedModelLogs: async () => ({
-      logs: [
-        "0.00.100.200 I srv  llama_server: loading model",
-        "0.00.200.300 E srv  llama_model_load: error loading model: unknown model architecture: 'bert'",
-        "0.00.202.000 E srv  llama_server: exiting due to model loading error",
-      ].join("\n"),
     }),
   },
 }));
@@ -138,7 +116,7 @@ const MODEL: InstalledModel = {
 let container: HTMLDivElement | null = null;
 let root: ReturnType<typeof createRoot> | null = null;
 
-async function renderBar() {
+async function renderBar(models: InstalledModel[] = [MODEL]) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // 用全局 document（测试顶部已经把 happy-dom 的挂上去），其它界面用例同样写法。
   container = document.createElement("div");
@@ -152,7 +130,7 @@ async function renderBar() {
         createElement(
           TooltipProvider,
           null,
-          createElement(LaunchBar, { installedModels: [MODEL], engine: "llama.cpp" as const }),
+          createElement(LaunchBar, { installedModels: models, engine: "llama.cpp" as const }),
         ),
       ),
     );
@@ -173,11 +151,30 @@ function buttonByText(text: string): HTMLButtonElement | undefined {
   ) as HTMLButtonElement | undefined;
 }
 
+/** 下拉是 portal 到 document.body 的，不在 container 里。 */
+function inPopover<T extends Element>(selector: string): T[] {
+  return Array.from(document.querySelectorAll<T>(selector)).filter(
+    (el) => !container!.contains(el),
+  );
+}
+
+/** 受控 input：React 监听的是 input 事件，直接改 .value 不触发 onChange，得走原生 setter。 */
+function typeInto(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    (globalThis as unknown as { HTMLInputElement: typeof HTMLInputElement }).HTMLInputElement
+      .prototype,
+    "value",
+  )?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new dom.Event("input", { bubbles: true }) as unknown as Event);
+}
+
 afterEach(async () => {
   if (root) await act(async () => root!.unmount());
   root = null;
   container = null;
   startServer = engineMissingStart;
+  activeCalls.length = 0;
 });
 
 afterAll(() => {
@@ -204,76 +201,96 @@ test("引擎没装：报错下面给一键安装（而不是只让用户去 brew
   expect(view.textContent).toContain("brew install llama.cpp");
 });
 
-/** 按钮文字精确匹配（「控制台」与「打开控制台」互相包含，不能用 includes 找）。 */
-function buttonByExactText(text: string): HTMLButtonElement | undefined {
-  return Array.from(container!.querySelectorAll("button")).find(
-    (b) => (b.textContent ?? "").trim() === text,
-  ) as HTMLButtonElement | undefined;
-}
+/** 本机模型多了以后，下拉必须能搜：输入即筛，选中即设为当前模型。 */
+const SECOND: InstalledModel = {
+  ...MODEL,
+  repo: "Qwen/Qwen3.8-27B-4bit-MTP-MLX",
+  fileName: "Qwen3.8-27B-4bit-MTP-MLX.safetensors",
+  path: "/models/Qwen3.8-27B-4bit-MTP-MLX.safetensors",
+  runtimeTarget: "/models/Qwen3.8-27B-4bit-MTP-MLX.safetensors",
+  kind: "safetensors",
+  isActive: false,
+  isChatModel: false,
+};
 
-test("启动失败：把引擎版本 / 模型字节数 / 日志首条 error 摆在报错下面（issue #16）", async () => {
-  startServer = async () => {
-    throw new Error("llama_server: exiting due to model loading error");
-  };
-  // 真实的失败路径：主进程把失败的实例留在列表里（status=error，日志尾巴还在），
-  // 界面据此取到实例 id 才能读到那份日志。
-  const { useServedStore } = await import("@stores/served");
-  // 快照是 store 直写（真实运行时来自主进程推送）：包在 act 里，否则 React 报未包裹的更新。
+test("模型下拉支持检索：输入即筛，点结果切换模型", async () => {
+  await renderBar([MODEL, SECOND]);
+  await settle();
+
+  const trigger = buttonByText("Ornith-1.5-35B-Q4_K_M.gguf");
+  expect(trigger).toBeTruthy();
   await act(async () => {
-    useServedStore.getState().setSnapshot({
-      models: [
-        {
-          id: "srv-1",
-          modelRef: MODEL.runtimeTarget,
-          label: "Ornith-1.5-35B",
-          engine: "llama.cpp",
-          port: 18080,
-          endpoint: "http://127.0.0.1:18080/v1",
-          servedName: "Ornith-1.5-35B",
-          purpose: "chat",
-          isDir: false,
-          status: "error",
-          error: "llama_server: exiting due to model loading error",
-          usesDefaultPort: true,
-          isActive: true,
-        },
-      ],
-      activeId: "srv-1",
-    });
+    trigger!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  try {
-    const view = await renderBar();
-    await settle();
 
-    await act(async () => {
-      buttonByText("启动服务器")!.click();
-    });
-    // 两次 settle：先让 mutation 落成报错，再让诊断块那两次查询（引擎行 / 实例日志）结算 ——
-    // react-query 的 promise 链比一个 tick 长，少一次就会在断言之后更新状态（act 警告）。
-    await settle();
-    await settle();
+  // 搜索框在浮层顶部（打开即聚焦，直接打字就能筛），两个模型都在列表里
+  const search = inPopover<HTMLInputElement>("input")[0];
+  expect(search).toBeTruthy();
+  expect(search!.placeholder).toContain("搜索模型名");
+  expect(document.activeElement).toBe(search!);
+  expect(inPopover('[role="option"]').length).toBe(2);
 
-    // 引擎构建版本：模型加载失败的头号嫌疑（旧构建认不出模型元数据）
-    expect(view.textContent).toContain("b10976");
-    // 模型文件的精确字节数：和官方对一下就知道下载有没有缺一段
-    expect(view.textContent).toContain("Ornith-1.5-35B-Q4_K_M.gguf");
-    expect(view.textContent).toContain("23,000,000,000");
-    // 诊断块里给的是日志**第一条** error —— 末尾那句 `exiting due to model loading error`
-    // 只是结论，报错本身已经写了，再重复一遍没有信息量。
-    const diag = Array.from(view.querySelectorAll("div")).find((el) =>
-      (el.textContent ?? "").startsWith("诊断信息"),
-    );
-    expect(diag).toBeTruthy();
-    expect(diag!.textContent).toContain("unknown model architecture");
-    expect(diag!.textContent).not.toContain("exiting due to model loading error");
-    // 失败时实例可能还没建起来（status 仍是 stopped），控制台入口不能正好消失
-    expect(buttonByExactText("控制台")).toBeTruthy();
-    expect(buttonByText("打开控制台")).toBeTruthy();
-  } finally {
-    await act(async () => {
-      useServedStore.getState().setSnapshot({ models: [], activeId: null });
-    });
-  }
+  // 输入即筛：只剩名字命中的那一个
+  await act(async () => {
+    typeInto(search!, "qwen3.8 4bit");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const options = inPopover<HTMLElement>('[role="option"]');
+  expect(options.length).toBe(1);
+  expect(options[0]!.textContent).toContain("Qwen3.8-27B-4bit-MTP-MLX");
+
+  // 选中 → 设为当前模型（下拉关闭）
+  await act(async () => {
+    options[0]!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(activeCalls).toEqual(["/models/Qwen3.8-27B-4bit-MTP-MLX.safetensors"]);
+  expect(inPopover('[role="option"]').length).toBe(0);
+});
+
+test("下拉打开时当前模型置顶且高亮在它身上：↓ 一次就是下一个", async () => {
+  // 传入顺序故意把当前模型放在后面，验证"置顶 + 高亮"是真的成立而不是碰巧
+  await renderBar([SECOND, MODEL]);
+  await settle();
+  const trigger = buttonByText("Ornith-1.5-35B-Q4_K_M.gguf");
+  await act(async () => {
+    trigger!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  const options = inPopover<HTMLElement>('[role="option"]');
+  expect(options[0]!.textContent).toContain("Ornith-1.5-35B-Q4_K_M.gguf");
+  expect(options[0]!.getAttribute("aria-selected")).toBe("true");
+
+  // 键盘：↓ 移到第二条（另一个模型），回车即选中
+  const search = inPopover<HTMLInputElement>("input")[0]!;
+  await act(async () => {
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await act(async () => {
+    search.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(activeCalls).toEqual([SECOND.path]);
+});
+
+test("搜不到时给「没有匹配的模型」，不会误报成「还没有下载任何模型」", async () => {
+  await renderBar([MODEL, SECOND]);
+  await settle();
+  const trigger = buttonByText("Ornith-1.5-35B-Q4_K_M.gguf");
+  await act(async () => {
+    trigger!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const search = inPopover<HTMLInputElement>("input")[0]!;
+  await act(async () => {
+    typeInto(search, "llama-3");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(inPopover('[role="option"]').length).toBe(0);
+  expect(document.body.textContent).toContain("没有匹配的模型");
 });
 
 test("别的启动失败（不是引擎缺失）不挂安装按钮", async () => {

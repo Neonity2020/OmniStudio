@@ -438,6 +438,74 @@ describe("远端变化与旧格式", () => {
   }, 30_000);
 });
 
+describe("已下完的文件不再重下", () => {
+  /**
+   * ModelScope 对「起点已到文件末尾」的 Range 请求回 500（实测 73 字节的文件也如此），
+   * 而小文件走单流路径、续传请求正是 `Range: bytes=<本地长度>-` —— 于是"文件其实早就下好、
+   * 任务却挂着失败"会一直复发（每次重下都再失败一次）。本地体积与已知目标一致时直接当完成。
+   */
+  test("本地已是完整文件：一个请求都不发（越界 Range 会被服务端判 500）", async () => {
+    const size = 64 * 1024;
+    const data = makeData(size);
+    const { server, requests } = startServer({ data });
+    servers.push(server);
+    const dest = path.join(dir, "config.json");
+    writeFileSync(dest, data);
+
+    const progress: number[] = [];
+    const res = await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, {
+      total: size,
+      onProgress: (p) => progress.push(p.percent ?? -1),
+    });
+
+    expect(requests.total).toBe(0);
+    expect(res.size).toBe(size);
+    expect(progress).toEqual([100]);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  });
+
+  test("本地文件比目标小：照常续传，不会被当成已完成", async () => {
+    const size = 64 * 1024;
+    const data = makeData(size);
+    const { server, requests } = startServer({ data });
+    servers.push(server);
+    const dest = path.join(dir, "half.json");
+    writeFileSync(dest, data.slice(0, 1024));
+
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: size });
+    expect(requests.total).toBeGreaterThan(0);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  });
+
+  test("下到一半的多分片文件不走这条捷径（预分配过，体积就会等于目标）", async () => {
+    const data = makeData(BIG);
+    const { server, requests } = startServer({ data, chunkDelayMs: 5 });
+    servers.push(server);
+    const dest = path.join(dir, "big.safetensors");
+
+    const ac = new AbortController();
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, {
+      total: BIG,
+      signal: ac.signal,
+      onProgress: (p) => {
+        if (p.received > 0) ac.abort();
+      },
+    }).catch(() => undefined);
+
+    // 关键陷阱：分片路径会把最终文件预分配到目标大小，光看体积"已经下完了"。
+    expect(statSync(dest).size).toBe(BIG);
+    expect(readdirSync(dir).some((n) => n.includes(".part"))).toBe(true);
+
+    const before = requests.total;
+    expect(before).toBeGreaterThan(0);
+
+    // 续传必须真发请求（否则拿一个预分配的零文件当"已下完"），并且逐字节正确。
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: BIG });
+    expect(requests.total).toBeGreaterThan(before);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  }, 20_000);
+});
+
 describe("旁路数据管理", () => {
   test("removePartialFiles 清掉最终文件、分片与 sidecar", async () => {
     const data = makeData(BIG);

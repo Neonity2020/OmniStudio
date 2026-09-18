@@ -6,7 +6,7 @@ import { Badge } from "@ui/badge";
 import { useT } from "@stores/ui-lang";
 import { MODEL_SOURCE_META, engineSupports, fileBaseName, type MarketFile, type ModelSource } from "../../../shared/modelscope";
 import { ModelFormatBadge } from "@components/model-category-badge";
-import { installedFileNames } from "@/mainview/lib/installed-models";
+import { installedFilesForRepo } from "@/mainview/lib/installed-models";
 import { formatBytes } from "./parts";
 
 /**
@@ -38,8 +38,9 @@ export function FileRow({
   });
 
   // 已安装列表存的是文件名，仓库里的文件可能是 `BF16/xxx.gguf` 这样的子目录路径；
-  // 整仓库条目（一个仓库一条记录）的成员文件在 `files` 里，由 installedFileNames 摊平。
-  const installedPaths = installedFileNames(installedModels.data?.models ?? []);
+  // 整仓库条目（一个仓库一条记录）的成员文件在 `files` 里，由 installedFilesForRepo 摊平。
+  // 按仓库比对：别的仓库里的同名分片不算这个文件已下载（见该函数注释）。
+  const installedPaths = installedFilesForRepo(installedModels.data?.models ?? [], repo);
   const isInstalledHere = installedPaths.has(fileBaseName(file.name));
 
   const startMutation = useMutation({

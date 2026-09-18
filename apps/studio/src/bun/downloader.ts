@@ -820,6 +820,25 @@ async function downloadOnce(
     onProgress?.({ received, total, percent: null });
   };
 
+  // 本地已经是完整文件（体积与调用方给的一致，且没有分片 / 旁路数据）→ 直接当完成，不发请求。
+  //
+  // 为什么要专门判一下：小文件走单流路径，续传请求是 `Range: bytes=<本地长度>-`，而
+  // ModelScope 对「起点已到文件末尾」的区间直接回 **500**（实测 73 字节的文件也是这样），
+  // 于是早就下好的 config.json 每次重下都被记成「失败」，模型卡片因此永远挂着红字。
+  // 判据必须排除分片路径：那条路会把最终文件预分配到目标大小（`preallocate`），光看体积
+  // 的话下到一半的文件也"完整"；单流路径从不预分配，体积 == 目标就是真的下完了。
+  if (
+    opts.total != null &&
+    opts.total > 0 &&
+    sizeOf(destPath) === opts.total &&
+    partFilesOnDisk(destPath).length === 0 &&
+    !existsSync(sidecarPath(destPath))
+  ) {
+    totals.total = opts.total;
+    report(opts.total, opts.total, true);
+    return { path: destPath, size: opts.total };
+  }
+
   if (totals.total == null) {
     const probed = await probeRemote(url, opts.signal);
     totals.total = probed.total;

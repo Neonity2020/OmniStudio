@@ -1,35 +1,31 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2Icon, PlayIcon, AlertTriangleIcon, TerminalSquareIcon, FolderIcon } from "lucide-react";
+import { Loader2Icon, PlayIcon, AlertTriangleIcon, TerminalSquareIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useRouter } from "@stores/router";
 import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
-import { fileKind, engineSupports, type InstalledModel, type InferenceEngine } from "@/shared/modelscope";
+import { type InstalledModel, type InferenceEngine } from "@/shared/modelscope";
 import { engineSpec } from "@/shared/engines";
 import { isEngineMissingError, serverErrorHint } from "@/mainview/lib/server-error";
 import { EngineInstaller } from "@/mainview/app/setup-screen/engine-install";
-import { StartFailureDetails } from "@components/start-failure-details";
+import { ModelPicker } from "./model-picker";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
 // 启动条
 // ---------------------------------------------------------------------------
 
-/** 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。
- * 只列出当前引擎能加载的模型，避免在 MLX 下选到 GGUF 等不兼容文件。 */
+/**
+ * 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。
+ *
+ * 下拉列出**本机全部模型**（检索见 ModelPicker）：格式与当前引擎不符的照样能选 ——
+ * 启动时会自动把引擎切过去（见 setActiveModel），行上带「将自动切换引擎」提示；
+ * 「模型库」里那份清单也是这个口径。嵌入 / 重排模型由 ModelPicker 滤掉：
+ * 它们不能设为当前聊天模型（后端直接拒），列进来只会挤占聊天模型的列表。
+ */
 export function LaunchBar({ installedModels, engine }: { installedModels: InstalledModel[]; engine: InferenceEngine }) {
-  // 目录条目（HF 缓存里的整仓库）按它自己的格式判断兼容性，文件名没有扩展名。
-  // 启动条是聊天模型的启动器：嵌入 / 重排模型不能设为当前聊天模型（后端直接拒），
-  // 别把它们列进下拉框 —— 选了也设不上，还挤占聊天模型的列表。
-  const compatibleModels = installedModels.filter(
-    (m) =>
-      engineSupports(engine, m.kind) &&
-      m.category !== "embedding" &&
-      m.category !== "rerank",
-  );
   const t = useT();
   const queryClient = useQueryClient();
   const setRoute = useRouter((s) => s.setRoute);
@@ -89,41 +85,13 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
       <div className="flex flex-wrap items-end gap-2">
         <div className="flex min-w-64 flex-1 flex-col gap-1">
           <span className="text-[11px] text-muted-foreground">{t("models.chooseModel")}</span>
-          <Select
+          <ModelPicker
+            models={installedModels}
             value={activePath}
-            onValueChange={(v) => selectMutation.mutate(v)}
+            engine={engine}
+            onChange={(path) => selectMutation.mutate(path)}
             disabled={selectMutation.isPending || busy}
-          >
-            <SelectTrigger className="h-9 text-xs">
-              <SelectValue placeholder={t("models.chooseModelEmpty")} />
-            </SelectTrigger>
-            <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
-              {compatibleModels.map((m) => {
-                const kind = m.kind ?? fileKind(m.fileName);
-                return (
-                  <SelectItem key={m.path} value={m.path}>
-                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                      {m.isDir && (
-                        <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
-                      )}
-                      <span className="truncate">{m.fileName}</span>
-                    </span>
-                    <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground/70">
-                      {m.isActive && <span className="text-primary">{t("models.inUse")}</span>}
-                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
-                        {kind === "gguf"
-                          ? "GGUF"
-                          : kind === "safetensors"
-                            ? "safetensors"
-                            : t("models.format.other")}
-                      </span>
-                      <span className="max-w-44 truncate">{m.repo}</span>
-                    </span>
-                  </SelectItem>
-                );
-              })}
-            </SelectContent>
-          </Select>
+          />
         </div>
         <span
           className={cn(
@@ -151,10 +119,8 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
           )}
           {serverStatus === "running" ? t("models.restartServer") : t("models.launch")}
         </Button>
-        {/* 启动是后台进行的：进度 / 日志在控制台看，这里给个直达入口。
-            失败（startError）时也要留着 —— 那时实例可能还没建起来（status 仍是
-            stopped），恰恰是最需要看日志的时候，以前这个按钮会正好消失。 */}
-        {(startError || serverStatus !== "stopped") && (
+        {/* 启动是后台进行的：进度 / 日志在控制台看，这里给个直达入口。 */}
+        {serverStatus !== "stopped" && (
           <Button
             variant="outline"
             size="sm"
@@ -195,13 +161,6 @@ export function LaunchBar({ installedModels, engine }: { installedModels: Instal
             <span className="mt-1.5 size-0.5 shrink-0 rounded-full bg-destructive/50" />
             <span className="min-w-0 break-words">{startError}</span>
           </p>
-          {/* 失败时把「引擎版本 + 模型字节数 + 日志首条 error」直接摆出来（issue #16）：
-              这三样散在设置页里的时候，用户找不到也贴不出来。 */}
-          <StartFailureDetails
-            engine={engine}
-            model={compatibleModels.find((m) => m.path === activePath)}
-            servedId={servedForModel?.id}
-          />
         </div>
       )}
     </div>

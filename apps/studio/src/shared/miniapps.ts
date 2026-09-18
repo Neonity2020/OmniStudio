@@ -27,7 +27,8 @@ export type MiniAppIcon =
   | "audioLines"
   | "penLine"
   | "grid"
-  | "notebook";
+  | "notebook"
+  | "sticker";
 
 /**
  * 卡片封面的配色：同样只存名字。
@@ -36,7 +37,14 @@ export type MiniAppIcon =
  * 写在 `shared/` 里的 `from-violet-500/25` 不会被生成成 CSS —— 表现是封面一片空白，
  * 而且构建不报错。类串放 `mainview/app/apps/accents.ts`（扫描范围内），这里只管语义。
  */
-export type MiniAppAccent = "violet" | "sky" | "amber" | "emerald" | "indigo" | "rose";
+export type MiniAppAccent =
+  | "violet"
+  | "sky"
+  | "amber"
+  | "emerald"
+  | "indigo"
+  | "rose"
+  | "cyan";
 
 export interface MiniAppSpec {
   id: string;
@@ -163,6 +171,34 @@ export const MINIAPPS: MiniAppSpec[] = [
       "memo",
     ],
   },
+  {
+    id: "sticker",
+    nameKey: "miniapps.sticker.name",
+    descKey: "miniapps.sticker.desc",
+    category: "image",
+    icon: "sticker",
+    accent: "cyan",
+    // 模型在页面里自己选（本地 / 云端 → 厂商 → 模型），所以只要有**任何一个能用的
+    // 生图后端**就能进：云端支持参考图（照片 → 同一套表情），本地引擎只能文生图
+    //（按文字描述画同一套角色）—— 这个差别由宿主目录里的 supportsReference 说明，
+    // 页面据此切换"用照片"还是"用描述"，不是把它挡在门外。
+    // 合成 GIF 在本机做（sharp），不需要额外能力。
+    requires: ["image"],
+    keywords: [
+      "表情包",
+      "动态表情",
+      "动图",
+      "GIF",
+      "斗图",
+      "贴纸",
+      "头像",
+      "sticker",
+      "meme",
+      "gif",
+      "emoji",
+      "animated",
+    ],
+  },
 ];
 
 export function miniAppById(id: string): MiniAppSpec | undefined {
@@ -196,7 +232,10 @@ export type MiniAppAction =
   | "files.read"
   | "files.save"
   | "image.generate"
+  | "image.models"
+  | "image.stage"
   | "image.edit"
+  | "gif.make"
   | "bg.status"
   | "bg.download"
   | "bg.run"
@@ -279,8 +318,11 @@ export const MINIAPP_ACTIONS: Record<MiniAppAction, string> = {
   "files.pick": "打开系统文件选择框，返回真实路径",
   "files.read": "把刚选出来的文件读成 dataUrl（沙箱里没法直接显示本地路径）",
   "files.save": "把 dataUrl 存到下载目录，返回落盘路径",
-  "image.generate": "文生图，返回媒体 URL",
-  "image.edit": "以图改图（参考图必须是 files.pick 选出来的路径）",
+  "image.generate": "文生图（可指定 backend / providerId / model），返回媒体 URL",
+  "image.models": "读生图模型目录：本地 / 云端各有哪些、哪个能用、哪些后端支持参考图",
+  "image.stage": "把刚选出来的图暂存进数据目录，返回可预览地址与本会话的 ref",
+  "image.edit": "以图改图（参考图 = files.pick 选出来的路径，或 image.stage / 上一次改图给的 ref）",
+  "gif.make": "把若干张本会话产出的图按顺序合成 GIF（页面里没有编码器，合成在宿主里做）",
   "bg.status": "本地抠图：模型清单与下载状态",
   "bg.download": "本地抠图：下载某个模型的权重（首次使用需要）",
   "bg.run": "本地抠图：跑一次去背景，返回剪切图与掩膜 URL（源图必须是 files.pick 选出来的路径）",

@@ -265,7 +265,7 @@ const STATUS_RANK: Record<DownloadTask["status"], number> = {
  * 整模型聚合会把这两条都算进去：文件数虚高，而且一条陈旧的 failed 会让整个
  * 模型永远顶着「失败」，尽管文件其实已经下好了。
  */
-function dedupeByFile(tasks: readonly DownloadTask[]): DownloadTask[] {
+export function dedupeByFile(tasks: readonly DownloadTask[]): DownloadTask[] {
   const best = new Map<string, DownloadTask>();
   for (const task of tasks) {
     const cur = best.get(task.fileName);

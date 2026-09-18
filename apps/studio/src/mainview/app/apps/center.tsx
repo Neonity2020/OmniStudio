@@ -19,6 +19,7 @@ import {
   ScissorsIcon,
   SearchIcon,
   SparklesIcon,
+  StickerIcon,
   UserRoundIcon,
   XIcon,
 } from "lucide-react";
@@ -48,6 +49,7 @@ const ICONS: Record<MiniAppIcon, ReactNode> = {
   penLine: <PenLineIcon className="size-5" />,
   grid: <Grid3x3Icon className="size-5" />,
   notebook: <NotebookPenIcon className="size-5" />,
+  sticker: <StickerIcon className="size-5" />,
 };
 
 const CATEGORY_LABEL_KEY: Record<MiniAppCategory, string> = {

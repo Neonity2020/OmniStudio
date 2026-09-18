@@ -2,6 +2,15 @@
 //
 // 与 Agent 页的消息渲染是两条独立实现（Agent 侧多了工具时间轴 / 授权卡片 /
 // 产出物卡片）。这里只覆盖「普通对话」需要的部分。
+//
+// 版式取法 Cherry Studio 的对话面，三条规矩：
+//   1. 助手消息**不套卡片** —— 30px 头像 + 名称/模型一行，正文直接铺在列里。
+//      卡片边框会跟正文里的代码块、表格打架（两层容器套三层边框），而且助手一开口
+//      就是"一块"，读起来比对话更像通知。
+//   2. 用户消息是**浅色气泡**（bg-muted），不是主色实底 —— 满屏黑块把视觉重心全压在
+//      提问上，而读的是回答；头像在气泡右侧，气泡最宽到「列满 - 头像槽」。
+//   3. 操作条默认隐形，hover / 键盘聚焦才淡入，唯独最后一条助手消息常驻。行高按
+//      26px 预留，所以出现与消失都不会推着正文跳版。
 import { memo, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -14,7 +23,9 @@ import {
   Loader2Icon,
   NotebookPenIcon,
   RotateCcwIcon,
+  SparklesIcon,
   Trash2Icon,
+  UserRoundIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -23,7 +34,7 @@ import type { ChatMessage } from "../../../bun/chat";
 import { useChatStore } from "@stores/chat";
 import { useT, useUILang } from "@stores/ui-lang";
 import { Markdown } from "@components/markdown";
-import { AssistantHeader } from "@components/assistant-header";
+import { AssistantHeader, formatMessageTime } from "@components/assistant-header";
 import {
   usePiContextMenu,
   actionMenuItems,
@@ -40,16 +51,26 @@ import { cn } from "@/mainview/lib/utils";
 import { chatImageUrl } from "../../../shared/server-info";
 import { CitationBar } from "./citation-bar";
 
+/** 头像槽：两侧都用同一个尺寸，消息正文的左右起点才对得齐。 */
+const AVATAR_SLOT_CLASS = "flex size-[30px] shrink-0 items-center justify-center rounded-full";
+
+/** 操作条：默认隐形，hover 或键盘聚焦（focus-within）时淡入。 */
+const HOVER_REVEAL_CLASS =
+  "opacity-0 transition-opacity duration-150 focus-within:opacity-100 group-hover/message:opacity-100";
+
+/** 消息底部 meta 行：动作与时间/用量共用，26px 固定高度（出现时不挤动正文）。 */
+const FOOTER_ROW_CLASS = "mt-1 flex min-h-6.5 items-center gap-1.5 leading-none";
+
 function MessageImages({ images }: { images: string[] }) {
   if (images.length === 0) return null;
   return (
-    <div className="mb-2 flex flex-wrap gap-1.5">
+    <div className="flex max-w-full flex-wrap justify-end gap-1.5">
       {images.map((ref) => (
         <img
           key={ref}
           src={chatImageUrl(ref)}
           alt=""
-          className="max-h-44 max-w-full rounded-lg object-contain"
+          className="max-h-52 max-w-full rounded-xl object-contain"
         />
       ))}
     </div>
@@ -233,46 +254,26 @@ function useMessageActions({
   return { actions };
 }
 
-/** 消息下方的操作栏：复制 / 重新生成 / 翻译 / 删除 + 用量胶囊（动作与右键菜单同源）。 */
-function MessageActionBar({
-  actions,
-  message,
-  isStreamingMessage,
-}: {
-  actions: MessageActionItem[];
-  message: ChatMessage;
-  isStreamingMessage: boolean;
-}) {
+/**
+ * 操作条按钮：26px 命中区、圆角 6px、静息时完全透明（Cherry 的取法）。
+ * 生成中沿用「置灰而不是消失」：按钮忽隐忽现比置灰更像在闪。
+ */
+function MessageActionBar({ actions }: { actions: MessageActionItem[] }) {
   return (
-    <div
-      className={cn(
-        "mt-1.5 flex items-center gap-0.5",
-        message.role === "user" && "justify-end",
-      )}
-    >
+    <div className="flex items-center gap-1">
       {actions.map((item) => (
         <Button
           key={item.key}
           variant="ghost"
-          size="icon-sm"
+          size="icon-xs"
           tooltip={item.label}
           onClick={item.onSelect}
           disabled={item.disabled}
-          className="size-6 text-muted-foreground/80 hover:text-foreground"
+          className="size-6.5 rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           {item.icon}
         </Button>
       ))}
-      {/* 用量胶囊贴在右下角：图标是"对消息做什么"，它是"这次花了多少"，
-          两者分开看更清楚；生成中它还会实时跳速度。 */}
-      {message.role === "assistant" && (
-        <MessageTokenStats
-          message={message}
-          conversationId={message.conversationId}
-          streaming={isStreamingMessage}
-          className="ml-auto mr-1"
-        />
-      )}
     </div>
   );
 }
@@ -326,16 +327,19 @@ function AssistantTraceRow({
         onClick={() => setOpen((v) => !v)}
         title={open ? t("chat.traceExpanded") : t("chat.traceCollapsed")}
         className={cn(
-          "group flex w-full items-center gap-1.5 rounded-lg px-1 py-0.5 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
+          "group flex w-full items-center gap-1.5 rounded-lg px-1 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground",
           open && "text-foreground",
         )}
       >
         {streaming ? (
-          <Loader2Icon className="size-3 shrink-0 animate-spin" />
+          // 思考中给文字微光而不是转圈：它在"动"，但不像加载失败那样让人等。
+          <span className="chat-shimmer shrink-0 font-medium">{label}</span>
         ) : (
-          <BrainIcon className="size-3 shrink-0" />
+          <>
+            <BrainIcon className="size-3.5 shrink-0" />
+            <span className="shrink-0 font-medium">{label}</span>
+          </>
         )}
-        <span className="shrink-0 font-medium">{label}</span>
         {!open && (
           <span className="min-w-0 flex-1 truncate text-muted-foreground/60">
             {reasoning.replace(/\s+/g, " ").slice(0, 80)}
@@ -351,7 +355,7 @@ function AssistantTraceRow({
       {open && (
         <div
           ref={bodyRef}
-          className="mt-1 mb-1 max-h-48 overflow-y-auto border-l border-border/60 px-3 py-1 whitespace-pre-wrap text-xs leading-5 text-muted-foreground"
+          className="mt-1 mb-1 max-h-48 overflow-y-auto rounded-r-lg border-l-2 border-border bg-muted/30 px-3 py-2 whitespace-pre-wrap text-xs leading-5 text-muted-foreground"
         >
           {reasoning}
         </div>
@@ -361,7 +365,7 @@ function AssistantTraceRow({
 }
 
 /**
- * 「生成中…」那一行：转圈 + 已等待的秒数。
+ * 「生成中…」那一行：微光文字 + 已等待的秒数。
  *
  * 秒数必须在**一个 token 都还没出来**的静默期里继续走：模型加载、长提示词预填充、
  * 云端排队这几段能到几十秒，而这时界面上没有别的东西在动 —— 一行静止的转圈与
@@ -379,9 +383,8 @@ function GeneratingRow() {
   }, []);
   const elapsedMs = Math.max(0, now - (runStartedAt ?? mountedAt.current));
   return (
-    <div className="flex items-center gap-2 py-1 text-sm text-muted-foreground">
-      <Loader2Icon className="size-3.5 animate-spin" />
-      <span>{t("chat.generating")}</span>
+    <div className="flex items-center gap-2 py-1 text-sm">
+      <span className="chat-shimmer font-medium">{t("chat.generating")}</span>
       {/* 头一秒不报数：那一瞬间还没什么好等的，蹦一个「0 ms」反而像在报错。 */}
       {elapsedMs >= 1000 ? (
         <span className="text-xs tabular-nums text-muted-foreground/70">
@@ -392,43 +395,85 @@ function GeneratingRow() {
   );
 }
 
-function MessageBubble({
+/** 用户消息：附件 + 浅色气泡 + 右侧头像，meta 行（时间 + 操作）在气泡之下右对齐。 */
+function UserBubbleMessage({
   message,
+  actions,
+  alwaysShowActions,
+}: {
+  message: ChatMessage;
+  actions: MessageActionItem[];
+  alwaysShowActions: boolean;
+}) {
+  const images = message.images ?? [];
+  const hasText = message.content.trim().length > 0;
+
+  return (
+    <>
+      <div className="flex max-w-[calc(100%-2.5rem)] items-start justify-end gap-2.5">
+        <div className="flex min-w-0 flex-1 flex-col items-end gap-2">
+          <MessageImages images={images} />
+          {/* 只有附件没有文字时不留空气泡（empty:hidden 的等价物）。 */}
+          {hasText && (
+            <div className="max-w-full rounded-[10px] bg-muted px-4 py-2.5 text-sm leading-relaxed break-words whitespace-pre-wrap">
+              {message.content}
+            </div>
+          )}
+        </div>
+        <span
+          aria-hidden="true"
+          className={cn(AVATAR_SLOT_CLASS, "mt-1.5 bg-muted text-muted-foreground")}
+        >
+          <UserRoundIcon className="size-4" />
+        </span>
+      </div>
+      {/* 时间与操作整块淡入：气泡的位置永远不动，行高也一直占着。 */}
+      <div
+        className={cn(
+          FOOTER_ROW_CLASS,
+          "mr-[30px] w-[calc(100%-30px)] justify-end text-[10px] text-muted-foreground/70",
+        )}
+      >
+        <div className={cn("flex items-center gap-2", HOVER_REVEAL_CLASS, alwaysShowActions && "opacity-100")}>
+          <span className="shrink-0 tabular-nums">{formatMessageTime(message.createdAt)}</span>
+          <MessageActionBar actions={actions} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** 助手消息：头像 + 名称/模型 + 正文（无容器），meta 行左侧是操作、右侧是用量与时间。 */
+function AssistantPlainMessage({
+  message,
+  actions,
+  alwaysShowActions,
   isStreamingMessage,
   conversationModel,
 }: {
   message: ChatMessage;
+  actions: MessageActionItem[];
+  alwaysShowActions: boolean;
   isStreamingMessage: boolean;
-  /** 会话当前模型：历史消息没有统计时，头部仍然能标出它当时用的模型。 */
   conversationModel?: string;
 }) {
   const t = useT();
-  const { role, content, images, reasoning, citations } = message;
+  const { content, reasoning, citations } = message;
   // 后端把启动失败持久化为 "⚠️ <原始错误>"，这里补一行本地化的可操作提示。
-  const rawError = role === "assistant" ? persistedErrorMessage(content) : null;
+  const rawError = persistedErrorMessage(content);
   const errorHint = rawError !== null ? serverErrorHint(t, rawError) : null;
   // 这一轮的实测耗时（生成中是实时值）—— 轨迹行与用量卡片读的是同一份数据。
   const view = useTokenStatsView(message, isStreamingMessage);
-  // 操作条与右键菜单是同一批动作的两个入口。
-  const { actions } = useMessageActions({ message, isStreamingMessage });
-  const menu = usePiContextMenu(actionMenuItems(actions));
+  const hasBody = Boolean(content) || errorHint !== null;
 
   return (
-    <div
-      className={cn(
-        "flex flex-col",
-        role === "user" ? "items-end" : "items-start",
-      )}
-      onContextMenu={menu.onContextMenu}
-    >
-      {role === "user" ? (
-        <div className="max-w-[75%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-primary-foreground whitespace-pre-wrap">
-          <MessageImages images={images ?? []} />
-          {content}
-        </div>
-      ) : (
-        <div className="flex min-w-0 flex-col gap-1.5">
-          <AssistantHeader model={view?.model ?? conversationModel} createdAt={message.createdAt} />
+    <div className="flex w-full gap-2.5">
+      <span aria-hidden="true" className={cn(AVATAR_SLOT_CLASS, "bg-primary/10 text-primary")}>
+        <SparklesIcon className="size-4" />
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <AssistantHeader model={view?.model ?? conversationModel} />
+        <div className="mt-2 flex min-w-0 flex-col gap-2">
           {reasoning ? (
             <AssistantTraceRow
               reasoning={reasoning}
@@ -436,31 +481,89 @@ function MessageBubble({
               workedMs={view?.elapsedMs}
             />
           ) : null}
-          {/* 正文为空时不留空气泡：等首字时给一行"生成中"，出错给错误行，
-              其余情况什么都不画（之前会剩一条只有边框的空白条）。 */}
-          {content || errorHint ? (
-            <div className="max-w-[85%] rounded-2xl rounded-tl-md border bg-card px-4 py-2.5">
-              {content ? <Markdown content={content} /> : null}
-              {errorHint && (
-                <p className="mt-2 flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
-                  <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
-                  <span className="min-w-0 break-words">{errorHint}</span>
-                </p>
-              )}
-            </div>
-          ) : isStreamingMessage ? (
-            <GeneratingRow />
+          {content ? (
+            // 生成中交给 streamdown 的流式模式：半截的代码围栏 / 表格按未完成解析，
+            // 否则每来一个 token 都可能把下面的段落闪成另一个样子。
+            <Markdown content={content} mode={isStreamingMessage ? "streaming" : "static"} />
           ) : null}
+          {errorHint && (
+            <p className="flex items-start gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
+              <AlertTriangleIcon className="mt-0.5 size-3.5 shrink-0" />
+              <span className="min-w-0 break-words">{errorHint}</span>
+            </p>
+          )}
+          {/* 正文为空时不留空白：等首字给一行"生成中"，出错给错误行，其余什么都不画。 */}
+          {!hasBody && isStreamingMessage ? <GeneratingRow /> : null}
           {!isStreamingMessage && citations && citations.length > 0 && (
             <CitationBar citations={citations} />
           )}
         </div>
+        <div className={cn(FOOTER_ROW_CLASS, "justify-between")}>
+          <div className={cn(HOVER_REVEAL_CLASS, alwaysShowActions && "opacity-100")}>
+            <MessageActionBar actions={actions} />
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span
+              className={cn(
+                "text-[10px] tabular-nums text-muted-foreground/60",
+                "opacity-0 transition-opacity duration-150 group-hover/message:opacity-100",
+                alwaysShowActions && "opacity-100",
+              )}
+            >
+              {formatMessageTime(message.createdAt)}
+            </span>
+            {/* 用量胶囊贴在右下角：图标是"对消息做什么"，它是"这次花了多少"，
+                两者分开看更清楚；生成中它还会实时跳速度。 */}
+            <MessageTokenStats
+              message={message}
+              conversationId={message.conversationId}
+              streaming={isStreamingMessage}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MessageBubble({
+  message,
+  isStreamingMessage,
+  conversationModel,
+  alwaysShowActions = false,
+}: {
+  message: ChatMessage;
+  isStreamingMessage: boolean;
+  /** 会话当前模型：历史消息没有统计时，头部仍然能标出它当时用的模型。 */
+  conversationModel?: string;
+  /** 最后一条助手消息：操作条常驻（它是用户最可能马上要点的那个）。 */
+  alwaysShowActions?: boolean;
+}) {
+  const isUser = message.role === "user";
+  // 操作条与右键菜单是同一批动作的两个入口。
+  const { actions } = useMessageActions({ message, isStreamingMessage });
+  const menu = usePiContextMenu(actionMenuItems(actions));
+
+  return (
+    <div
+      className={cn("group/message w-full", isUser && "flex flex-col items-end")}
+      onContextMenu={menu.onContextMenu}
+    >
+      {isUser ? (
+        <UserBubbleMessage
+          message={message}
+          actions={actions}
+          alwaysShowActions={alwaysShowActions}
+        />
+      ) : (
+        <AssistantPlainMessage
+          message={message}
+          actions={actions}
+          alwaysShowActions={alwaysShowActions}
+          isStreamingMessage={isStreamingMessage}
+          conversationModel={conversationModel}
+        />
       )}
-      <MessageActionBar
-        actions={actions}
-        message={message}
-        isStreamingMessage={isStreamingMessage}
-      />
       {menu.node}
     </div>
   );

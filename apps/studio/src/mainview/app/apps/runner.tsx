@@ -22,6 +22,7 @@ import {
   RotateCwIcon,
   ScissorsIcon,
   SparklesIcon,
+  StickerIcon,
   UserRoundIcon,
 } from "lucide-react";
 
@@ -53,6 +54,7 @@ const ICONS: Record<MiniAppIcon, React.ReactNode> = {
   penLine: <PenLineIcon className="size-4" />,
   grid: <Grid3x3Icon className="size-4" />,
   notebook: <NotebookPenIcon className="size-4" />,
+  sticker: <StickerIcon className="size-4" />,
 };
 
 /** 能力缺口的文案：`图像修图（未配置）`。 */

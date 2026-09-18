@@ -134,6 +134,8 @@ const TASKS = [
 ];
 
 const startCalls: Array<{ fileName: string }> = [];
+/** 已安装列表（用例按需覆盖）—— 「下过没有」的判定全部从这里来。 */
+let installedModels: Array<{ repo: string; fileName: string; files?: string[] }> = [];
 mock.module("@lib/rpc", () => ({
   // 详情页会通过 use-engine / 已装列表 等拉设置与模型，未实现的统一给 ok。
   rpcClient: new Proxy(
@@ -142,7 +144,7 @@ mock.module("@lib/rpc", () => ({
       get(_target, prop: string) {
         if (prop === "listModelFiles") return async () => ({ files: FILES });
         if (prop === "getSettings") return async () => ({ settings: { INFERENCE_ENGINE: "vllm" } });
-        if (prop === "listInstalledModels") return async () => ({ models: [] });
+        if (prop === "listInstalledModels") return async () => ({ models: installedModels });
         if (prop === "listDownloads") return async () => ({ tasks: [] });
         if (prop === "startModelDownload") {
           return async (args: { fileName: string }) => {
@@ -277,7 +279,80 @@ test("模型级主操作：正在下时给暂停，并带一个整体进度条",
   }
 });
 
+/**
+ * 回归：别的仓库里的同名分片不能算这个仓库已下载。
+ *
+ * 真机事故 —— `model-00001-of-00002.safetensors` 这种分片名在几乎每个 safetensors
+ * 仓库里都一样，按文件名全局比对时，「下载整个模型」会把它们当成已下载而整个跳过，
+ * 落盘只剩 config / tokenizer：模型既跑不起来，也不会出现在「运行模型」的列表里。
+ */
+test("别的仓库下过的同名分片不算已下载：该模型照样从「下载整仓库」开始", async () => {
+  useModelDownloadStore.getState().setTasks([]);
+  startCalls.length = 0;
+  installedModels = [
+    {
+      repo: "mlx-community/Qwen3.5-4B-MLX-bf16",
+      fileName: "Qwen3.5-4B-MLX-bf16",
+      files: ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"],
+    },
+  ];
+  const screen = await renderScreen();
+  try {
+    const container = screen.container as unknown as HTMLElement;
+    const text = textOf(container as unknown as Element);
+    // 不能显示成「已下载」——这个仓库的两个分片其实一个都不在本地
+    expect(text).not.toContain("已下载");
+    expect(text).toContain("下载整仓库");
+
+    const start = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("下载整仓库"),
+    );
+    await act(async () => {
+      (start as unknown as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // 权重分片必须真的排进队列（丢的正是这两个）
+    expect(startCalls.map((c) => c.fileName)).toContain("model-00001-of-00002.safetensors");
+    expect(startCalls.map((c) => c.fileName)).toContain("model-00002-of-00002.safetensors");
+  } finally {
+    installedModels = [];
+    await screen.close();
+  }
+});
+
+/**
+ * 陈旧失败卡片：任务列表里只有几个小文件（一个失败、其余完成），权重从没排过队。
+ * 这时只「重试失败的文件」永远补不齐，必须把没排过队的文件一起补进队列。
+ */
+test("失败卡片能把从没排过队的文件一起补上（不是只重试失败文件）", async () => {
+  useModelDownloadStore.getState().setTasks([
+    TASKS[0]!,
+    TASKS[1]!,
+    { ...TASKS[2]!, status: "failed" as const },
+  ] as never);
+  startCalls.length = 0;
+  const screen = await renderScreen();
+  try {
+    const container = screen.container as unknown as HTMLElement;
+    const text = textOf(container as unknown as Element);
+    // 缺 1 个从没排过队的文件（另一个分片）+ 1 个失败的
+    expect(text).toContain("继续下载缺的 2 个文件");
+
+    const resume = [...container.querySelectorAll("button")].find((b) =>
+      (b.textContent ?? "").includes("继续下载缺的"),
+    );
+    await act(async () => {
+      (resume as unknown as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(startCalls.map((c) => c.fileName)).toEqual(["model-00002-of-00002.safetensors"]);
+  } finally {
+    await screen.close();
+  }
+});
+
 test("没有任务时给一个「下载整仓库」入口，一次把整模型排进队列", async () => {
+  installedModels = [];
   useModelDownloadStore.getState().setTasks([]);
   startCalls.length = 0;
   const screen = await renderScreen();

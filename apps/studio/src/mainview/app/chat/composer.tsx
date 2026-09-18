@@ -8,13 +8,13 @@ import {
   ArrowUpIcon,
   BookOpenIcon,
   CheckIcon,
+  CirclePauseIcon,
   FileTextIcon,
   GlobeIcon,
   ImagePlusIcon,
   LibraryIcon,
   Loader2Icon,
   PaperclipIcon,
-  SquareIcon,
   XIcon,
 } from "lucide-react";
 
@@ -35,6 +35,7 @@ import {
   DialogTitle,
 } from "@ui/dialog";
 import { useKbListQuery } from "../kb";
+import { CHAT_COLUMN_CLASS } from "./layout";
 
 export type ChatAttachment = { ref: string; url: string };
 export type ChatFileAttachment = { name: string; content: string };
@@ -255,14 +256,16 @@ export function ChatComposer({
     !streaming;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
+    <div className={cn(CHAT_COLUMN_CLASS, "flex flex-col gap-2")}>
       {notice}
 
-      {/* 大卡片式输入框：上方附件预览 + 多行输入区 + 底部工具条 */}
+      {/* 输入框是一整块圆角卡片：附件预览 + 多行输入 + 底部工具条。
+          20px 是本页最大的一个圆角：它跟消息列同宽、左边缘对齐，所以"输入框比消息更圆"
+          本身就是层级提示 —— 能写东西的那一块，看起来就该更"可按"。 */}
       <div
         className={cn(
-          "flex flex-col rounded-2xl border bg-card shadow-sm transition-colors",
-          "focus-within:border-primary/40 focus-within:shadow-md",
+          "flex flex-col rounded-[20px] border bg-card shadow-sm transition-[border-color,box-shadow]",
+          "focus-within:border-primary/30 focus-within:shadow-md",
         )}
       >
         {(attachments.length > 0 || fileAttachments.length > 0) && (
@@ -324,7 +327,7 @@ export function ChatComposer({
           rows={2}
         />
 
-        <div className="flex items-center gap-0.5 px-2.5 pb-2.5">
+        <div className="flex h-10 items-center gap-1 px-2 py-1">
           {/* 附件要开宿主机的原生文件对话框 —— 网页端（/chat）没有这条通道，
               按钮先不显示，免得点了没反应。浏览器直传附件是后续单独的一件事。 */}
           {!isRemoteClient() && (
@@ -396,31 +399,36 @@ export function ChatComposer({
           <div className="ml-auto flex min-w-0 items-center gap-1.5">
             <ModelPicker disabled={streaming} />
             {/* 生成中：发送键变「停止」。本地模型一轮能跑几分钟，以前唯一的出路是等
-                600s 超时或重启（Agent 页一直有停止，这里补齐同一件事）。 */}
+                600s 超时或重启（Agent 页一直有停止，这里补齐同一件事）。
+                两个键都是"一根主色 / 红色的笔画"，不填实底：输入端的主角是文字，
+                一个实心圆按钮会和消息列抢视觉重心。 */}
             {streaming ? (
               <Button
-                variant="outline"
-                size="icon-lg"
-                className="shrink-0 rounded-full"
+                variant="ghost"
+                size="icon-sm"
+                className="shrink-0 rounded-full text-destructive hover:bg-accent hover:text-destructive"
                 tooltip={t("chat.stop")}
                 onClick={onStop}
                 disabled={stopPending}
               >
-                <SquareIcon className="size-4" />
+                <CirclePauseIcon className="size-5" />
               </Button>
             ) : (
               <Button
-                variant="default"
-                size="icon-lg"
-                className="shrink-0 rounded-full"
+                variant="ghost"
+                size="icon-sm"
+                className={cn(
+                  "shrink-0 rounded-full hover:bg-accent",
+                  canSend ? "text-primary hover:text-primary" : "text-muted-foreground/40",
+                )}
                 tooltip={`${t("chat.send")} · ${t("chat.enterHint")}`}
                 onClick={handleSend}
                 disabled={!canSend || sendPending}
               >
                 {sendPending ? (
-                  <Loader2Icon className="size-4 animate-spin" />
+                  <Loader2Icon className="size-5 animate-spin" />
                 ) : (
-                  <ArrowUpIcon className="size-4" />
+                  <ArrowUpIcon className="size-5" />
                 )}
               </Button>
             )}

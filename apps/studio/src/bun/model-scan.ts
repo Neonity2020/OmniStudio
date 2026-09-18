@@ -52,6 +52,14 @@ export type ScannedModel = {
    * 只比对 `fileName` 会把仓库里的文件都当成没下载。
    */
   files?: string[];
+  /**
+   * 同一个仓库目录里的**非权重**文件（config.json / tokenizer / chat_template…）。
+   *
+   * 市场页的「下载整个模型」会连同这些文件一起下，判定"下过没有"时缺了它们就会
+   * 永远显示成还有几个文件没下（下完再点一次还是那几个），"已下载"永远亮不起来。
+   * 只服务于这个判定，不参与"哪些是能加载的权重"。
+   */
+  supportFiles?: string[];
   /** 下载来源平台（应用下载的模型由 .vllm-meta.json 提供，HF 缓存固定是 huggingface）。 */
   source?: ModelSource;
 };
@@ -230,9 +238,13 @@ function realKey(p: string): string {
 
 type WalkHit = { path: string; size: number };
 
-/** 递归收集一个目录下的权重文件；任意深度，符号链接也认，带成环与规模保护。 */
-function walkWeights(root: string): { files: WalkHit[]; truncated: boolean } {
+/**
+ * 递归收集一个目录下的权重文件（`files`）与其余非隐藏文件（`others`，市场页判定
+ * "这些配置文件下过没有"用）；任意深度，符号链接也认，带成环与规模保护。
+ */
+function walkWeights(root: string): { files: WalkHit[]; others: WalkHit[]; truncated: boolean } {
   const out: WalkHit[] = [];
+  const others: WalkHit[] = [];
   const seenReal = new Set<string>();
   let truncated = false;
 
@@ -262,12 +274,14 @@ function walkWeights(root: string): { files: WalkHit[]; truncated: boolean } {
         visit(full, depth + 1);
       } else if (isModelWeightExt(name)) {
         out.push({ path: full, size: st.size });
+      } else {
+        others.push({ path: full, size: st.size });
       }
     }
   };
 
   visit(root, 0);
-  return { files: out, truncated };
+  return { files: out, others, truncated };
 }
 
 /**
@@ -277,11 +291,11 @@ function walkWeights(root: string): { files: WalkHit[]; truncated: boolean } {
  * 命中仓库目录后不再往下走：里面的分片和子目录都属于同一个模型。
  */
 function walkModelTree(root: string): {
-  repos: { dir: string; files: WalkHit[] }[];
+  repos: { dir: string; files: WalkHit[]; others: WalkHit[] }[];
   files: WalkHit[];
   truncated: boolean;
 } {
-  const repos: { dir: string; files: WalkHit[] }[] = [];
+  const repos: { dir: string; files: WalkHit[]; others: WalkHit[] }[] = [];
   const files: WalkHit[] = [];
   const seenReal = new Set<string>();
   let truncated = false;
@@ -293,7 +307,7 @@ function walkModelTree(root: string): {
       // 有 config.json 但没有权重（只下了 tokenizer 之类）时不聚合，继续往下走
       if (found.files.length > 0) {
         truncated ||= found.truncated;
-        repos.push({ dir, files: found.files });
+        repos.push({ dir, files: found.files, others: found.others });
         return;
       }
     }
@@ -366,6 +380,7 @@ export function scanPlainDir(root: string, origin: ModelOrigin): ScannedModel[] 
     runtimeTarget: r.dir,
     isDir: true,
     files: r.files.map((f) => path.basename(f.path)),
+    supportFiles: r.others.map((f) => path.basename(f.path)),
   }));
 
   for (const e of fileEntries(files)) {
@@ -463,7 +478,7 @@ export function scanHfCache(hubDir: string): ScannedModel[] {
     if (!existsSync(snapshotsDir)) continue;
 
     // 多个 revision 时取权重最全的一个（按权重总大小、再按 mtime）。
-    const revisions: { dir: string; files: WalkHit[]; total: number; mtime: number }[] = [];
+    const revisions: { dir: string; files: WalkHit[]; others: WalkHit[]; total: number; mtime: number }[] = [];
     let revs: Dirent[];
     try {
       revs = readdirSync(snapshotsDir, { withFileTypes: true });
@@ -473,7 +488,7 @@ export function scanHfCache(hubDir: string): ScannedModel[] {
     for (const rev of revs) {
       if (!rev.isDirectory()) continue;
       const dir = path.join(snapshotsDir, rev.name);
-      const { files } = walkWeights(dir);
+      const { files, others } = walkWeights(dir);
       if (files.length === 0) continue;
       let mtime = 0;
       try {
@@ -481,7 +496,13 @@ export function scanHfCache(hubDir: string): ScannedModel[] {
       } catch {
         // ignore
       }
-      revisions.push({ dir, files, total: files.reduce((sum, f) => sum + f.size, 0), mtime });
+      revisions.push({
+        dir,
+        files,
+        others,
+        total: files.reduce((sum, f) => sum + f.size, 0),
+        mtime,
+      });
     }
     if (revisions.length === 0) continue;
     revisions.sort((a, b) => b.total - a.total || b.mtime - a.mtime);
@@ -504,6 +525,7 @@ export function scanHfCache(hubDir: string): ScannedModel[] {
       runtimeTarget: best.dir,
       isDir: true,
       files: best.files.map((f) => path.basename(f.path)),
+      supportFiles: best.others.map((f) => path.basename(f.path)),
       source: "huggingface",
     });
   }

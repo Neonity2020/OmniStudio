@@ -105,6 +105,20 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   help, the omni-doctor playbooks, whose left column matches raw error text) must name
   设置 → 云端模型 (厂商与密钥) / 设置 → 默认模型 (各场景用哪个模型) / 设置 → 模型引擎, not the
   retired names.
+- **"This file is already downloaded" is a question about a repo, never about a bare file name**:
+  the market's install check is `installedFilesForRepo(models, repo)`
+  (`mainview/lib/installed-models.ts`) and it must stay repo-scoped — repo ids are normalized
+  (`safeRepoId`, so the market's `org/repo` matches the on-disk `org__repo` dir and the HF-cache
+  `org/repo` entry) and a file only counts for *its own* repo. `model-00001-of-00002.safetensors`
+  is the same name in nearly every safetensors repo, so a global name set makes "download the whole
+  model" skip the real weights: the repo lands with config/tokenizer only, and since
+  `isRepoModelDir()` needs actual weights it then shows up nowhere — not in 运行模型 and not in the
+  market, which prints 已下载 (真机丢过 K2-Horizon-7B-Uno-oQ6e 的 5.0+2.5 GB 与
+  Qwen3.8-27B-4bit-MTP-MLX 的 ~16 GB). Two companions on the same path: `supportFiles` from the
+  scan (config / tokenizer) must be counted too, or a complete repo still shows "还有 N 个文件要下";
+  and a stale failed task must not stop the missing files from being enqueued — the download card's
+  action补队列（`models.continueDownload`）resumes failed tasks *and* starts files that were never
+  queued.
 - **Cloud models are picked as `provider → model`, never as a per-page URL + key**: image,
   image-edit, video, TTS, ASR, live-translate and VLM OCR each store only a provider id
   (`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / …) plus a model name; base URL and key come from
@@ -205,6 +219,26 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   `shared/backup.ts`'s `BACKUP_SCOPES`, and new media needs a `BACKUP_FILE_ROOTS` entry — files that
   match no root are silently skipped, and the `media` root is off by default (notes therefore have
   their own default-on scope plus a `note-images` root under `images/notes`).
+  Image work that spans several calls goes through `bun/miniapp-image.ts` (动态表情包:
+  照片 → 16 张贴纸 → GIF). Four invariants: a **session ref** — the host signs refs
+  (`image.stage`) and only accepts its own back (`image.edit`'s `ref`, `gif.make`'s frames),
+  per app id; without that, `ref` would be an interface for a sandboxed page to send any
+  image in the user's library to a cloud vendor. Staging is **cached per (app, path)** so a
+  16-piece pack copies the source photo once instead of sixteen times. **The model is picked
+  inside the page, from a host-owned catalog** (`omni.image.models`: what exists, what is
+  usable — MLX weights downloaded? provider key filled? — and `supportsReference` per
+  backend), because "which models exist" is knowledge only the main process has; the page
+  only reports its choice and `resolveMiniAppImageChoice` re-validates it (MLX presets only,
+  existing+configured providers, no `..` in a ComfyUI checkpoint name) while never writing the
+  user's saved image config. `supportsReference` is also what switches the prompts between
+  "redraw the person in this photo" (cloud) and "draw this described character" (local MLX /
+  ComfyUI, which are text-to-image only) — do not infer that from the backend name in the page.
+  GIF assembly happens **in the host** (sharp; frames are resized individually *before* `join`,
+  because resizing a joined animation silently collapses it to one page) and the page only
+  decides frame order — `S + reverse(S)[1:-1]`, where S starts with the source sticker itself in
+  reference mode, so loops join seamlessly for the price of two generated frames. Prompts live
+  in the page (`PROMPT` in `sticker.html`): base rules + style + per-sticker pose/caption,
+  because a pack is only a pack if every image is the same person in the same art style.
   To look at a page without booting the desktop app: `bun run --cwd apps/studio miniapps:preview`
   (the pages, with a stub host in a plain browser) and `miniapps:center` (the app center, rendered
   against the built stylesheet).

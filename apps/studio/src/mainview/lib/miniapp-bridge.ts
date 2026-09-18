@@ -101,7 +101,24 @@ export const MINIAPP_RUNTIME_SCRIPT = `
     },
     image: {
       generate: function (params) { return call('image.generate', params); },
+      // 生图模型目录（只读）：本地有哪些、云端各厂商有哪些、哪个现在能用，
+      // 以及每个后端支不支持参考图 —— 页面据此决定"用照片"还是"用文字描述"。
+      models: function () { return call('image.models'); },
+      // 把用户刚选出来的图暂存进数据目录，拿回一个可预览的地址与宿主签发的 ref。
+      // 之后所有改图都用这个 ref：同一张照片改 16 张不会重复暂存，生成结果也能
+      // 直接当下一帧的参考图（路径在沙箱里也用不了 —— 那是主进程的本地路径）。
+      stage: function (params) { return call('image.stage', params); },
+      // 以图改图。参考图给两种之一：
+      //   path —— 用户刚在系统对话框里选出来的文件路径（初次导入）；
+      //   ref  —— image.stage 或上一次改图返回的 ref（宿主只认本会话签发的那些）。
+      // backend / providerId / model 选填：给就是"这次用这个模型"，不写就按用户
+      // 在生图页保存的配置走（宿主会校验这三个值，页面不能乱传）。
       edit: function (params) { return call('image.edit', params); }
+    },
+    // 合成动图（GIF）。小应用里没有编码器，多帧由宿主用 sharp 合成后落盘，
+    // 返回一个可预览的媒体地址 —— 帧数 / 尺寸 / 每帧时长都在宿主侧再夹一遍。
+    gif: {
+      make: function (params) { return call('gif.make', params); }
     },
     // 本地抠图（去背景）。模型在主进程里跑，图片不出本机。
     //
@@ -472,21 +489,40 @@ async function runAction(
       return { path: result.path ?? "" };
     }
 
+    case "image.stage": {
+      const path = str(params.path, 4096).trim();
+      if (!path) throw new Error("缺少图片路径");
+      // 路径来自 iframe：主进程只放行用户刚在系统对话框里选出来的那些。
+      const result = await deps.call<{ ok: boolean; ref?: string; url?: string; error?: string }>(
+        "miniappStageImage",
+        { appId: deps.appId, path },
+      );
+      if (!result?.ok || !result.ref) throw new Error(result?.error || "图片暂存失败");
+      return { ref: result.ref, url: result.url ?? "" };
+    }
+
+    // 模型选择（backend / providerId / model）：页面只报"我选了什么"，取值合不合法
+    // 由主进程对着目录校验（MLX 只认预设、云端只认已配好的厂商……）。这一段只做
+    // 长度与类型的第一道修剪。
+    case "image.models": {
+      return await deps.call<unknown>("miniappImageModels", undefined);
+    }
+
     case "image.generate": {
       const prompt = str(params.prompt, MAX_TEXT).trim();
       if (!prompt) throw new Error("缺少提示词");
       const result = await deps.call<{ records?: ImageRecord[]; error?: string }>(
-        "generateImage",
+        "miniappImageGenerate",
         {
+          appId: deps.appId,
           prompt,
           negativePrompt: str(params.negativePrompt, MAX_TEXT) || undefined,
           width: num(params.width, 64, 4096, 1024),
           height: num(params.height, 64, 4096, 1024),
-          count: 1,
           seed: optionalNum(params.seed, 0, 2 ** 31 - 1),
-          // 小应用不该改写用户保存的生图配置（它给的是自己的预设参数）。
-          persistConfig: false,
-          source: "manual",
+          backend: str(params.backend, 20) || undefined,
+          providerId: str(params.providerId, 60) || undefined,
+          model: str(params.model, 120) || undefined,
         },
       );
       if (result?.error) throw new Error(result.error);
@@ -497,30 +533,65 @@ async function runAction(
 
     case "image.edit": {
       const path = str(params.path, 4096).trim();
+      const ref = str(params.ref, 300).trim();
       const prompt = str(params.prompt, MAX_TEXT).trim();
-      if (!path || !prompt) throw new Error("缺少参考图或提示词");
-      // 参考图必须先经系统文件对话框选出来（stageEditImage 只认用户亲手选过的路径）。
-      const staged = await deps.call<{ files?: { ref: string }[]; error?: string }>(
-        "stageEditImage",
-        { paths: [path] },
-      );
-      if (staged?.error) throw new Error(staged.error);
-      const ref = staged?.files?.[0]?.ref;
-      if (!ref) throw new Error("参考图暂存失败");
+      if ((!path && !ref) || !prompt) throw new Error("缺少参考图或提示词");
+      // 参考图的两种来源都由主进程把关：path 必须刚从系统文件对话框里选出来，
+      // ref 必须是本次会话里宿主签发给这个应用的（见 bun/miniapp-image.ts）。
       const result = await deps.call<{ records?: ImageRecord[]; error?: string }>(
-        "generateImage",
+        "miniappImageEdit",
         {
+          appId: deps.appId,
+          path: path || undefined,
+          ref: ref || undefined,
           prompt,
-          referenceImageRef: ref,
-          count: 1,
-          persistConfig: false,
-          source: "manual",
+          negativePrompt: str(params.negativePrompt, MAX_TEXT) || undefined,
+          seed: optionalNum(params.seed, 0, 2 ** 31 - 1),
+          backend: str(params.backend, 20) || undefined,
+          providerId: str(params.providerId, 60) || undefined,
+          model: str(params.model, 120) || undefined,
         },
       );
       if (result?.error) throw new Error(result.error);
       const image = toImageResult(result?.records);
       if (!image) throw new Error("处理失败：没有产出图片");
+      // ref 必须回给页面：它是这套里"下一张 / 下一帧"的参考图，也是合成 GIF 的输入。
       return image;
+    }
+
+    case "gif.make": {
+      const refs = Array.isArray(params.refs)
+        ? params.refs
+            .slice(0, 16)
+            .map((item) => str(item, 300).trim())
+            .filter((item) => item.length > 0)
+        : [];
+      if (refs.length < 2) throw new Error("至少要两帧才能合成动图");
+      const result = await deps.call<{
+        ok: boolean;
+        url?: string;
+        ref?: string;
+        width?: number;
+        height?: number;
+        bytes?: number;
+        frames?: number;
+        error?: string;
+      }>("miniappMakeGif", {
+        appId: deps.appId,
+        refs,
+        // 上下限与 bun/miniapp-image.ts 的 GIF_LIMITS 是同一套数字（那边是权威）。
+        delayMs: num(params.delayMs, 30, 2000, 120),
+        size: num(params.size, 96, 1024, 320),
+      });
+      if (!result?.ok) throw new Error(result?.error || "合成动图失败");
+      return {
+        url: result.url ?? "",
+        ref: result.ref ?? "",
+        width: result.width ?? 0,
+        height: result.height ?? 0,
+        bytes: result.bytes ?? 0,
+        frames: result.frames ?? refs.length,
+      };
     }
 
     case "bg.status": {

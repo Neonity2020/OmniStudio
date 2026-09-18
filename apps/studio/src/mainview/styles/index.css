@@ -316,6 +316,42 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* 对话 — 流式输出时的文字微光（「生成中…」「处理中 · N 秒」）            */
+/* ------------------------------------------------------------------ */
+/* 等的这几秒里界面上别的东西都不动，而行静止的转圈与"卡死"在观感上没区别。
+   只让亮度缓慢流过文字本身：不改宽度、不挪位置，所以它不会带动正在流的正文。 */
+@keyframes chat-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+.chat-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: chat-shimmer 2.4s linear infinite;
+  will-change: background-position;
+}
+/* 减弱动效偏好下退回静止的灰字：宁可少一个效果，也不给"看东西在闪"的人添麻烦。 */
+@media (prefers-reduced-motion: reduce) {
+  .chat-shimmer {
+    animation: none;
+    background-image: none;
+    color: var(--muted-foreground);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 语音合成 — 生成中的动画（跳动的频谱条）                                */
 /* ------------------------------------------------------------------ */
 @keyframes tts-eq {

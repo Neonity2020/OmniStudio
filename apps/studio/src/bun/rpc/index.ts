@@ -237,6 +237,9 @@ import * as MediaSetup from "../media-setup";
 import type { MediaSetupCandidate, MediaSetupPayload } from "../media-setup";
 import * as MiniApps from "../miniapps";
 import type { CompleteTextParams } from "../miniapps";
+import * as MiniAppImage from "../miniapp-image";
+import type { MakeGifResult, MiniAppImageCatalog } from "../miniapp-image";
+import { miniAppById } from "../../shared/miniapps";
 import type { MiniAppCapabilitySnapshot } from "../../shared/miniapps";
 import * as Notes from "../notes";
 import type { Note, NoteImage, NoteInput } from "../notes";
@@ -2947,6 +2950,52 @@ export type AppRPC = {
       miniappLog: {
         params: { appId: string; event: string; message?: string; detail?: unknown };
         response: { ok: boolean; dropped?: boolean };
+      };
+      // 小应用「以图改图」与「合成动图」：两者都带 appId，因为参考图 / 每一帧的 ref
+      // 只认宿主在同一次会话里签发给**这个应用**的那些（见 bun/miniapp-image.ts）。
+      miniappStageImage: {
+        params: { appId: string; path: string };
+        response: { ok: boolean; ref?: string; url?: string; error?: string };
+      };
+      // 模型由小应用自己选（本地 / 云端 → 厂商 → 模型），但**目录与校验在宿主**：
+      // 这里发一份只读目录给页面，页面只回报"我选了什么"。
+      miniappImageModels: {
+        params: undefined;
+        response: MiniAppImageCatalog;
+      };
+      // 参考图可以给"用户刚在对话框里选出来的路径"（path），也可以给本会话的 ref（ref）。
+      miniappImageEdit: {
+        params: {
+          appId: string;
+          path?: string;
+          ref?: string;
+          prompt: string;
+          negativePrompt?: string;
+          seed?: number;
+          backend?: ImageGenBackend;
+          providerId?: string;
+          model?: string;
+        };
+        response: { records: ImageRecordRow[]; error?: string };
+      };
+      /** 不用参考图的纯文生图（本地引擎走这条；模型同样可选）。 */
+      miniappImageGenerate: {
+        params: {
+          appId: string;
+          prompt: string;
+          negativePrompt?: string;
+          width?: number;
+          height?: number;
+          seed?: number;
+          backend?: ImageGenBackend;
+          providerId?: string;
+          model?: string;
+        };
+        response: { records: ImageRecordRow[]; error?: string };
+      };
+      miniappMakeGif: {
+        params: { appId: string; refs: string[]; delayMs?: number; size?: number };
+        response: MakeGifResult;
       };
       // 小应用「笔记」：正文在主库、附件在数据目录。小应用自己没有存储
       //（沙箱 iframe 里 localStorage 不存在），所以这四个方法是它唯一的落点。
@@ -6250,6 +6299,189 @@ const rpcRequests: NonNullable<
   },
 
   miniappLog: async (params) => MiniApps.logFromMiniApp(params),
+
+  // 小应用「暂存参考图」：用户刚在对话框里选出来的路径 → 数据目录里的一份副本 +
+  // 可预览地址 + 本会话的 ref。之后"同一张照片改 16 张"和"拿生成结果做下一帧"
+  // 都用这个 ref，不必重复暂存、也不必再走一次文件对话框。
+  miniappStageImage: async ({ appId, path: filePath }) => {
+    const app = miniAppById(String(appId ?? "").trim());
+    if (!app) {
+      logEvent({
+        level: "warn",
+        source: "miniapp",
+        event: "miniapp.stage.rejected",
+        message: "未知的小应用 id",
+        detail: { appId: String(appId ?? "").slice(0, 60) },
+      });
+      return { ok: false, error: "未知的小应用" };
+    }
+    const accepted = acceptedDialogPaths("miniapp", "miniapp.stage.rejected", [
+      String(filePath ?? "").trim(),
+    ]);
+    if (accepted.length === 0) return { ok: false, error: pathNotPickedMessage() };
+    return await MiniAppImage.stageMiniAppSource(app.id, accepted[0]!);
+  },
+
+  // 小应用「生图模型目录」：页面自己选模型（本地 / 云端 → 厂商 → 模型），
+  // 但"有哪些、哪个能用"只有主进程知道，所以目录从宿主发过去。只读，不写设置。
+  miniappImageModels: async () => MiniAppImage.listMiniAppImageModels(),
+
+  // 小应用「以图改图」：参考图要么是用户刚在对话框里选的路径（照 OCR / 文档导入的判据），
+  // 要么是宿主在本次会话里签发给它的 ref。两条都过之后才交给生图管线，
+  // 且产出立刻登记进会话 —— 页面要拿它继续做动图。
+  miniappImageEdit: async ({
+    appId,
+    path: filePath,
+    ref,
+    prompt,
+    negativePrompt,
+    seed,
+    backend,
+    providerId,
+    model,
+  }) => {
+    const app = miniAppById(String(appId ?? "").trim());
+    if (!app) {
+      logEvent({
+        level: "warn",
+        source: "miniapp",
+        event: "miniapp.edit.rejected",
+        message: "未知的小应用 id",
+        detail: { appId: String(appId ?? "").slice(0, 60) },
+      });
+      return { records: [], error: "未知的小应用" };
+    }
+
+    // 页面选的模型过一遍宿主校验（MLX 只认预设、云端只认已配好的厂商……）。
+    const choice = MiniAppImage.resolveMiniAppImageChoice({ backend, providerId, model });
+    if (!choice.ok) {
+      logEvent({
+        level: "warn",
+        source: "miniapp",
+        event: "miniapp.edit.rejected",
+        message: choice.error,
+        detail: { appId: app.id, backend, providerId, model },
+      });
+      return { records: [], error: choice.error };
+    }
+    if (!choice.supportsReference) {
+      return { records: [], error: "这个模型不支持参考图（以图改图），请换一个云端生图模型" };
+    }
+
+    let reference = String(ref ?? "").trim();
+    if (reference) {
+      if (!MiniAppImage.isSessionMiniAppRef(app.id, reference)) {
+        logEvent({
+          level: "warn",
+          source: "miniapp",
+          event: "miniapp.edit.rejected",
+          message: "参考图不是本次会话产出的 ref",
+          detail: { appId: app.id, ref: reference.slice(0, 120) },
+        });
+        return { records: [], error: "参考图已失效，请重新选择或重新生成" };
+      }
+    } else {
+      const accepted = acceptedDialogPaths("miniapp", "miniapp.edit.rejected", [
+        String(filePath ?? "").trim(),
+      ]);
+      if (accepted.length === 0) return { records: [], error: pathNotPickedMessage() };
+      const staged = await MiniAppImage.stageMiniAppSource(app.id, accepted[0]!);
+      if (!staged.ok) return { records: [], error: staged.error };
+      reference = staged.ref;
+    }
+
+    const result = await ImageGen.generateImage({
+      prompt,
+      negativePrompt,
+      seed,
+      referenceImageRef: reference,
+      count: 1,
+      config: choice.config,
+      // 小应用给的是它自己的预设参数，不该改写用户在生图页保存的配置。
+      persistConfig: false,
+      source: "manual",
+    });
+    for (const record of result.records) {
+      if (record.imagePath) MiniAppImage.rememberMiniAppRef(app.id, record.imagePath);
+    }
+    return result;
+  },
+
+  // 小应用「文生图」：本地引擎（MLX / ComfyUI）没有参考图能力，走这条；
+  // 模型选择与 edit 同一套校验、同一条"不改写用户配置"的规矩。
+  miniappImageGenerate: async ({
+    appId,
+    prompt,
+    negativePrompt,
+    width,
+    height,
+    seed,
+    backend,
+    providerId,
+    model,
+  }) => {
+    const app = miniAppById(String(appId ?? "").trim());
+    if (!app) {
+      logEvent({
+        level: "warn",
+        source: "miniapp",
+        event: "miniapp.generate.rejected",
+        message: "未知的小应用 id",
+        detail: { appId: String(appId ?? "").slice(0, 60) },
+      });
+      return { records: [], error: "未知的小应用" };
+    }
+    const choice = MiniAppImage.resolveMiniAppImageChoice({ backend, providerId, model });
+    if (!choice.ok) {
+      logEvent({
+        level: "warn",
+        source: "miniapp",
+        event: "miniapp.generate.rejected",
+        message: choice.error,
+        detail: { appId: app.id, backend, providerId, model },
+      });
+      return { records: [], error: choice.error };
+    }
+    const result = await ImageGen.generateImage({
+      prompt,
+      negativePrompt,
+      width,
+      height,
+      seed,
+      count: 1,
+      config: choice.config,
+      persistConfig: false,
+      source: "manual",
+    });
+    for (const record of result.records) {
+      if (record.imagePath) MiniAppImage.rememberMiniAppRef(app.id, record.imagePath);
+    }
+    return result;
+  },
+
+  // 小应用「合成动图」：多帧由 sharp 合成（页面里没有编码器），帧只认本次会话的 ref。
+  miniappMakeGif: async ({ appId, refs, delayMs, size }) => {
+    const app = miniAppById(String(appId ?? "").trim());
+    if (!app) {
+      logEvent({
+        level: "warn",
+        source: "miniapp",
+        event: "miniapp.gif.rejected",
+        message: "未知的小应用 id",
+        detail: { appId: String(appId ?? "").slice(0, 60) },
+      });
+      return { ok: false, error: "未知的小应用" };
+    }
+    const result = await MiniAppImage.makeMiniAppGif({
+      appId: app.id,
+      refs: Array.isArray(refs) ? refs.slice(0, 24).map((r) => String(r)) : [],
+      delayMs,
+      size,
+    });
+    // 动图本身也是这个应用的产物：存回会话，方便它接着拿这一张继续做（GIF 转表情等）。
+    if (result.ok && result.ref) MiniAppImage.rememberMiniAppRef(app.id, result.ref);
+    return result;
+  },
 
   // 小应用「笔记」：正文进主库、附件进数据目录（见 bun/notes.ts）。
   // 列表把统计一起带回去，省掉小应用自己数一遍（也让它没有"该信哪个数"的分歧）。

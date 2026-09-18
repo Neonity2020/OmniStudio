@@ -364,7 +364,10 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     baseUrl: "https://api.openai.com/v1",
     section: "global",
     apiKeyUrl: "https://platform.openai.com/api-keys",
-    models: ["gpt-5", "gpt-5-mini"],
+    // 生图模型也列在这里：这张清单是"这家厂商提供什么"的目录，各功能页按用途分类
+    // 过滤（生图页只看 type = image 的那几条）。不列的话用户得自己知道 gpt-image-2
+    // 这个 id，才能手工填进生图页的模型框。
+    models: ["gpt-5", "gpt-5-mini", "gpt-image-2", "gpt-image-1"],
     note: "需海外网络环境与境外支付方式",
     color: "#10a37f",
   },

@@ -14,6 +14,7 @@ export const ACCENT_CLASS: Record<MiniAppAccent, string> = {
   emerald: "from-emerald-500/30 to-teal-500/10",
   indigo: "from-indigo-500/30 to-blue-500/10",
   rose: "from-rose-500/30 to-amber-500/10",
+  cyan: "from-cyan-500/30 to-blue-500/10",
 };
 
 /** 封面底色：`bg-gradient-to-br` + 上面那对色标。 */

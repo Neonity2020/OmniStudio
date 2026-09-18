@@ -64,6 +64,24 @@ function makeDeps(overrides: Partial<MiniAppHostDeps> = {}) {
         bytes: 1200,
       },
     },
+    miniappStageImage: { ok: true, ref: "edit/in/a.png", url: "http://127.0.0.1:19782/edit/in/a.png" },
+    miniappImageModels: {
+      current: { backend: "api", providerId: "openai", model: "gpt-image-2" },
+      cloud: [{ providerId: "openai", name: "OpenAI", models: [{ id: "gpt-image-2", label: "gpt-image-2", ready: true }] }],
+      local: [{ backend: "mlx", label: "MLX", models: [{ id: "z-image-turbo", label: "Z-Image Turbo", ready: true }] }],
+      supportsReference: { api: true, mlx: false, comfyui: false },
+    },
+    miniappImageGenerate: { records: [{ imagePath: "gen/text.png", width: 1024, height: 1024 }] },
+    miniappImageEdit: { records: [{ imagePath: "gen/sticker.png", width: 1024, height: 1024 }] },
+    miniappMakeGif: {
+      ok: true,
+      ref: "sticker/g1.gif",
+      url: "http://127.0.0.1:19782/sticker/g1.gif",
+      width: 320,
+      height: 320,
+      bytes: 51_200,
+      frames: 4,
+    },
     bgRemoveRun: {
       cutout: { ref: "bgremove/x-cutout.png", url: "http://127.0.0.1:19782/bgremove/x-cutout.png" },
       mask: { ref: "bgremove/x-mask.png", url: "http://127.0.0.1:19782/bgremove/x-mask.png" },
@@ -78,7 +96,11 @@ function makeDeps(overrides: Partial<MiniAppHostDeps> = {}) {
     appId: "bg-remove",
     call: async <T,>(method: string, params?: unknown) => {
       calls.push({ method, params });
-      if (method === "generateImage" && (params as { prompt?: string })?.prompt === "boom") {
+      // "boom" 用来模拟上游生图失败：文生图与改图两条路都要能被它打到
+      if (
+        (method === "miniappImageGenerate" || method === "miniappImageEdit") &&
+        (params as { prompt?: string })?.prompt === "boom"
+      ) {
         return { records: [], error: "模型炸了" } as T;
       }
       if (method === "transcribeAudio" && String((params as { wavBase64?: string })?.wavBase64).startsWith("BAD")) {
@@ -121,24 +143,44 @@ test("认不出来的动作一律拒绝，并写一条 app.log", async () => {
   expect(calls.map((c) => c.method)).toEqual(["miniappLog"]);
 });
 
-test("image.generate 夹取尺寸并禁止改写用户的生图配置", async () => {
+test("image.models 把宿主目录原样递给页面（页面据此画选择器）", async () => {
+  const { deps, calls } = makeDeps();
+  const res = await dispatchMiniAppRequest(request("image.models"), deps);
+  expect(res.ok).toBe(true);
+  expect(calls.map((c) => c.method)).toEqual(["miniappImageModels"]);
+  expect((res.result as { supportsReference: { mlx: boolean } }).supportsReference.mlx).toBe(false);
+});
+
+test("image.generate 夹取尺寸、带上模型选择、经 miniappImageGenerate 走文生图", async () => {
   const { deps, calls } = makeDeps();
   const res = await dispatchMiniAppRequest(
-    request("image.generate", { prompt: "一只猫", width: 99999, height: -5, seed: 12 }),
+    request("image.generate", {
+      prompt: "一只猫",
+      width: 99999,
+      height: -5,
+      seed: 12,
+      backend: "mlx",
+      model: "z-image-turbo",
+    }),
     deps,
   );
   expect(res.ok).toBe(true);
-  const call = calls.find((c) => c.method === "generateImage");
-  expect(call?.params).toMatchObject({
+  expect(calls.map((c) => c.method)).toEqual(["miniappImageGenerate"]);
+  expect(calls[0]?.params).toMatchObject({
+    appId: "bg-remove",
     prompt: "一只猫",
     width: 4096,
     height: 64,
     seed: 12,
-    count: 1,
-    persistConfig: false,
+    // 模型由页面选，但只是"报上来"：值合不合法由主进程对着目录校验
+    backend: "mlx",
+    model: "z-image-turbo",
   });
-  expect(res.result).toMatchObject({ ref: "gen/a.png", width: 1024 });
-  expect(String((res.result as { url: string }).url)).toContain("gen/a.png");
+  // persistConfig / count 这些不再由页面带：改写用户配置这件事已经收在宿主那一侧
+  const sent = (calls[0]?.params ?? {}) as Record<string, unknown>;
+  expect("persistConfig" in sent).toBe(false);
+  expect("count" in sent).toBe(false);
+  expect(res.result).toMatchObject({ ref: "gen/text.png", width: 1024 });
 });
 
 test("image.generate 缺提示词直接拒，不打扰主进程", async () => {
@@ -155,16 +197,43 @@ test("模型返回错误时把错误交给小应用，而不是当成成功", as
   expect(res.error).toBe("模型炸了");
 });
 
-test("image.edit 先暂存参考图再用它生图", async () => {
+test("image.edit 把参考图（路径或 ref）交给主进程把关，并带回 ref", async () => {
   const { deps, calls } = makeDeps();
-  const res = await dispatchMiniAppRequest(
+  const byPath = await dispatchMiniAppRequest(
     request("image.edit", { path: "/Users/me/a.png", prompt: "换成白底" }),
     deps,
   );
-  expect(res.ok).toBe(true);
-  expect(calls.map((c) => c.method)).toEqual(["stageEditImage", "generateImage"]);
-  expect(calls[0]?.params).toEqual({ paths: ["/Users/me/a.png"] });
-  expect(calls[1]?.params).toMatchObject({ referenceImageRef: "edit/in/a.png", persistConfig: false });
+  expect(byPath.ok).toBe(true);
+  expect(calls.map((c) => c.method)).toEqual(["miniappImageEdit"]);
+  expect(calls[0]?.params).toMatchObject({
+    appId: "bg-remove",
+    path: "/Users/me/a.png",
+    prompt: "换成白底",
+  });
+
+  // 第二张开始给 ref（同一张照片改一套表情）：不该再碰文件路径
+  const { deps: deps2, calls: calls2 } = makeDeps();
+  const byRef = await dispatchMiniAppRequest(
+    request("image.edit", {
+      ref: "gen/sticker.png",
+      prompt: "第二张",
+      negativePrompt: "水印",
+      backend: "api",
+      providerId: "openai",
+      model: "gpt-image-2",
+    }),
+    deps2,
+  );
+  expect(byRef.ok).toBe(true);
+  expect(calls2[0]?.params).toMatchObject({
+    ref: "gen/sticker.png",
+    negativePrompt: "水印",
+    backend: "api",
+    providerId: "openai",
+    model: "gpt-image-2",
+  });
+  // ref 必须回给页面：它是下一张 / 动图的参考图
+  expect((byRef.result as { ref: string }).ref).toBe("gen/sticker.png");
 });
 
 test("image.edit 要求参考图与提示词都在", async () => {
@@ -172,6 +241,45 @@ test("image.edit 要求参考图与提示词都在", async () => {
   const res = await dispatchMiniAppRequest(request("image.edit", { path: "/a.png" }), deps);
   expect(res.ok).toBe(false);
   expect(calls.map((c) => c.method)).toEqual(["miniappLog"]);
+});
+
+test("image.stage 把路径交给宿主暂存，拿回可预览地址与 ref", async () => {
+  const { deps, calls } = makeDeps();
+  const res = await dispatchMiniAppRequest(request("image.stage", { path: "/Users/me/a.png" }), deps);
+  expect(res.ok).toBe(true);
+  expect(calls[0]).toEqual({ method: "miniappStageImage", params: { appId: "bg-remove", path: "/Users/me/a.png" } });
+  expect(res.result).toEqual({ ref: "edit/in/a.png", url: "http://127.0.0.1:19782/edit/in/a.png" });
+
+  const missing = await dispatchMiniAppRequest(request("image.stage", {}), deps);
+  expect(missing.ok).toBe(false);
+});
+
+test("gif.make 夹住帧数 / 尺寸 / 时长，并回媒体地址", async () => {
+  const { deps, calls } = makeDeps();
+  const res = await dispatchMiniAppRequest(
+    request("gif.make", {
+      refs: ["gen/a.png", "gen/b.png", "gen/a.png"],
+      size: 99999,
+      delayMs: 1,
+    }),
+    deps,
+  );
+  expect(res.ok).toBe(true);
+  expect(calls[0]?.method).toBe("miniappMakeGif");
+  expect(calls[0]?.params).toEqual({
+    appId: "bg-remove",
+    refs: ["gen/a.png", "gen/b.png", "gen/a.png"],
+    // 与 bun/miniapp-image.ts 的 GIF_LIMITS 是同一套数字
+    size: 1024,
+    delayMs: 30,
+  });
+  expect(res.result).toMatchObject({ url: "http://127.0.0.1:19782/sticker/g1.gif", frames: 4 });
+
+  // 少于两帧合成不了动图：本地就拒，不白跑一趟 IPC
+  const { deps: deps2, calls: calls2 } = makeDeps();
+  const tooFew = await dispatchMiniAppRequest(request("gif.make", { refs: ["gen/a.png"] }), deps2);
+  expect(tooFew.ok).toBe(false);
+  expect(calls2.map((c) => c.method)).toEqual(["miniappLog"]);
 });
 
 test("bg.status 递出模型清单，localBytes 必须留着（下载进度靠它轮询）", async () => {

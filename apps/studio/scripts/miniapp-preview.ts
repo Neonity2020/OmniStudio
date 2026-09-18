@@ -119,6 +119,90 @@ async function stubCutoutPair(): Promise<{ source: string; mask: string }> {
 
 const CUTOUT_PAIR = await stubCutoutPair();
 
+/**
+ * 表情占位图：一张照片改一套表情，预览里如果 16 格全是同一张图，就看不出网格、
+ * 悬停操作与"哪张是哪张"的差别了 —— 所以这里按情绪序号变个色、加个编号。
+ */
+async function stubStickers(): Promise<string[]> {
+  const out: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    const hue = (i * 47) % 360;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512">
+<rect width="512" height="512" fill="#f8fafc"/>
+<circle cx="256" cy="240" r="150" fill="hsl(${hue} 78% 66%)"/>
+<circle cx="205" cy="215" r="18" fill="#1f2937"/><circle cx="307" cy="215" r="18" fill="#1f2937"/>
+<path d="M186 296q70 56 140 0" stroke="#1f2937" stroke-width="14" fill="none" stroke-linecap="round"/>
+<text x="256" y="470" text-anchor="middle" font-family="system-ui" font-size="40" fill="#64748b">sticker ${i + 1}</text>
+</svg>`;
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    out.push(`data:image/png;base64,${png.toString("base64")}`);
+  }
+  return out;
+}
+
+/** 真动画 GIF（sharp 合成）：预览里"转成 GIF"要能看到真的在动。 */
+async function stubGif(): Promise<string> {
+  const frames: Buffer[] = [];
+  for (let i = 0; i < 4; i++) {
+    const offset = Math.round(Math.sin((i / 4) * Math.PI * 2) * 26);
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256">
+<rect width="256" height="256" fill="#ffffff"/>
+<circle cx="${128 + offset}" cy="${128 + Math.round(offset / 3)}" r="76" fill="#f472b6"/>
+<circle cx="${104 + offset}" cy="108" r="10" fill="#1f2937"/><circle cx="${152 + offset}" cy="108" r="10" fill="#1f2937"/>
+<path d="M${96 + offset} 150q32 26 64 0" stroke="#1f2937" stroke-width="8" fill="none" stroke-linecap="round"/>
+</svg>`;
+    frames.push(
+      await sharp(Buffer.from(svg)).resize(256, 256, { fit: "contain", background: "#ffffff" }).png().toBuffer(),
+    );
+  }
+  const gif = await sharp(frames, { join: { animated: true } })
+    .gif({ delay: frames.map(() => 120), loop: 0, colours: 128, effort: 3 })
+    .toBuffer();
+  return `data:image/gif;base64,${gif.toString("base64")}`;
+}
+
+const STUB_STICKERS = await stubStickers();
+const STUB_GIF = await stubGif();
+
+/**
+ * 生图模型目录的假数据：预览里要把四种状态都摆出来 ——
+ * 云端可用、云端缺 Key、本地已下载、本地未下载（外加一个 ComfyUI 分组）。
+ */
+const STUB_MODELS = {
+  current: { backend: "api", providerId: "openai", model: "gpt-image-2" },
+  cloud: [
+    {
+      providerId: "openai",
+      name: "OpenAI",
+      models: [
+        { id: "gpt-image-2", label: "gpt-image-2", ready: true },
+        { id: "gpt-image-1", label: "gpt-image-1", ready: true },
+      ],
+    },
+    {
+      providerId: "siliconflow",
+      name: "硅基流动",
+      models: [{ id: "Kwai-Kolors/Kolors", label: "Kwai-Kolors/Kolors", note: "未填 API Key", ready: false }],
+    },
+  ],
+  local: [
+    {
+      backend: "mlx",
+      label: "MLX",
+      models: [
+        { id: "z-image-turbo", label: "Z-Image Turbo (6B)", ready: true },
+        { id: "flux-schnell", label: "FLUX.1 Schnell (12B)", note: "未下载 · 约 24GB", ready: false },
+      ],
+    },
+    {
+      backend: "comfyui",
+      label: "ComfyUI",
+      models: [{ id: "sd_xl_base_1.0.safetensors", label: "sd_xl_base_1.0.safetensors", ready: true }],
+    },
+  ],
+  supportsReference: { api: true, mlx: false, comfyui: false },
+};
+
 /** 浏览器内的假宿主：协议与真宿主一致，只是动作换成固定结果。 */
 const HOST_STUB = `
 (function () {
@@ -129,7 +213,12 @@ const HOST_STUB = `
   var AUDIO = ${JSON.stringify(STUB_AUDIO)};
   var CUTOUT_SOURCE = ${JSON.stringify(CUTOUT_PAIR.source)};
   var CUTOUT_MASK = ${JSON.stringify(CUTOUT_PAIR.mask)};
+  var STICKERS = ${JSON.stringify(STUB_STICKERS)};
+  var MODELS = ${JSON.stringify(STUB_MODELS)};
+  var GIF = ${JSON.stringify(STUB_GIF)};
   var lastPick = '';
+  // 每次改图换一张占位图：预览里要看得出"16 格是 16 张不同的图"
+  var editCount = 0;
   // 笔记的假数据：让列表 / 日历 / 标签 / 附件四个视图在预览里都有东西可看。
   // 真宿主把正文写进主库、附件写进数据目录，这里只存在内存里（刷新即回到初值）。
   var NOTES = [
@@ -182,8 +271,27 @@ const HOST_STUB = `
           console.log('[preview] save', p.name);
           return reply(msg.id, { path: '/Downloads/' + p.name });
         case 'image.generate':
-        case 'image.edit':
           return reply(msg.id, { url: IMAGE, ref: 'gen/preview.png', width: 512, height: 640 });
+        case 'image.models':
+          return reply(msg.id, MODELS);
+        case 'image.stage':
+          // 暂存：真宿主把图拷进数据目录并回一份可预览地址 + 本会话的 ref
+          return reply(msg.id, { ref: 'edit/in/preview.png', url: SOURCE });
+        case 'image.edit': {
+          var sticker = STICKERS[editCount % STICKERS.length];
+          editCount += 1;
+          return reply(msg.id, { url: sticker, ref: 'gen/preview-' + editCount + '.png', width: 512, height: 512 });
+        }
+        case 'gif.make':
+          // 返回一段真动画：预览里"转成 GIF"看到的就是循环播放的效果
+          return reply(msg.id, {
+            url: GIF,
+            ref: 'sticker/preview.gif',
+            width: 256,
+            height: 256,
+            bytes: Math.round(GIF.length * 0.75),
+            frames: (p.refs || []).length,
+          });
         case 'bg.status':
           // 一个已就绪 + 一个待下载：这样预览里既能试换底色/笔刷，也能看到下载卡片长什么样
           return reply(msg.id, {
@@ -297,10 +405,14 @@ for (const app of MINIAPPS) {
     capabilities: READY,
   });
   // 假宿主放在最前面：它要在运行时与业务脚本之前把 message 监听装好。
-  const page = injected.replace(
-    /<head>/,
-    `<head>\n<script>${HOST_STUB}</script>\n<title>preview · ${app.id}</title>`,
-  );
+  //
+  // 同时把 `<meta charset>` 提到 head 最前：注入的启动脚本里带着中文能力标签，而预览是
+  // 以文件打开的（HTTP 头不一定带 charset），charset 声明晚于它就会被按 latin-1 解析成乱码。
+  const page = injected.replace(/<head>([\s\S]*?)<\/head>/i, (_all, inner: string) => {
+    const meta = (inner.match(/<meta charset[^>]*>/i) || []).pop() ?? '<meta charset="utf-8" />';
+    const rest = inner.replace(meta, "");
+    return `<head>\n${meta}\n<script>${HOST_STUB}</script>\n<title>preview · ${app.id}</title>${rest}</head>`;
+  });
   const target = join(outDir, file);
   writeFileSync(target, page);
   written.push(`${app.id.padEnd(14)} ${target}`);

@@ -27,7 +27,12 @@ const RUNTIME_API = new Set([
   "omni.log",
   "omni.onCapabilities",
   "omni.image.generate",
+  "omni.image.models",
+  "omni.image.stage",
   "omni.image.edit",
+  // 动图合成（宿主里用 sharp 做，页面只排帧序）
+  "omni.gif",
+  "omni.gif.make",
   "omni.audio.record",
   "omni.audio.transcribe",
   "omni.text.complete",
@@ -50,7 +55,7 @@ const RUNTIME_API = new Set([
 test("登记表：id 唯一，分类与必需能力都在枚举内", () => {
   const ids = MINIAPPS.map((app) => app.id);
   expect(new Set(ids).size).toBe(ids.length);
-  const accents = new Set(["violet", "sky", "amber", "emerald", "indigo", "rose"]);
+  const accents = new Set(["violet", "sky", "amber", "emerald", "indigo", "rose", "cyan"]);
   for (const app of MINIAPPS) {
     expect(["image", "audio", "text"]).toContain(app.category);
     expect(app.requires.length).toBeGreaterThan(0);
@@ -125,7 +130,10 @@ test("动作清单里的每一项都有说明（生成给小应用的接口文�
     "files.read",
     "files.save",
     "image.generate",
+    "image.models",
+    "image.stage",
     "image.edit",
+    "gif.make",
     "bg.status",
     "bg.download",
     "bg.run",
