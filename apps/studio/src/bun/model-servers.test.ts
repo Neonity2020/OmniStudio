@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -109,17 +109,41 @@ await mockModulePartial<typeof import("./runtimes/mlx")>("./runtimes/mlx", {
 });
 
 await mockModulePartial<typeof import("./model-store")>("./model-store", {
-  listInstalledModels: () => [],
+  listInstalledModels: () => INSTALLED,
   servedNameForModelPath: (path) =>
     (path.split("/").pop() ?? path).replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
   slugModelFileName: (name) => name.replace(/\.(gguf|safetensors)$/i, "").toLowerCase(),
 });
 
+/**
+ * 模型库桩：`pendingDownloadFor` 要拿它给的 `repo` 去和下载任务对仓库
+ * （同名文件在不同仓库里到处都是，只比文件名会把别人的下载当成本模型的）。
+ */
+const INSTALLED: import("./model-store").InstalledModel[] = [];
+
+/** 往模型库桩里放一条最小条目（只带 `pendingDownloadFor` / purpose 判定用得上的字段）。 */
+function installedEntry(repo: string, path: string): import("./model-store").InstalledModel {
+  return {
+    repo,
+    fileName: path.split("/").pop() ?? path,
+    path,
+    size: 4,
+    isActive: false,
+    isChatModel: false,
+    category: "chat",
+    favorite: false,
+    origin: "managed",
+    isDir: false,
+    kind: "gguf",
+    runtimeTarget: path,
+  };
+}
+
 /** 这些目标一启动就失败，值是错误原文。 */
 const FAILING = new Map<string, string>();
 
-/** 下载队列桩：`pendingDownloadFor` 只看 fileName 与 status。 */
-const DOWNLOADS: { fileName: string; status: string; received: number; total: number | null; percent: number | null }[] = [];
+/** 下载队列桩：`pendingDownloadFor` 看 fileName / status / repo。 */
+const DOWNLOADS: { fileName: string; repo?: string; status: string; received: number; total: number | null; percent: number | null }[] = [];
 await mockModulePartial<typeof import("./download-manager")>("./download-manager", {
   downloadManager: { list: () => DOWNLOADS } as never,
 });
@@ -150,6 +174,7 @@ beforeEach(async () => {
   created = [];
   FAILING.clear();
   DOWNLOADS.length = 0;
+  INSTALLED.length = 0;
   await Registry.stopAllServed();
 });
 
@@ -421,6 +446,79 @@ describe("启动失败的类型（LIE-05）", () => {
     expect(res.model?.error).toContain("还在下载中");
     expect(res.model?.error).toContain("3%");
     expect(res.model?.error).toContain("model loading error");
+  });
+
+  test("队列里已经没有任务、但磁盘上的文件没下完：照旧按「没下完」说，不去猜架构", async () => {
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    // 中断留下的现场：最终文件被预分配到完整长度（分片路径一上来就这么干），
+    // 侧车记录只下了一部分 —— 而下载任务已经被取消 / 清掉了（重启后任务列表只剩活着的那些），
+    // 只看队列就会把它当成「架构不认识」，把用户引去查架构、换量化（issue #16）。
+    const sidecar = `${modelA}.download.json`;
+    writeFileSync(modelA, Buffer.alloc(4096));
+    writeFileSync(
+      sidecar,
+      JSON.stringify({
+        url: "https://example.invalid/f",
+        total: 4096,
+        etag: null,
+        flushed: 0,
+        parts: [{ index: 0, start: 0, end: 4096, have: 1024 }],
+      }),
+    );
+    try {
+      const res = await Registry.startServedModel({ model: modelA });
+      expect(res.model?.errorKind).toBe("download-incomplete");
+      expect(res.model?.error).toContain("没有下完");
+      // 原文照旧留着（排查要看）
+      expect(res.model?.error).toContain("model loading error");
+    } finally {
+      rmSync(sidecar, { force: true });
+      writeFileSync(modelA, "gguf");
+    }
+  });
+
+  test("别的仓库里同名文件在下载：不算本模型「没下完」（分片名在每个仓库里都一样）", async () => {
+    // 本模型的仓库是 org/repo（落盘目录 org__repo），正在下载的是别人仓库里的同名文件。
+    // 只比文件名的话，用户会看到「权重还在下载中」去等一个跟自己无关的下载，
+    // 而真正的原因（架构不认识 / 文件坏了）被这句话盖掉。
+    INSTALLED.push(installedEntry("org__repo", modelA));
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    DOWNLOADS.push({
+      fileName: "a.gguf",
+      repo: "someone/else",
+      status: "downloading",
+      received: 3,
+      total: 100,
+      percent: 3,
+    });
+
+    const res = await Registry.startServedModel({ model: modelA });
+    expect(res.model?.errorKind).not.toBe("download-incomplete");
+    expect(res.model?.error).not.toContain("还在下载中");
+  });
+
+  test("同一个仓库（写成 org/repo 与落盘目录两种写法）在下载：照旧认成「没下完」", async () => {
+    INSTALLED.push(installedEntry("org__repo", modelB));
+    FAILING.set(modelB, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    DOWNLOADS.push({
+      fileName: "b.gguf",
+      repo: "org/repo",
+      status: "downloading",
+      received: 30,
+      total: 100,
+      percent: 30,
+    });
+
+    const res = await Registry.startServedModel({ model: modelB });
+    expect(res.model?.errorKind).toBe("download-incomplete");
+    expect(res.model?.error).toContain("还在下载中");
+  });
+
+  test("磁盘上文件是完整的（没有旁路数据）：不误判成没下完", async () => {
+    FAILING.set(modelA, "0.00.058.639 E srv  llama_server: exiting due to model loading error");
+    const res = await Registry.startServedModel({ model: modelA });
+    // llama.cpp 对「没下完」和「架构不认识」说的是同一句，认不出来就老实归 unknown
+    expect(res.model?.errorKind).toBe("unknown");
   });
 
   test("下载已经完成 / 失败的任务不算「还在下」", async () => {
