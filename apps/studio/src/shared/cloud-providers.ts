@@ -393,6 +393,29 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     note: "官方 OpenAI 兼容端点；需海外网络环境",
     color: "#4285f4",
   },
+  {
+    id: "qwencloud",
+    name: "Qwen Cloud",
+    vendor: "阿里云 Qwen（国际站）",
+    // 国际站与国内百炼是**两套地址、两套密钥**：qwencloud.com 上申请的 Key 拿到
+    // dashscope.aliyuncs.com 用只会 401。所以它是独立的一行，不是"百炼的别名"。
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    section: "global",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    models: [
+      // 非实时的 omni：音频进、文字出，走 Chat Completions —— 通话模式的
+      // 「omni 模式」用的就是它（见 shared/voice-call-omni.ts）。
+      "qwen3.8-omni-flash",
+      "qwen3.8-max-0902",
+      "qwen3.8-flash",
+      "qwen-image-3.0-pro",
+      "wan3.0-video",
+      "qwen-audio-3.0-tts-flash",
+      "qwen-audio-3.0-asr-flash",
+    ],
+    note: "国际站：需海外网络环境；实时语音的 wss 端点是 dashscope-intl",
+    color: "#615ced",
+  },
 ];
 
 export function getPreset(id: string): CloudPreset | undefined {

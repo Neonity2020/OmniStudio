@@ -24,6 +24,7 @@ import { safeBaseName, safeJoin } from "../path-safety";
 import { exportHtmlReport } from "../report-export";
 import { processDocumentPages } from "../queue";
 import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
+import * as Update from "../updates";
 import * as ReleaseCheck from "../release-check";
 import type { ReleaseCheckResult } from "../../shared/release";
 import { getUserDataDir } from "../paths";
@@ -152,6 +153,7 @@ import * as VoiceCall from "../voice-call";
 import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../voice-call";
 import * as RealtimeVoice from "../realtime-voice";
 import type { RealtimeProviderConfig } from "../realtime-voice";
+import type { OmniCallConfig } from "../omni-call";
 import * as Translate from "../translate";
 import {
   listChatModels,
@@ -810,7 +812,8 @@ export type AppRPC = {
       };
       applyUpdate: {
         params: undefined;
-        response: undefined;
+        /** 没有已下载好的更新时 `ok:false` —— 界面据此提示，而不是静默什么都不发生。 */
+        response: { ok: boolean; error?: string };
       };
       /** 检查 GitHub 仓库最新 release（10 分钟缓存，force 跳过）。 */
       checkReleaseUpdate: {
@@ -1646,13 +1649,13 @@ export type AppRPC = {
         params: undefined;
         response: { workspace: string; isDefault: boolean };
       };
-      // 实时语音通话（本地 ASR + agent + TTS / 云端 Qwen Realtime）
+      // 实时语音通话（本地 ASR + agent + TTS / 云端实时语音 / omni 音频直送）
       voicecallPreflight: {
         params: undefined;
         response: VoiceCallPreflight;
       };
       voicecallStart: {
-        params: { conversationId?: number; provider?: "local" | "cloud" };
+        params: { conversationId?: number; provider?: "local" | "cloud" | "omni" };
         response: { ok: boolean; conversation?: Conversation; error?: string };
       };
       voicecallPushAudio: {
@@ -1677,7 +1680,7 @@ export type AppRPC = {
       };
       voicecallSaveProviderConfig: {
         params: {
-          provider?: "local" | "cloud";
+          provider?: "local" | "cloud" | "omni";
           /** 选中的云厂商：API Key 从厂商行取（页面不再手填）。 */
           providerId?: string;
           baseUrl?: string;
@@ -1685,6 +1688,19 @@ export type AppRPC = {
           voice?: string;
         };
         response: { ok: boolean };
+      };
+      /** omni 模式（音频直送多模态模型）的厂商与模型：密钥 / 地址都从厂商行取。 */
+      voicecallGetOmniConfig: {
+        params: undefined;
+        response: { config: OmniCallConfig };
+      };
+      voicecallSaveOmniConfig: {
+        params: { providerId?: string; model?: string };
+        response: { ok: boolean };
+      };
+      voicecallTestOmni: {
+        params: { providerId?: string; model?: string };
+        response: { ok: boolean; error?: string; latencyMs?: number };
       };
       voicecallDebug: {
         params: { line: string };
@@ -2748,7 +2764,8 @@ export type AppRPC = {
       };
       kbAddFiles: {
         params: { kbId: number; paths: string[] };
-        response: { docs: Knowledge.KbDocView[] };
+        /** skipped = 白名单外 / 不存在的文件数（选择器不再靠原生过滤器挡类型）。 */
+        response: { docs: Knowledge.KbDocView[]; skipped: number };
       };
       kbAddFolder: {
         params: { kbId: number; path: string };
@@ -3636,8 +3653,13 @@ const rpcRequests: NonNullable<
   openFileDialog: async (params) => {
     const canChooseDirectory = params?.canChooseDirectory === true;
     const paths = await Utils.openFileDialog({
+      // 目录选择必须是 "*"，不能是 undefined：Electrobun 的 Utils.openFileDialog 用 `...opts`
+      // 展开覆盖默认值，显式 undefined 会原样送到原生封装的 toCString()，在那里对 undefined
+      // 调 .endsWith 抛 `undefined is not an object (evaluating 'jsString.endsWith')` ——
+      // 知识库「导入目录」整条路径就是这么挂的（issue #28）。"*" 是两端原生实现都显式
+      // 跳过类型过滤的哨兵值。
       allowedFileTypes: canChooseDirectory
-        ? undefined
+        ? "*"
         : (params?.allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif"),
       canChooseFiles: params?.canChooseFiles ?? true,
       canChooseDirectory,
@@ -3829,7 +3851,9 @@ const rpcRequests: NonNullable<
 
   applyUpdate: async () => {
     console.log("Applying update...");
-    Updater.applyUpdate();
+    // 必须走 updates.applyUpdateNow：它会先 await 停服再交给 Updater，
+    // 否则上一版的 detached 子进程会活过升级（见 shutdown.ts）。
+    return Update.applyUpdateNow();
   },
 
   checkReleaseUpdate: async ({ force }) => {
@@ -4545,6 +4569,16 @@ const rpcRequests: NonNullable<
   },
   voicecallGetProviderConfig: async () => {
     return { config: RealtimeVoice.getRealtimeProviderConfig() };
+  },
+  voicecallGetOmniConfig: async () => {
+    return { config: VoiceCall.getOmniCallConfig() };
+  },
+  voicecallSaveOmniConfig: async (params) => {
+    VoiceCall.saveOmniCallConfig(params ?? {});
+    return { ok: true };
+  },
+  voicecallTestOmni: async (params) => {
+    return VoiceCall.testOmniCallConnection(params ?? {});
   },
   voicecallSaveProviderConfig: async (params) => {
     RealtimeVoice.saveRealtimeProviderConfig(params);
@@ -6083,7 +6117,7 @@ const rpcRequests: NonNullable<
     return Knowledge.listDocs(kbId);
   },
   kbAddFiles: async ({ kbId, paths }) => {
-    return { docs: Knowledge.addFileDocs(kbId, paths ?? []) };
+    return Knowledge.addFileDocs(kbId, paths ?? []);
   },
   kbAddFolder: async ({ kbId, path: dirPath }) => {
     return Knowledge.addFolderDocs(kbId, dirPath);

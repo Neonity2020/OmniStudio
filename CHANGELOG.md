@@ -42,6 +42,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 ### Fixed / 修复
 
+- **升级后打不开（图标闪一下、窗口都不出）：迁移时间戳在两份构建之间对不上，且失败时没有任何提示**。迁移器判断"某条迁移跑过没有"只比较 `__drizzle_migrations` 里已应用记录的最大 `created_at` 与**当前构建** journal 的 `when`，从不校验 hash。同一个库会被两份不同的构建打开 —— 安装版（stable 渠道）与你在仓库里跑的那份源码 —— 而历史上一批迁移的 `when` 是伪造的递增未来戳；两边一旦不一致，任一方跑过一次迁移，另一方下次启动就认为"这些迁移还没跑过"，重跑建表直接撞 `table already exists` 并中止启动。
+  - **只读进程不再迁移别人的库**：`omi` 的本地兜底（`src/cli/db.ts`）此前会以真实数据目录打开 `./db`，也就是**顺手对安装版的库跑一遍迁移与自愈** —— 这正是"跑过一次 `omi`／更新完之后再也打不开"的引信。现在它用 `OMNI_SKIP_MIGRATIONS=1` 打开（`bun/db/index.ts`）：只读、不自愈、不改时间戳；库还没建好时给一句明确指引，而不是替应用建库。迁移与自愈交回**应用**（它知道自己是哪一版）。
+  - **起不来要看得见**：新增启动守卫（`bun/startup-guard.ts`，`index.ts` 的第一行导入）。此前主进程启动是一条模块求值链，`./db` 一抛就整个 Worker 退出 —— 没有窗口、没有对话框，用户只看到闪退，而那条报错（含库路径与迁移前备份位置）没人看得到。现在**启动期**的致命错误会落进 `<数据目录>/logs/startup-error.log` 与 `app.log`（`app.start.failed`），并尽力弹一条系统原生提示框（macOS `osascript` / Windows PowerShell / Linux `zenity`，都是子进程，不依赖原生事件循环 —— 出问题的正是事件循环还没起来的那一段）。启动完成即交班（`markStartupReady()`），运行期异常仍走原有处理器。
+  - **启动不再被"读版本号"带崩**：`Updater.localInfo` 走的是 `Bun.file("../Resources/version.json")` 这个**相对工作目录**的读取，正常 `open` 拉起时正好命中，换一种启动方式就可能落空 —— 而它是同步抛错的，`getMainViewUrl()` 恰好在建窗口之前 await 它（等于"连窗口都没有的闪退"）。现在版本 / 渠道读取永不抛错（失败按打包版处理），并且**在打 `app.start` 之前**先对齐版本：此前日志里永远是 `version: 0.0.0`，事后分不清是哪一版写的现场。
+  - **升级会留痕**：本次启动版本与上一次不同时记一条 `update.applied from→to`（`LAST_RUN_VERSION`），"更新完起不来"能直接对上时间线。
+  - **升级前先真的把服务停干净**：`Updater.applyUpdate()` 内部是 Electrobun 的 `quit()`，它只**发出** before-quit、不等我们的停服 Promise 就 `forceExit` —— 于是上一版的 **detached 子进程活过升级**（真机上能查到好几天前启动、pid 早已不属于任何窗口的 `llama-server`），新版本一起来就抢不到端口与显存。收尾逻辑收敛成 `bun/shutdown.ts`（幂等、逐项 `allSettled`），升级路径先 `await teardownServices()` 再交给 Updater；窗口 close / before-quit / SIGTERM 共用同一份实现，不再各写一遍。
+  - 「重启并更新」被拒时（没有已下载好的更新）界面不再毫无反应：RPC 返回 `{ok:false,error}` 并在卡片上显示原因。
+  - **回归**：`bun/db/db-migrate-timestamps.tests.ts` 新增「只读进程不迁移、不自愈，也不因中毒库而失败」（钉住时间戳与列都原样不动）、`bun/startup-guard.test.ts`（崩溃文件位置、三平台弹框命令的参数转义与长度夹取）。
+
 - **从 ModelScope 下载的 MLX 模型下完却「找不到」：权重被当成"别的仓库已经下过"而整批跳过**（模型库里显示「已下载」，运行模型的列表里却没有它）。根因是市场页判断"这个文件下过没有"时**只比对文件名**，而 `model-00001-of-00002.safetensors` 这类分片名在几乎每个 safetensors 仓库里都一样 —— 本机 HF 缓存里的 `mlx-community/Qwen3.5-4B-MLX-bf16` 有同名分片，于是 `mlx-community/K2-Horizon-7B-Uno-oQ6e` 与 `rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX` 的权重在「下载整个模型」时被整个跳过，落盘只剩 config / tokenizer；而权重文件不存在时仓库目录**根本不算一个模型**（`isRepoModelDir` 要求真有权重），所以它既不会出现在运行模型的下拉里，也跑不起来 —— 一个"下载成功"的假象。用户机上实测：K2-Horizon-7B-Uno-oQ6e 的 2 个分片（5.0 GB + 2.5 GB）、Qwen3.8-27B-4bit-MTP-MLX 的 3 个分片（约 16 GB）都是这么丢的。
   - 判定改为**按仓库**（`installedFilesForRepo`，`mainview/lib/installed-models.ts`）：市场里的 repo id（`org/repo`）与落盘目录名（`safeRepoId` 编码的 `org__repo`）、HF 缓存条目（`org/repo`）三种写法归一后比对，同名分片属于别的仓库不算已下载 —— 宁可让用户重下一个已存在的文件（多花流量），也不能把没下的权重当成下过（模型直接不可用）。
   - **已经卡在半路的仓库能一键补齐**：失败卡片上的动作从「重试失败的 N 个文件」扩成「继续下载缺的 N 个文件」—— 除了恢复失败的任务，还会把**从没排过队**的文件补进队列（旧口径下跳过的权重正是这种：任务列表里根本没有它，光点重试永远补不齐）。整模型进度也把它们按 0 计入分子、按市场体积计入分母，不再显示成"快下完了"。

@@ -5,6 +5,7 @@ import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
+import { VOICE_CALL_OMNI_DEFAULT_MODEL } from "../../shared/voice-call-omni";
 import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "../secrets";
 import { logEvent } from "../app-log";
 
@@ -26,6 +27,9 @@ export type SettingsKey =
   | "MODEL_DIRS"
   | "UPDATE_CHANNEL"
   | "AUTO_UPDATE"
+  // 上一次成功启动时的版本（形如 `0.1.2` 或 `0.1.2 (canary)`）。只用来在 app.log 里
+  // 区分"这一版是刚升上来的"还是"一直在跑"，见 bun/updates.ts 的 recordBootVersion。
+  | "LAST_RUN_VERSION"
   | "FAVORITE_MODELS"
   | "LAUNCHER_CLAUDE_MODE"
   | "LAUNCHER_CLAUDE_OPUS"
@@ -241,6 +245,10 @@ export type SettingsKey =
   | "VOICE_CALL_REALTIME_BASE_URL"
   | "VOICE_CALL_REALTIME_MODEL"
   | "VOICE_CALL_REALTIME_VOICE"
+  /** omni 模式（音频直送多模态模型）选中的厂商：API Key 与 Base URL 都从厂商行取。 */
+  | "VOICE_CALL_OMNI_PROVIDER_ID"
+  /** omni 模式使用的模型 id（默认 qwen3.8-omni-flash）。 */
+  | "VOICE_CALL_OMNI_MODEL"
   // Skills 管理（参照 skills-manager 移植）
   | "SKILLS_CENTRAL_PATH"
   | "SKILLS_SYNC_MODE"
@@ -305,6 +313,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   UPDATE_CHANNEL: "stable",
   // 启动时自动检查并下载新 release（"0" 关闭，仅手动检查）。
   AUTO_UPDATE: "1",
+  LAST_RUN_VERSION: "",
   FAVORITE_MODELS: "[]",
   LAUNCHER_CLAUDE_MODE: "local",
   LAUNCHER_CLAUDE_OPUS: "",
@@ -522,6 +531,9 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VOICE_CALL_REALTIME_BASE_URL: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   VOICE_CALL_REALTIME_MODEL: "qwen-audio-3.0-realtime-plus",
   VOICE_CALL_REALTIME_VOICE: "longanqian",
+  // omni 模式：厂商留空 = 未配置（页面引导用户选一个），模型有个能直接用的默认值。
+  VOICE_CALL_OMNI_PROVIDER_ID: "",
+  VOICE_CALL_OMNI_MODEL: VOICE_CALL_OMNI_DEFAULT_MODEL,
   // Skills 管理默认值
   SKILLS_CENTRAL_PATH: "",
   SKILLS_SYNC_MODE: "symlink",

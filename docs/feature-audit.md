@@ -207,15 +207,16 @@ Agent 是三模式（agent / plan / goal）工作台，功能按「会话 / 时�
 
 ### 6.1 功能清单
 
-实时语音通话：左侧配置面板（通话记录走侧栏），右侧通话区。本地模式 = VAD 断句 + 本地 ASR/LLM/TTS；云端模式 = Qwen Realtime 端到端语音。
+实时语音通话：左侧配置面板（通话记录走侧栏），右侧通话区。本地模式 = VAD 断句 + 本地 ASR/LLM/TTS；云端模式 = Qwen Realtime 端到端语音；omni 模式 = VAD 断句 + 整段音频直送多模态模型（如 `qwen3.8-omni-flash`）+ 本地 TTS 播报。
 
 **配置面板（左）**
 
 | # | 功能 | 实现 |
 |---|---|---|
-| V-01 | 模式切换（本地 / 云端）持久化到 `VOICE_CALL_PROVIDER` | `voice-call-screen.tsx` |
+| V-01 | 模式切换（本地 / 云端 / omni）持久化到 `VOICE_CALL_PROVIDER` | `voice-call-screen.tsx` |
 | V-02 | 云端配置引导（厂商 → 实时端点 → 模型 / 音色，保存并测试连接） | `CloudSetupGuide` |
-| V-03 | 就绪检测（模型 / ASR / TTS / 云端配置），缺项可点击跳配置 | `PreflightRow` + `voicecallPreflight` |
+| V-05 | omni 配置引导（厂商 → 多模态模型，保存并测试连接；地址与密钥都取自厂商行） | `OmniSetupGuide` + `voicecallGetOmniConfig` / `voicecallSaveOmniConfig` / `voicecallTestOmni` |
+| V-03 | 就绪检测（模型 / ASR / TTS / 云端 / omni 配置），缺项可点击跳配置；omni 下 ASR 只标注为「可选」（没配也能通话，只是没有字幕、用户那一轮落占位文本） | `PreflightRow` + `voicecallPreflight` |
 | V-04 | 拨号 / 错误展示 | `voice-call-screen.tsx` |
 
 **通话区（右）**
