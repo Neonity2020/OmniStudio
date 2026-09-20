@@ -150,6 +150,18 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   reserved slot already: settings (`MUSIC_LOCAL_*`), the record's `localBase`, and the UI toggle
   exist, and `localUnavailable()` states plainly that no engine is wired up rather than faking
   a result.
+- **A cloud model's context window is one number, resolved by `shared/model-context.ts`** (user
+  override on the model entry → size suffix in the id → catalog of known models → 256K default).
+  It is the single source for the Agent's compaction budget (`bun/chat-context.ts` →
+  `agent.ts` / `agent-context.ts`), for what the settings page shows, and for the `context_window`
+  `omi launch` writes into the Codex / ChatGPT catalogs — so none of them can disagree; the
+  override lives on `CloudModelEntry.contextLength` (looked up with
+  `cloud-providers.ts`'s `contextLengthForModel`) and is edited in the 上下文 column of
+  设置 → 云端模型. Cloud mode must never read `SERVER_CTX_SIZE` (that is the local
+  llama.cpp KV knob; reading it once pinned `max_tokens` to 1 and produced empty cloud turns),
+  and cloud output caps go through `CLOUD_MAX_OUTPUT_TOKENS`, never the window. Don't set 1M for
+  models that are really 128K (DeepSeek) — an over-declared window pushes the compaction line
+  past the vendor's real limit and turns into hard `context_length_exceeded` 400s.
 - **Public exposure goes through `bun/tunnel.ts`, never through `GATEWAY_HOST=0.0.0.0`**:
   Settings → Services → Remote Access runs a supervised `cloudflared` child process
   (`bun/cloudflared.ts` downloads the official binary into `<dataDir>/engines/cloudflared/`;

@@ -8,6 +8,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+## [0.1.3] - 2026-09-21
+
+### Fixed / 修复
+
+- **云端对话 / Agent 的上下文窗口不再"一刀切 128K"**：以前云端只有一句兜底 128K —— 真实窗口 1M 的模型（Gemini、MiniMax M1、千问 turbo/flash…）也被按 128K 算，Agent 的自动压缩线（窗口的 60%）因此只有 78K，长任务跑到一半就被裁掉中间历史，体感就是"上下文太短没法用"；反过来把 32K 的模型当 128K 又压缩过晚，撞上厂商的 `context_length_exceeded`。
+  - **窗口按模型定**（`shared/model-context.ts`，界面与主进程共用同一个数）：用户手填的覆盖值 → 模型 id 里的尺寸后缀（`-8k` / `-128k` / `-1m`）→ 已知型号目录（DeepSeek 128K、Gemini 1M、Claude 200K、Kimi K2 256K、千问 turbo/flash 1M…）→ **认不出的默认 256K**。本地模式行为不变（仍看 `SERVER_CTX_SIZE`），云端依旧**不读**那个本地 KV 旋钮（2026-09 空回合事故的根因）。
+  - **可以手动改**：设置 → 云端模型 的模型表格新增「上下文」列 —— 空着表示自动判断（占位符显示算出来的值），填 `256K` / `1M` / `131072` 即覆盖，清空回到自动；添加模型弹框也能直接填。这个数同时驱动 Agent 压缩、上下文占用展示与设置页显示，三处不会再各说各话。
+  - DeepSeek 按官方文档取 **128K**（不是 1M）：按 1M 声明会把压缩线抬到 600K，请求在 128K 处稳定被厂商 400 拒掉；如果你用的中转确实给了 1M，在那一列就地改掉即可。
+  - **回归**：`shared/model-context.test.ts`（优先级 / 非法值 / 后缀优先于目录 / 格式化与输入解析）、`bun/chat-context.test.ts`（云端 256K 兜底、目录命中、手填覆盖生效与清空）。
+
+- **同一类问题一并清掉**：凡是"每个模型各不相同、却被写成同一个常量"的地方，都改成按模型解析（同一个解析器，界面 / 主进程 / CLI 共用）。
+  - **对话页的云端 `max_tokens` 不再读本地 KV 旋钮**（`bun/chat.ts`）：以前它从 `SERVER_CTX_SIZE` 推输出上限 —— 本地把上下文调到 128k 后切到云端，请求会带上 `max_tokens: 131072`，稳定被厂商的输出天花板拒掉。现在云端统一用 `CLOUD_MAX_OUTPUT_TOKENS`（8k，与 Agent 同一个常量、同一个理由：厂商的输出上限普遍远低于窗口）。
+  - **`omi launch` 写进 Codex / ChatGPT 的目录不再对所有云端模型写死 128k**（`cli/commands/launch.ts`）：外部工具拿 `context_window` 当自动压缩基准，1M 的云端模型被报成 128k 就会提前丢历史。现在云端走同一个解析器，并且会读你在设置页手填的覆盖值；`codexCatalogJson` 也改成接收真实窗口，而不是给本地模型（8k）和云端模型（1M）都写 128k。
+  - **本地默认窗口 8192 只留一处**：`shared/model-context.ts` 的 `LOCAL_CTX_DEFAULT`（设置默认值与 `bun/chat.ts` 的兜底都指向它），云端覆盖值的查找则统一走 `cloud-providers.ts` 的 `contextLengthForModel`（运行时与 CLI 共用），不再各写一份。
+  - **回归**：`cli/commands/launch.test.ts`（`context_window` 用传进来的真实窗口）、`shared/cloud-providers.test.ts`（覆盖值查找 / 坏值当没填 / `modelContextOf` 与运行时同一口径）。
+
 ## [0.1.2] - 2026-09-20
 
 ### Added / 新增

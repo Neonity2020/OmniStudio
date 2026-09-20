@@ -37,6 +37,7 @@ import {
   getPreset,
   isBuiltinBaseUrl,
   isLocalBaseUrl,
+  modelContextOf,
   modelTypeOf,
   presetApiKeyUrl,
   providerColor,
@@ -47,6 +48,7 @@ import {
   type CloudProviderInfo,
   type CloudVideoApi,
 } from "@/shared/cloud-providers";
+import { formatContextWindow, parseContextWindowInput } from "@/shared/model-context";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import {
   classifyModelName,
@@ -180,10 +182,80 @@ function Toggle({
   );
 }
 
+/**
+ * 模型表格里的「上下文」单元格：显示这个模型当前生效的窗口，点进去可改。
+ *
+ * 两种状态一眼可辨 —— **手填过**（值在框里、正整数）与**自动判断**（框为空，
+ * 占位符是算出来的值 + 下方一个「自动」小标）。改完失焦落库
+ * （`cloudProviderUpdate` 的 `models`），清空即回到自动判断。
+ *
+ * 为什么这个数必须让人能改：云端没有统一的地方能问到窗口大小，同一个厂商在售
+ * 型号从 32K 到 1M 都有；而这个数直接决定 Agent 的压缩线（窗口的 60%）——
+ * 猜大 = 压缩不触发、请求最后撞厂商 400；猜小 = 历史被过早裁掉。所以默认给足
+ * （认不出 256K），认错了由用户就地改正。
+ */
+function ModelContextCell({
+  entry,
+  disabled,
+  onCommit,
+}: {
+  entry: CloudModelEntry;
+  disabled?: boolean;
+  onCommit: (contextLength: number | undefined) => void;
+}) {
+  const t = useT();
+  const [draft, setDraft] = useState<string | null>(null);
+  const override = entry.contextLength;
+  const effective = modelContextOf(entry);
+  // 手填过显示手填值；没填过留空，用占位符展示自动判断的结果。
+  const value = draft ?? (override != null ? formatContextWindow(override) : "");
+  const parsed = draft === null ? undefined : parseContextWindowInput(draft);
+  const invalid = draft !== null && draft.trim() !== "" && parsed === undefined;
+
+  const commit = () => {
+    if (draft === null) return;
+    const text = draft.trim();
+    if (text === "") {
+      if (override != null) onCommit(undefined);
+    } else if (parsed !== undefined && parsed !== override) {
+      onCommit(parsed);
+    }
+    setDraft(null);
+  };
+
+  return (
+    <div className="flex flex-col gap-0.5" data-model-context={entry.id}>
+      <Input
+        value={value}
+        placeholder={formatContextWindow(effective)}
+        title={t("cloud.contextHint")}
+        disabled={disabled}
+        inputMode="numeric"
+        aria-label={t("cloud.colContext")}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        className={cn(
+          "h-6 w-16 px-1.5 font-mono text-[11px] tabular-nums",
+          invalid && "border-destructive text-destructive",
+        )}
+      />
+      <span className="text-[9px] leading-none text-muted-foreground/70">
+        {invalid
+          ? t("cloud.contextInvalid")
+          : override == null
+            ? t("cloud.contextAuto")
+            : t("cloud.contextManual")}
+      </span>
+    </div>
+  );
+}
+
 export function CloudProviderPanel() {
   const t = useT();
   const queryClient = useQueryClient();
-
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [vendorSearch, setVendorSearch] = useState("");
   const [showAddProvider, setShowAddProvider] = useState(false);
@@ -378,6 +450,20 @@ export function CloudProviderPanel() {
     },
     onSuccess: invalidate,
   });
+  /** 改单个模型的上下文窗口覆盖值（undefined = 清空覆盖，回到自动判断）。 */
+  const setModelContextMutation = useMutation({
+    mutationFn: async ({ id, contextLength }: { id: string; contextLength?: number }) => {
+      if (!selected) return;
+      const next = models.map((m) => {
+        if (m.id !== id) return m;
+        const { contextLength: _drop, ...rest } = m;
+        return contextLength != null ? { ...rest, contextLength } : rest;
+      });
+      await rpcClient.cloudProviderUpdate({ id: selected.id, models: next });
+    },
+    onSuccess: invalidate,
+  });
+
   const modelNeedle = modelSearch.trim().toLowerCase();
   const filteredModels = useMemo(() => {
     const byTab =
@@ -429,6 +515,7 @@ export function CloudProviderPanel() {
   const [dlgName, setDlgName] = useState("");
   const [dlgGroup, setDlgGroup] = useState("");
   const [dlgRemark, setDlgRemark] = useState("");
+  const [dlgContext, setDlgContext] = useState("");
   const [dlgType, setDlgType] = useState<CloudModelType | "auto">("auto");
   const [dlgMore, setDlgMore] = useState(false);
 
@@ -437,6 +524,7 @@ export function CloudProviderPanel() {
       if (!selected) return { ok: false };
       const id = dlgId.trim();
       if (!id || models.some((m) => m.id === id)) return { ok: false };
+      const contextLength = parseContextWindowInput(dlgContext);
       await rpcClient.cloudProviderUpdate({
         id: selected.id,
         models: [
@@ -447,6 +535,7 @@ export function CloudProviderPanel() {
             group: dlgGroup.trim() || undefined,
             remark: dlgRemark.trim() || undefined,
             type: dlgType === "auto" ? undefined : dlgType,
+            contextLength,
           },
         ],
       });
@@ -456,6 +545,7 @@ export function CloudProviderPanel() {
       setDlgName("");
       setDlgGroup("");
       setDlgRemark("");
+      setDlgContext("");
       setDlgType("auto");
       setDlgMore(false);
       setShowAddModel(false);
@@ -983,6 +1073,12 @@ export function CloudProviderPanel() {
                           <th className="px-2 py-1.5 font-medium whitespace-nowrap">
                             {t("cloud.colGroup")}
                           </th>
+                          <th
+                            className="px-2 py-1.5 font-medium whitespace-nowrap"
+                            title={t("cloud.contextHint")}
+                          >
+                            {t("cloud.colContext")}
+                          </th>
                           <th className="px-2 py-1.5 font-medium whitespace-nowrap">
                             {t("cloud.colStatus")}
                           </th>
@@ -1071,6 +1167,15 @@ export function CloudProviderPanel() {
                                 )}
                               </td>
                               <td className="px-2 py-1.5">
+                                <ModelContextCell
+                                  entry={entry}
+                                  disabled={setModelContextMutation.isPending}
+                                  onCommit={(contextLength) =>
+                                    setModelContextMutation.mutate({ id: entry.id, contextLength })
+                                  }
+                                />
+                              </td>
+                              <td className="px-2 py-1.5">
                                 {isDefault ? (
                                   <span className="flex w-fit items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
                                     <StarIcon className="size-3" /> {t("cloud.default")}
@@ -1111,7 +1216,7 @@ export function CloudProviderPanel() {
                         })}
                         {filteredModels.length === 0 && (
                           <tr>
-                            <td colSpan={5} className="px-2 py-4 text-center text-muted-foreground">
+                            <td colSpan={6} className="px-2 py-4 text-center text-muted-foreground">
                               {t("cloud.noModelMatch")}
                             </td>
                           </tr>
@@ -1146,11 +1251,18 @@ export function CloudProviderPanel() {
                   dlgRemark,
                   setDlgRemark,
                 ],
+                [
+                  "dlg-model-context",
+                  t("cloud.colContext"),
+                  t("cloud.contextPh"),
+                  dlgContext,
+                  setDlgContext,
+                ],
               ] as const
             ).map(([id, label, ph, value, setValue, required], idx) => (
               <div
                 key={id}
-                className={cn("flex items-center gap-3", idx === 3 && !dlgMore && "hidden")}
+                className={cn("flex items-center gap-3", idx >= 3 && !dlgMore && "hidden")}
               >
                 <Label htmlFor={id} className="w-20 shrink-0 text-xs">
                   {label}

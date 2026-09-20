@@ -4,6 +4,7 @@ import { ENGINE_IDS, ENGINE_SPECS, EMBEDDING_PORT_BASE } from "../../shared/engi
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
+import { LOCAL_CTX_DEFAULT } from "../../shared/model-context";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
 import { VOICE_CALL_OMNI_DEFAULT_MODEL } from "../../shared/voice-call-omni";
 import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "../secrets";
@@ -325,7 +326,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   LAUNCHER_HERMES_MODEL: "",
   LAUNCHER_PI_MODEL: "",
   LAUNCHER_COPILOT_MODEL: "",
-  SERVER_CTX_SIZE: "8192",
+  SERVER_CTX_SIZE: String(LOCAL_CTX_DEFAULT),
   SERVER_IMAGE_MAX_TOKENS: "2048",
   SERVER_BATCH_SIZE: "256",
   SERVER_UBATCH_SIZE: "64",

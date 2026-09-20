@@ -27,6 +27,7 @@ import { getSetting, updateSettings } from "./db/settings";
 import { getChatBaseUrl, getHistory, ensureServerReady, titleFromMessage } from "./chat";
 import { getChatModelLabel, getChatRequestModelId, getChatProviderLabel, chatModelSupportsImages } from "./chat-model";
 import { chatContextWindow } from "./chat-context";
+import { CLOUD_MAX_OUTPUT_TOKENS } from "../shared/model-context";
 import { recordUsage } from "./stats";
 import { recordTokenUsage } from "./usage";
 import {
@@ -554,9 +555,10 @@ function buildModel(): Model<"openai-completions"> {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow,
     // 输出上限：本地跟随窗口一半（小窗口下很现实）；云端各家有自己的输出天花板
-    // （deepseek-chat 8k、qwen-max 8k……），统一 8k —— 窗口一半动辄 64k 的请求
-    // 会被厂商 400 拒掉，宁可封得保守，模型正常自己会 EOS 收尾。
-    maxTokens: remote ? 8192 : Math.max(1024, Math.floor(contextWindow / 2)),
+    // （deepseek-chat 8k、qwen-max 8k……），统一 `CLOUD_MAX_OUTPUT_TOKENS`（8k）——
+    // 窗口一半动辄 64k 的请求会被厂商 400 拒掉，宁可封得保守，模型正常自己会 EOS 收尾。
+    // 对话页用同一个常量，两边不会再各写一个数（见 shared/model-context.ts）。
+    maxTokens: remote ? CLOUD_MAX_OUTPUT_TOKENS : Math.max(1024, Math.floor(contextWindow / 2)),
   };
 }
 
