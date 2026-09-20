@@ -24,6 +24,7 @@
 import { appendFileSync, mkdirSync } from "fs";
 import { dirname } from "path";
 import { getDataDir } from "./paths";
+import { logEvent } from "./app-log";
 
 let startupReady = false;
 
@@ -119,22 +120,21 @@ function writeCrashRecord(entry: { origin: string; detail: string; stack: string
   } catch {
     // 崩溃现场文件写不下去（磁盘满 / 只读）时不再制造第二个错误。
   }
-  // app.log 是排查的**唯一**入口，能记就记一条事件级记录（动态导入：它只依赖
-  // paths，但仍然放在这里，避免守卫模块在 import 期牵连更多东西）。
-  void import("./app-log")
-    .then((m) =>
-      m.logEvent({
-        level: "error",
-        source: "app",
-        event: "app.start.failed",
-        message: entry.detail,
-        detail: { origin: entry.origin, recovery: "见 logs/startup-error.log" },
-      }),
-    )
-    .catch(() => {});
+  // app.log 是排查的**唯一**入口，这条必须**同步**写：紧接着就是 `process.exit(1)`，
+  // 任何 `void import(...).then(...)` 都可能来不及落盘（真机验证过一次：崩溃文件有了，
+  // app.log 里却没有记录）。app-log 只依赖 paths，在启动这么早的位置加载是安全的。
+  logEvent({
+    level: "error",
+    source: "app",
+    event: "app.start.failed",
+    message: entry.detail,
+    detail: { origin: entry.origin, recovery: "见 logs/startup-error.log" },
+  });
 }
 
 function alertBestEffort(title: string, message: string): void {
+  // 自动化环境（测试 / CI / 无头冒烟）不该被一个必须点掉的对话框卡住。
+  if (process.env.OMNI_NO_ALERTS === "1") return;
   const plan = alertCommand(process.platform, title, message);
   if (!plan) return;
   try {
