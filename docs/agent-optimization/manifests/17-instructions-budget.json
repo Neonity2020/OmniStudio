@@ -1,0 +1,28 @@
+{
+  "id": "17-instructions-budget",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-instructions.ts",
+    "apps/studio/src/bun/agent-instructions.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-instructions.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-instructions.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "输出也跟着倒过来（顺序被破坏，去重与拼装会错乱）",
+      "file": "apps/studio/src/bun/agent-instructions.ts",
+      "find": "return { files: kept, truncated };",
+      "replace": "return { files: [...kept].reverse(), truncated };"
+    }
+  ]
+}
