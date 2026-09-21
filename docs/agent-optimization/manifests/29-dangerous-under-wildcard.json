@@ -1,0 +1,29 @@
+{
+  "id": "29-dangerous-under-wildcard",
+  "allowed_files": [
+    "apps/studio/src/bun/permissions.ts",
+    "apps/studio/src/bun/permissions.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/permissions.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/permissions.test.ts",
+    "apps/studio/src/bun/agent-tools.bash.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "只降级自定义规则、放过默认表兜底（auto 档下洞还在）",
+      "file": "apps/studio/src/bun/permissions.ts",
+      "find": "  const fallback = winningRuleFor(defaultRules(\"manual\"), request.permission, patterns);",
+      "replace": "  const fallback = winningRuleFor(defaultRules(\"manual\"), request.permission, patterns);\n  if (fallback) return { action: fallback.action, rule: null };"
+    }
+  ]
+}
