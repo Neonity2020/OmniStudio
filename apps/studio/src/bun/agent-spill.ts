@@ -23,6 +23,24 @@ import { getDataDir } from "./paths";
 /** 单条工具结果进入模型上下文的上限（字符）。 */
 export const MAX_TOOL_OUTPUT_CHARS = 24_000;
 
+/** 单条工具结果最多占窗口的比例，其余留给系统提示、历史与模型的回答。 */
+const TOOL_OUTPUT_WINDOW_SHARE = 0.25;
+/** token 换字符的折算比：中文约 1、英文约 4，工具输出偏英文但不能按 4 算得太乐观。 */
+const TOKEN_TO_CHAR_RATIO = 3;
+/** 再小的窗口也要让模型看到一点东西。 */
+const MIN_TOOL_OUTPUT_CHARS = 2_000;
+
+/**
+ * 单条工具结果允许占的字符数：按窗口比例算，再夹到 [2000, MAX_TOOL_OUTPUT_CHARS]。
+ *
+ * 纯函数（窗口值由调用方取），便于单测。
+ */
+export function toolOutputCharLimit(windowTokens: number): number {
+  if (!Number.isFinite(windowTokens) || windowTokens <= 0) return MAX_TOOL_OUTPUT_CHARS;
+  const chars = Math.floor(windowTokens * TOOL_OUTPUT_WINDOW_SHARE * TOKEN_TO_CHAR_RATIO);
+  return Math.min(MAX_TOOL_OUTPUT_CHARS, Math.max(MIN_TOOL_OUTPUT_CHARS, chars));
+}
+
 /**
  * 工具结果在内存里的硬上限（字符）。
  *

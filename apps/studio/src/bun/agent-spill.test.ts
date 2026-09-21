@@ -14,6 +14,7 @@ import {
   pruneSpills,
   spillRoot,
   spillToolOutput,
+  toolOutputCharLimit,
   truncateForModel,
 } from "./agent-spill";
 
@@ -234,6 +235,26 @@ describe("isSpillPath（那两处窄口子的边界）", () => {
       rmSync(path.join(spillRoot(), "91_779"), { force: true });
       rmSync(secret, { force: true });
       clearConversationSpills(91_778);
+    }
+  });
+});
+
+describe("toolOutputCharLimit（单条工具输出随窗口缩放）", () => {
+  test("8192 窗口算出 6144（8k 窗口下单条工具结果不能吃掉大半个窗口）", () => {
+    expect(toolOutputCharLimit(8192)).toBe(6144);
+  });
+
+  test("大窗口被 MAX_TOOL_OUTPUT_CHARS 夹住（窗口再大也不放宽）", () => {
+    expect(toolOutputCharLimit(131_072)).toBe(MAX_TOOL_OUTPUT_CHARS);
+  });
+
+  test("小窗口被下限夹住：再小的窗口也要让模型看到一点东西", () => {
+    expect(toolOutputCharLimit(1024)).toBe(2000);
+  });
+
+  test("非法值（0、负数、NaN、Infinity）退回 MAX_TOOL_OUTPUT_CHARS", () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(toolOutputCharLimit(bad)).toBe(MAX_TOOL_OUTPUT_CHARS);
     }
   });
 });

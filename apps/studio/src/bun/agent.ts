@@ -91,6 +91,7 @@ import { createTurnSnapshot, revertToSnapshot } from "./agent-snapshots";
 import { getWorkspaceChanges, getWorkspaceDiff, isGitRepo } from "./workspace-changes";
 import {
   contextUsage,
+  contextWindowTokens,
   forgetPromptTokens,
   rememberPromptTokens,
   type ContextUsage,
@@ -108,9 +109,9 @@ import {
   retryNoticeText,
 } from "./agent-retry";
 import {
-  MAX_TOOL_OUTPUT_CHARS,
   clearConversationSpills,
   spillToolOutput,
+  toolOutputCharLimit,
   truncateForModel,
 } from "./agent-spill";
 import { computeTokenStats, type MessageStats } from "./chat-stats";
@@ -645,7 +646,8 @@ function makeToolOutputHook(conversationId: number) {
     result: unknown;
   }): Promise<AfterToolCallResult | undefined> => {
     const text = resultText(context.result);
-    if (text.length <= MAX_TOOL_OUTPUT_CHARS) return undefined;
+    const limit = toolOutputCharLimit(contextWindowTokens());
+    if (text.length <= limit) return undefined;
     const spill = spillToolOutput({ conversationId, toolName: context.toolCall.name, text });
     logEvent({
       level: "info",
@@ -655,7 +657,7 @@ function makeToolOutputHook(conversationId: number) {
       detail: { conversationId, tool: context.toolCall.name, chars: text.length, spill: spill?.path ?? null },
     });
     return {
-      content: [{ type: "text" as const, text: truncateForModel(text, { spillPath: spill?.path ?? null }).text }],
+      content: [{ type: "text" as const, text: truncateForModel(text, { maxChars: limit, spillPath: spill?.path ?? null }).text }],
     };
   };
 }
