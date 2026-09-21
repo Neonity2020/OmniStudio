@@ -124,8 +124,16 @@ rm -f /tmp/gate-lint.$$
 
 # 7. 相关测试必须全绿
 if [ -n "$TESTS" ]; then
+  T0=$(date +%s)
   if bun test --parallel $TESTS > /tmp/gate-test.$$ 2>&1; then
-    note "tests PASS ($(grep -oE '^ *[0-9]+ pass' /tmp/gate-test.$$ | tail -1 | tr -s ' ' | sed 's/^ //'))"
+    T1=$(date +%s); DUR=$((T1 - T0))
+    note "tests PASS ($(grep -oE '^ *[0-9]+ pass' /tmp/gate-test.$$ | tail -1 | tr -s ' ' | sed 's/^ //'), ${DUR}s)"
+    # 慢用例守卫：整个套件基线约 11 秒，单个文件集合跑过 60 秒必然是有人写了
+    # 真等超时的用例（实测出现过一条等 600 秒的）。门只看结果不看耗时的话拦不住。
+    LIMIT="${GATE_TEST_MAX_SECONDS:-60}"
+    if [ "$DUR" -gt "$LIMIT" ]; then
+      bad "tests-duration ${DUR}s 超过 ${LIMIT}s —— 检查是不是写了真的等超时的用例"
+    fi
   else
     bad "tests FAIL"; tail -35 /tmp/gate-test.$$ | sed 's/^/GATE:   /'
   fi
