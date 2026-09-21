@@ -1125,8 +1125,14 @@ type Session = {
    * `coveredCount` 表示前 N 条消息已经被这段摘要取代（换会话 / 重新生成时整块丢掉）。
    */
   summary: { text: string; coveredCount: number; tokensBefore: number } | null;
-  /** 正在进行的摘要调用：同一会话同时只允许一次，避免并发重复计费。 */
-  summarizing: Promise<void> | null;
+  /**
+   * 摘要熔断：上次摘要失败的时刻。
+   *
+   * `transformContext` 每次模型调用前都会跑，而摘要超时是 90 秒；一直失败的话
+   * 一个十几步的回合会凭空多花十几分钟，用户只看到「处理中」在涨。失败后冷却
+   * 一段时间，期间直接走确定性裁剪（那本来就是失败时的退路）。
+   */
+  summaryFailedAt: number | null;
   /**
    * 本轮的回合快照 id（`createTurnSnapshot` 的产物）。
    * `checkpoint` 会记下它，`rewind` 时如果要连文件一起还原就用这个 id。
@@ -1595,7 +1601,7 @@ async function runSubagent(opts: {
      * 记账放在这个局部对象上：子智能体跑完即散，不需要跨回合保留。
      */
     transformContext: makeContextTransform(
-      { workspace: opts.workspace, summary: null, compactedDropped: 0 },
+      { workspace: opts.workspace, summary: null, compactedDropped: 0, summaryFailedAt: null },
       opts.conversationId,
       { model, models, streamFn },
     ),
@@ -1953,6 +1959,8 @@ export type CompactionHost = {
   workspace: string;
   summary: { text: string; coveredCount: number; tokensBefore: number } | null;
   compactedDropped: number;
+  /** 摘要熔断：上次摘要失败的时刻（冷却期内跳过摘要，直接走确定性裁剪）。 */
+  summaryFailedAt?: number | null;
   /** 探索打点 / 收网的状态（子智能体不参与，传 null）。 */
   checkpoint?: { goal: string; atMessageCount: number; atSnapshotId: string | null; startedAt: number } | null;
   rewind?: RewindState | null;
@@ -1982,6 +1990,9 @@ export function makeContextTransform(
     // 摘要要保留的"最近上下文"：窗口的 1/4。本地 8k 窗口下约 2k tokens，
     // 够放下最近一两轮的来龙去脉，又不至于让摘要区域小到没意义。
     const keepRecent = Math.max(128, Math.floor(contextWindow * 0.25));
+
+    /** 摘要失败后的冷却：期间只走确定性裁剪。90 秒超时 × 十几步足够把一个回合拖垮。 */
+    const summaryCooldownMs = 5 * 60_000;
 
     const record = (toolName: string, output: string) => {
       recordEvent({ conversationId, messageId: currentMessageId(conversationId), kind: "status", toolName, output });
@@ -2025,7 +2036,9 @@ export function makeContextTransform(
       if (estimateMessagesTokens(effective as never) > budget) {
         const covered = host.summary?.coveredCount ?? 0;
         const cut = findSummaryCut(current, keepRecent, (slice) => estimateMessagesTokens(slice as never), 2);
-        if (cut !== null && cut > covered) {
+        const summaryCooling =
+          host.summaryFailedAt != null && Date.now() - host.summaryFailedAt < summaryCooldownMs;
+        if (cut !== null && cut > covered && !summaryCooling) {
           // 摘要输入里带上"这段历史里提到的事"召回的记忆：压缩后上下文才不会断片
           // （摘要是模型写的，它没看过记忆库；不喂给它，记忆就只存在于压缩之前）。
           const query = lastUserText(current.slice(covered, cut)) ?? "";
@@ -2043,6 +2056,7 @@ export function makeContextTransform(
           });
           if (outcome.ok) {
             host.summary = { text: outcome.summary, coveredCount: outcome.coveredCount, tokensBefore: outcome.tokensBefore };
+            host.summaryFailedAt = null;
             record(
               "compact",
               `上下文摘要：前 ${outcome.coveredCount} 条历史（约 ${outcome.tokensBefore} tokens）已压缩成摘要` +
@@ -2058,6 +2072,7 @@ export function makeContextTransform(
               detail: { conversationId },
             });
             record("compact", `摘要式压缩失败（${outcome.reason}），本轮改用确定性裁剪。`);
+            host.summaryFailedAt = Date.now();
           }
         }
       }
@@ -2198,7 +2213,7 @@ async function getOrCreateSession(
     startupContext,
     modelKey,
     summary: null,
-    summarizing: null,
+    summaryFailedAt: null,
     turnSnapshotId: null,
     checkpoint: null,
     rewind: null,

@@ -23,10 +23,10 @@
   ],
   "mutations": [
     {
-      "name": "冷却判断去掉（每步又重试一次 90 秒摘要）",
+      "name": "冷却时长归零（每步又重试一次 90 秒摘要）",
       "file": "apps/studio/src/bun/agent.ts",
-      "find": "SUMMARY_COOLDOWN_MS",
-      "replace": "0 * "
+      "find": "const summaryCooldownMs = 5 * 60_000;",
+      "replace": "const summaryCooldownMs = 0;"
     }
   ]
 }
