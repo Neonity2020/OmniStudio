@@ -4,7 +4,8 @@
  * 语义：
  * - 每个工具调用先被翻译成一条 (permission, pattern) 请求，例如
  *   bash → ("bash", "npm test")、write_file → ("edit", "src/a.ts")、
- *   工作区外的读取 → ("external_directory", "/Users/me/notes.md")；
+ *   工作区外的读取 → ("external_directory", "/Users/me/notes.md")、
+ *   工作区的写入 → ("external_write", "/Users/me/notes.md")；
  * - 规则表按「后匹配覆盖先匹配」求值，无匹配则回落到该权限的内置默认动作；
  * - 动作 allow / ask / deny：ask 会挂起工具执行，把请求推给界面上的授权弹窗，
  *   用户选「仅本次」「本会话总是」「始终允许（写进工作区规则）」或「拒绝」。
@@ -36,7 +37,7 @@ export type PermissionRule = {
 
 /** 一次工具调用翻译出的授权请求（也是弹窗展示的数据源）。 */
 export type PermissionRequest = {
-  /** 权限名：bash / edit / read / external_directory / webfetch / websearch / mcp / media / task / doom_loop */
+  /** 权限名：bash / edit / read / external_directory / external_write / webfetch / websearch / mcp / media / task / doom_loop */
   permission: string;
   /** 请求的具体对象（命令 / 路径 / URL / 工具名）。 */
   pattern: string;
@@ -246,6 +247,8 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
     { permission: "doom_loop", pattern: "*", action: "ask" },
     // 工作区外的读写默认都要问一句：这是 agent 最容易被注入利用的边界。
     { permission: "external_directory", pattern: "*", action: "ask" },
+    // 写比读更危险，单独一个权限名：「总是允许」一次读不该连带放行同目录的写。
+    { permission: "external_write", pattern: "*", action: "ask" },
   ];
 
   /**
@@ -266,6 +269,7 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
       { permission: "edit", pattern: "*", action: "allow" },
       { permission: "mcp", pattern: "*", action: "allow" },
       { permission: "external_directory", pattern: "*", action: "allow" },
+      { permission: "external_write", pattern: "*", action: "allow" },
     ];
   }
   if (mode === "manual") {
@@ -275,6 +279,7 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
       { permission: "bash", pattern: "*", action: "ask" },
       { permission: "edit", pattern: "*", action: "ask" },
       { permission: "mcp", pattern: "*", action: "ask" },
+      { permission: "external_write", pattern: "*", action: "ask" },
     ];
   }
   if (mode === "strict") {
@@ -285,6 +290,7 @@ export function defaultRules(mode: ApprovalMode = approvalMode()): PermissionRul
       { permission: "edit", pattern: "*", action: "deny" },
       { permission: "mcp", pattern: "*", action: "deny" },
       { permission: "external_directory", pattern: "*", action: "deny" },
+      { permission: "external_write", pattern: "*", action: "deny" },
     ];
   }
   // smart（默认）：写工作区、跑普通命令不打扰；危险的命令与工作区外访问才问。
@@ -568,7 +574,7 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
       if (outside.length) {
         const dirs = [...new Set(outside.map((target) => path.dirname(target)))];
         return {
-          permission: "external_directory",
+          permission: "external_write",
           pattern: dirs[0]!,
           title: "在工作区之外应用补丁",
           detail: { 文件: outside.join("\n"), 工作区: workspace },
@@ -590,7 +596,7 @@ export function permissionRequestForTool(call: ToolCallShape): PermissionRequest
       const inside = isInsideWorkspace(workspace, target);
       if (!inside) {
         return {
-          permission: "external_directory",
+          permission: "external_write",
           pattern: path.dirname(target),
           title: "在工作区之外写文件",
           detail: { 文件: target, 工作区: workspace },
@@ -740,7 +746,8 @@ export const HUMAN_PERMISSION_LABELS: Record<string, string> = {
   bash: "执行命令",
   edit: "修改文件",
   read: "读取文件",
-  external_directory: "访问工作区之外",
+  external_directory: "读取工作区之外",
+  external_write: "写入工作区之外",
   webfetch: "抓取网页",
   websearch: "联网搜索",
   mcp: "外部工具",
@@ -803,6 +810,7 @@ const PROBES: { permission: string; pattern: string }[] = [
   { permission: "webfetch", pattern: "*" },
   { permission: "mcp", pattern: "*" },
   { permission: "external_directory", pattern: "*" },
+  { permission: "external_write", pattern: "*" },
   { permission: "sandbox_escalation", pattern: "*" },
   { permission: "doom_loop", pattern: "*" },
 ];

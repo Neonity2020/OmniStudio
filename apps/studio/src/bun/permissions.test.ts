@@ -205,7 +205,8 @@ describe("permissionRequestForTool", () => {
       args: { path: "/etc/hosts" },
       workspace,
     });
-    expect(outside?.permission).toBe("external_directory");
+    // 原断言 external_directory；写类已独立为 external_write（读仍是 external_directory）。
+    expect(outside?.permission).toBe("external_write");
     expect(outside?.pattern).toBe("/etc");
   });
 
@@ -377,6 +378,96 @@ describe("路径工具", () => {
     expect(isInsideWorkspace("/tmp/ws", "/tmp/ws-other/a.ts")).toBe(false);
     expect(displayPath("/tmp/ws", "/tmp/ws/src/a.ts")).toBe("src/a.ts");
     expect(displayPath("/tmp/ws", "/etc/hosts")).toBe("/etc/hosts");
+  });
+});
+
+describe("工作区外的读写分权（写 = external_write，读 = external_directory）", () => {
+  const workspace = "/tmp/ws";
+
+  test("写工作区外的文件 → external_write（write_file 与 edit_file 各断言一次）", () => {
+    for (const toolName of ["write_file", "edit_file"] as const) {
+      const request = permissionRequestForTool({
+        toolName,
+        args: { path: "/etc/hosts" },
+        workspace,
+      });
+      expect(request?.permission).toBe("external_write");
+      expect(request?.pattern).toBe("/etc"); // pattern / title / detail / always 保持原样
+      expect(request?.detail["文件"]).toBe("/etc/hosts");
+      expect(request?.always).toEqual(["/etc", "/etc/*"]);
+    }
+  });
+
+  test("工作区外的 apply_patch → external_write", () => {
+    const request = permissionRequestForTool({
+      toolName: "apply_patch",
+      args: { patch: "*** Update File: /etc/hosts\n+127.0.0.1 localhost\n" },
+      workspace,
+    });
+    expect(request?.permission).toBe("external_write");
+    expect(request?.pattern).toBe("/etc");
+    expect(request?.always).toEqual(["/etc", "/etc/*"]);
+  });
+
+  test("读工作区外的文件仍是 external_directory（read_file / glob / grep）", () => {
+    expect(
+      permissionRequestForTool({ toolName: "read_file", args: { path: "/etc/hosts" }, workspace })
+        ?.permission,
+    ).toBe("external_directory");
+    expect(
+      permissionRequestForTool({ toolName: "glob", args: { pattern: "*.md", path: "/etc" }, workspace })
+        ?.permission,
+    ).toBe("external_directory");
+    expect(
+      permissionRequestForTool({ toolName: "grep", args: { pattern: "x", path: "/etc" }, workspace })
+        ?.permission,
+    ).toBe("external_directory");
+  });
+
+  test("已存的 external_directory 允许规则不再放行写（本次修复的缺陷）", () => {
+    // 用户为「读」点了「本会话总是」，落下一条 external_directory + 父目录的 allow 规则；
+    // 修复前这条规则会同时放行同目录的写 / 补丁（授权读 = 顺手授权写）。
+    const stored = [{ permission: "external_directory", pattern: "/etc", action: "allow" as const }];
+    const rules = [...defaultRules("smart"), ...stored];
+    const write = permissionRequestForTool({
+      toolName: "write_file",
+      args: { path: "/etc/hosts" },
+      workspace,
+    });
+    expect(write).not.toBeNull();
+    expect(evaluate(write!, rules).action).not.toBe("allow");
+    // 而读照旧被放行（规则 pattern 带 `/*`，覆盖文件本身）：老规则只放行读，体验不变。
+    const read = permissionRequestForTool({
+      toolName: "read_file",
+      args: { path: "/etc/hosts" },
+      workspace,
+    });
+    expect(
+      evaluate(
+        read!,
+        [...rules, { permission: "external_directory", pattern: "/etc/*", action: "allow" }],
+      ).action,
+    ).toBe("allow");
+  });
+
+  test("四个档位都有 external_write 默认条目，动作与同档 external_directory 一致", () => {
+    for (const mode of ["smart", "auto", "manual", "strict"] as const) {
+      const rules = defaultRules(mode);
+      const read = rules.find((rule) => rule.permission === "external_directory");
+      const write = rules.find((rule) => rule.permission === "external_write");
+      expect(write).toBeDefined();
+      expect(write!.pattern).toBe("*");
+      expect(write!.action).toBe(read!.action);
+    }
+  });
+
+  test("中文标签与权限摘要探针补上 external_write", () => {
+    expect(HUMAN_PERMISSION_LABELS["external_write"]).toBe("写入工作区之外");
+    expect(HUMAN_PERMISSION_LABELS["external_directory"]).toBe("读取工作区之外");
+    const summary = summarizeEffectivePermissions(null, "/tmp/ws");
+    const row = summary.find((item) => item.permission === "external_write");
+    expect(row).toBeDefined();
+    expect(row!.label).toBe("写入工作区之外");
   });
 });
 

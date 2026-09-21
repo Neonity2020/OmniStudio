@@ -2,7 +2,10 @@
   "id": "27-split-external-write",
   "allowed_files": [
     "apps/studio/src/bun/permissions.ts",
-    "apps/studio/src/bun/permissions.test.ts"
+    "apps/studio/src/bun/permissions.test.ts",
+    "apps/studio/src/shared/i18n.ts",
+    "apps/studio/src/mainview/app/agent/inline-interactions.tsx",
+    "apps/studio/src/bun/agent-tools.patch.test.ts"
   ],
   "source_files": [
     "apps/studio/src/bun/permissions.ts"
@@ -10,14 +13,16 @@
   "test_files": [
     "apps/studio/src/bun/permissions.test.ts",
     "apps/studio/src/bun/agent-tools.path.test.ts",
-    "apps/studio/src/bun/agent-sandbox.test.ts"
+    "apps/studio/src/bun/agent-sandbox.test.ts",
+    "apps/studio/src/bun/agent-tools.patch.test.ts"
   ],
   "max_source_lines": 30,
   "banned_patterns": [
     "@ts-ignore",
     "@ts-expect-error",
     "\\.skip\\(",
-    "\\.todo\\("
+    "\\.todo\\(",
+    "readAlways"
   ],
   "mutations": [
     {
