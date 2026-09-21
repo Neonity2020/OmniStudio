@@ -555,6 +555,7 @@ function createEditFile(ctx: ToolContext): BuiltTool {
         const target = resolvePath(ctx.workspace, params.path);
         assertWritable(ctx, target);
         if (!existsSync(target)) return errorResult(`File not found: ${target}${NOT_FOUND_HINT}`);
+        if (!params.old_str) return errorResult(`old_str 不能为空（空字符串会毁掉整个文件）`);
         const original = readFileSync(target, "utf8");
         const occurrences = original.split(params.old_str).length - 1;
         if (occurrences === 0) return errorResult(`old_str not found in ${target}${EDIT_MISMATCH_HINT}`);
@@ -566,7 +567,10 @@ function createEditFile(ctx: ToolContext): BuiltTool {
         }
         const next = params.replace_all
           ? original.split(params.old_str).join(params.new_str)
-          : original.replace(params.old_str, params.new_str);
+          : (() => {
+              const idx = original.indexOf(params.old_str);
+              return original.slice(0, idx) + params.new_str + original.slice(idx + params.old_str.length);
+            })();
         writeFileSync(target, next, "utf8");
         ctx.recordArtifact?.(target, "edit_file");
         return textResult(
