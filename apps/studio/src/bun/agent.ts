@@ -3188,7 +3188,13 @@ async function drainQueuedMessages(conversationId: number, workspace: string): P
     const [next, ...rest] = queue;
     if (rest.length === 0) pendingMessages.delete(conversationId);
     else pendingMessages.set(conversationId, rest);
-    const result = await runAgentTurn({ conversationId, content: next!, workspace });
+    // `insertUserMessage: false`：这条消息入队时（`followUpAgentMessage`）已经落库，出队时再插一条就会双写。
+    const result = await runAgentTurn({
+      conversationId,
+      content: next!,
+      workspace,
+      insertUserMessage: false,
+    });
     if (!result.ok) return;
   }
 }
