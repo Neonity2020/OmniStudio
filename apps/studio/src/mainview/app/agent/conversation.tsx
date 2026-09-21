@@ -207,8 +207,16 @@ export function AgentConversation({
    * 看起来就是"执行到一半记录加不上"，而且不会再自己好（打开会话时的整份加载是唯一
    * 的补救）。所以跑动中每几秒按 id 只取新增的那几条并进列表，收尾（running 转 false）
    * 再补一次：正常情况下每次返回空数组，几乎不花钱。
+   *
+   * 首次打开会话时全量查询还没落地（store 里还没有事件），那时 `afterId` 会算成 0，
+   * 追平会变成又一次全量拉取（几千条轨迹的会话被完整拉两遍）—— 所以首次全量
+   * 查询落地（`eventsQuery.isSuccess`）之前不追平；落地后 effect 靠它重跑，追平才开始。
+   * `isSuccess` 用依赖而不是 `data`：前者从 false→true 只发生一次，effect 只多跑一次。
+   * 空会话从 0 追平是对的（返回空数组，很便宜）；`eventsQuery` 失败时不追平，
+   * 打开会话时的整份查询会再对齐一次。
    */
   useEffect(() => {
+    if (!eventsQuery.isSuccess) return;
     const catchUp = async () => {
       const known = useAgentStore.getState().events;
       const afterId = known.length > 0 ? known[known.length - 1]!.id : 0;
@@ -225,7 +233,7 @@ export function AgentConversation({
     }
     const timer = window.setInterval(() => void catchUp(), 4000);
     return () => window.clearInterval(timer);
-  }, [running, conversationId]);
+  }, [running, conversationId, eventsQuery.isSuccess]);
 
   // 只有最后一条助手消息在流式时才转圈：前面的消息早就结束了。
   const lastMessage = activeMessages[activeMessages.length - 1];
