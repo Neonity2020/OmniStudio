@@ -1519,6 +1519,7 @@ async function runSubagent(opts: {
   description: string;
   prompt: string;
   subagentType: string;
+  signal?: AbortSignal;
 }): Promise<string> {
   const subagentId = randomUUID().slice(0, 8);
   const isReview = opts.subagentType === "review";
@@ -1617,6 +1618,13 @@ async function runSubagent(opts: {
     // 也能看到"原文在哪"（子会话的过程不入主上下文，但工具结果本身要能读回）。
     afterToolCall: makeToolOutputHook(opts.conversationId),
   });
+
+  // 父回合被中止时连子智能体一起停：否则用户按了停止，子智能体正在跑的
+  // bash / write_file 还会执行到自然结束。
+  if (opts.signal) {
+    if (opts.signal.aborted) agent.abort();
+    else opts.signal.addEventListener("abort", () => agent.abort(), { once: true });
+  }
 
   let text = "";
   let subagentSteps = 0;

@@ -89,7 +89,16 @@ fi
 
 # 3. 禁用写法
 if [ -n "$BANNED" ]; then
-  DIFF="$($GIT diff HEAD -- $ALLOWED)"
+  # 只看**新增**行：整份 diff 里搜的话，删掉一行禁用写法反而会被判成「引入了它」
+  # （移除行带 `-` 前缀，grep 分不出来）。实测在第 05 条上误报过一次。
+  # 未跟踪的新文件 `git diff` 看不见，整份补一遍。
+  DIFF="$($GIT diff HEAD -- $ALLOWED | grep '^+' | grep -v '^+++')"
+  for f in $ALLOWED; do
+    if [ -f "$f" ] && ! $GIT ls-files --error-unmatch "$f" > /dev/null 2>&1; then
+      DIFF="$DIFF
+$(cat "$f")"
+    fi
+  done
   BHIT=0
   while IFS= read -r p; do
     [ -z "$p" ] && continue

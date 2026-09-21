@@ -62,6 +62,7 @@ export type ToolContext = {
     description: string;
     prompt: string;
     subagentType: string;
+    signal?: AbortSignal;
   }) => Promise<string>;
   /** 登记产出物（agent.ts 注入）。 */
   recordArtifact?: (filePath: string, tool: string) => void;
@@ -1285,13 +1286,13 @@ function createTaskTool(ctx: ToolContext): BuiltTool {
       signal?: AbortSignal,
     ) => {
       if (!ctx.spawnSubagent) return errorResult("Subagents are not available in this mode.");
-      void signal;
       const subagentType = normalizeSubagentType(params.subagent_type);
       try {
         const summary = await ctx.spawnSubagent({
           description: params.description,
           prompt: params.prompt,
           subagentType,
+          signal,
         });
         return textResult(summary || "(subagent returned no output)");
       } catch (e) {
