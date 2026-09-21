@@ -21,7 +21,7 @@
  * - 网络默认放行（`AGENT_SANDBOX_NETWORK=1`）：Codex 默认禁网，但本地工作流里
  *   禁网会让装依赖 / 拉模型直接失败；需要严格模式时把它关掉。
  */
-import { existsSync, realpathSync } from "fs";
+import { existsSync, realpathSync, statSync } from "fs";
 import os from "os";
 import path from "path";
 
@@ -374,6 +374,7 @@ export function bwrapArgs(opts: {
   mode?: SandboxMode;
   authorizedFolders?: string[];
   allowNetwork?: boolean;
+  blankFile?: string;
 }): string[] {
   const mode = opts.mode ?? sandboxMode();
   const args: string[] = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
@@ -388,9 +389,20 @@ export function bwrapArgs(opts: {
     args.push("--bind", resolved, resolved);
   }
 
-  // 凭据目录挖空：bwrap 没有"按路径拒绝读"的写法，用空的 tmpfs 盖住最直接。
+  // 凭据路径挖空：bwrap 没有"按路径拒绝读"的写法。目录用空的 tmpfs 盖住最直接；
+  // **文件不能用 tmpfs**（挂载点必须是目录，对着普通文件挂 bwrap 直接启动失败，
+  // 报 `Can't mkdir …: Not a directory`），改用一个空内容的东西只读绑上去盖住原内容。
+  // 取不到状态（竞态下被删了）就保守当文件处理 —— 总比让沙箱起不来强。
+  const blankFile = opts.blankFile ?? "/dev/null";
   for (const target of existingCredentialPaths()) {
-    args.push("--tmpfs", target);
+    let isDir = false;
+    try {
+      isDir = statSync(target).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (isDir) args.push("--tmpfs", target);
+    else args.push("--ro-bind", blankFile, target);
   }
 
   args.push("--unshare-pid", "--die-with-parent", "--new-session");

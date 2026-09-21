@@ -39,6 +39,23 @@ import { updateSettings } from "./db/settings";
  */
 const onMac = process.platform === "darwin";
 
+// bwrap argv 里「开关 + 紧跟的参数」的配对关系。--ro-bind 出现很多次（根、设备都靠它），
+// 光看「包含」分不出是哪一对，所以断言落在「开关 + 紧跟的路径」上。
+  const tmpfsTargets = (list: string[]): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i + 2 < list.length; i += 1) {
+      if (list[i] === "--tmpfs") out.push(list[i + 1] as string);
+    }
+    return out;
+  };
+  const roBind = (list: string[], source: string): string[] => {
+    const out: string[] = [];
+    for (let i = 0; i + 2 < list.length; i += 1) {
+      if (list[i] === "--ro-bind" && list[i + 1] === source) out.push(list[i + 2] as string);
+    }
+    return out;
+  };
+
 let workspace: string;
 
 const readFileSyncText = (target: string): string => readFileSync(target, "utf8");
@@ -243,6 +260,68 @@ describe("Linux（bwrap）", () => {
       process.env.HOME = previousHome;
       rmSync(fakeHome, { recursive: true, force: true });
     }
+  });
+
+  /** 假的 $HOME：同时放一个凭据**目录**（.ssh）和一个凭据**文件**（.npmrc）。 */
+  const withFakeCredentialFiles = (fn: (fakeHome: string) => void): void => {
+    const previousHome = process.env.HOME;
+    const fakeHome = mkdtempSync(path.join(homedir(), ".omni-bwrap-creds-"));
+    mkdirSync(path.join(fakeHome, ".ssh"), { recursive: true });
+    writeFileSync(path.join(fakeHome, ".npmrc"), "//secret token\n");
+    process.env.HOME = fakeHome;
+    try {
+      fn(fakeHome);
+    } finally {
+      process.env.HOME = previousHome;
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
+  };
+
+  test("argv：凭据**文件**（.npmrc）用 --ro-bind 盖住，而不是 --tmpfs（对着文件挂 tmpfs 会让 bwrap 起不来）", () => {
+    withFakeCredentialFiles((fakeHome) => {
+      const args = bwrapArgs({ workspace, shell: "/bin/bash", command: "ls", mode: "read-only" });
+      const npmrc = path.join(fakeHome, ".npmrc");
+      // 本次修的缺陷：文件不能出现在 --tmpfs 的参数里（那是给目录用的）。
+      expect(tmpfsTargets(args)).not.toContain(npmrc);
+      // 它得被盖住：以 /dev/null（默认空文件）为源只读绑到原位置上。
+      expect(roBind(args, "/dev/null")).toContain(npmrc);
+      // 临时目录是临时目录：它本来就**允许写**（测试运行器 / 编译器 / 包管理器都要写
+      // TMPDIR），把它盖掉等于把沙箱变成不可用，凭据挖掘空不该误伤它。
+      for (const root of sandboxTempRoots()) expect(tmpfsTargets(args)).not.toContain(root);
+      // 凭据目录本身（.ssh）也不该被当成文件用 --ro-bind 盖住。
+      expect(roBind(args, "/dev/null")).not.toContain(path.join(fakeHome, ".ssh"));
+    });
+  });
+
+  test("argv：凭据目录（.ssh）仍走 --tmpfs，没被误改成 --ro-bind", () => {
+    withFakeCredentialFiles((fakeHome) => {
+      const args = bwrapArgs({ workspace, shell: "/bin/bash", command: "ls", mode: "read-only" });
+      const ssh = path.join(fakeHome, ".ssh");
+      expect(tmpfsTargets(args)).toContain(ssh);
+      // 目录不能被 --ro-bind 盖住：那样只绑了目录本身，里面原有的东西照样读得到。
+      expect(roBind(args, "/dev/null")).not.toContain(ssh);
+    });
+  });
+
+  test("argv：blankFile 可自定义文件类凭据的覆盖源，缺省是 /dev/null", () => {
+    withFakeCredentialFiles((fakeHome) => {
+      const npmrc = path.join(fakeHome, ".npmrc");
+      const custom = path.join(workspace, "blank.bin");
+      writeFileSync(custom, "");
+      const withCustom = bwrapArgs({
+        workspace,
+        shell: "/bin/bash",
+        command: "ls",
+        mode: "read-only",
+        blankFile: custom,
+      });
+      expect(roBind(withCustom, custom)).toContain(npmrc);
+      expect(roBind(withCustom, "/dev/null")).not.toContain(npmrc);
+      expect(tmpfsTargets(withCustom)).not.toContain(npmrc);
+
+      const without = bwrapArgs({ workspace, shell: "/bin/bash", command: "ls", mode: "read-only" });
+      expect(roBind(without, "/dev/null")).toContain(npmrc);
+    });
   });
 
   test("wrapShellCommand：Linux + bwrap 可用 → 包 bwrap；不可用 → 降级并给出安装命令", () => {
