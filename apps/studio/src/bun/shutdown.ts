@@ -23,6 +23,7 @@ import * as Tunnel from "./tunnel";
 import { closeAllTerminals } from "./terminal-sessions";
 import { shutdownSkills } from "./skills";
 import { stopControlServer } from "./control-server";
+import { stopAllAgentRuns } from "./agent";
 
 let teardownDone: Promise<void> | null = null;
 
@@ -58,6 +59,8 @@ export function teardownServices(): Promise<void> {
     }
     // 侧栏终端 shell：跟着一起收掉，别留下没人管的会话。
     closeAllTerminals();
+    // agent 回合与侧栏终端同类：不请求停止，它的 detached bash 会活成孤儿。
+    stopAllAgentRuns();
     shutdownSkills();
     stopControlServer();
   })();
@@ -69,6 +72,7 @@ export function teardownServicesSync(): void {
   ServerManager.forceKill();
   Tunnel.stopTunnelSync();
   closeAllTerminals();
+  stopAllAgentRuns();
   shutdownSkills();
   stopControlServer();
 }

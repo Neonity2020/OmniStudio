@@ -3271,6 +3271,30 @@ export function stopAgentRun(conversationId: number): { ok: boolean } {
   }
 }
 
+/**
+ * 应用退出时收尾所有在跑的 agent 回合。
+ *
+ * 只做「请求停止」这一件事：具体的中止、正文落库、进程组回收都由各自回合的
+ * 收尾路径完成（`stopAgentRun` → abort → finally）。这里不重复实现，也不等它们跑完
+ * —— 退出路径上不能被某个卡住的回合拖住。
+ *
+ * 返回被请求停止的会话数，给日志用。
+ */
+export function stopAllAgentRuns(): number {
+  // 启动中的也要停：那段窗口里 `bash` 还没起，但授权弹窗和会话可能已经建了。
+  const ids = new Set<number>([...running, ...starting]);
+  let stopped = 0;
+  for (const id of ids) {
+    try {
+      stopAgentRun(id);
+      stopped++;
+    } catch {
+      // 收尾阶段最怕「一个失败把其余都跳过」（shutdown.ts 同一原则）。
+    }
+  }
+  return stopped;
+}
+
 export function getAgentRunState(conversationId: number): AgentRunState {
   return {
     conversationId,
