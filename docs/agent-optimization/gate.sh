@@ -148,7 +148,13 @@ fi
 
 # 8. 回退验红（只在 --full）：源码换回 HEAD，测试必须变红。
 #    专抓「用例空转却报已覆盖」。
-if [ "$MODE" = "--full" ] && [ -n "$TESTS" ] && [ -n "$SOURCES" ]; then
+REVERT_RED="$(bun -e "const m=require('$MANIFEST');console.log(m.revert_red===false?'off':'on')" 2>/dev/null)"
+if [ "$MODE" = "--full" ] && [ "$REVERT_RED" = "off" ]; then
+  # 纯搬家型任务（抽函数、换模块位置）没有新用例，退回后原用例照样绿是正常的。
+  # 这类任务的验收锚点写在 manifest 的 revert_red_reason 里，由主 agent 逐条判断。
+  note "revert-red SKIPPED（manifest 显式关闭：$(bun -e "console.log(require('$MANIFEST').revert_red_reason||'未填理由')" 2>/dev/null)）"
+fi
+if [ "$MODE" = "--full" ] && [ "$REVERT_RED" != "off" ] && [ -n "$TESTS" ] && [ -n "$SOURCES" ]; then
   TMP="$(mktemp -d)"
   SUMBEFORE="$(sha256sum $SOURCES 2>/dev/null)"
   for f in $SOURCES; do

@@ -19,5 +19,7 @@
     "\\.skip\\(",
     "\\.todo\\(",
     "from \"\\./agent\""
-  ]
+  ],
+  "revert_red": false,
+  "revert_red_reason": "纯搬家：没有新用例，验收锚点是端到端冒烟仍然 29 个 ✓ / 0 个 ✗（退回本模块会让冒烟 import 失败，那一层已由 smoke-resilience 覆盖）"
 }

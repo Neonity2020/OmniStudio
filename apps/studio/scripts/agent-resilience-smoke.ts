@@ -39,6 +39,8 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
+import { sseChunk, startStubLlm, textChunks, toolCallChunks } from "../src/bun/test-stub-llm";
+
 const dataDir = mkdtempSync(path.join(tmpdir(), "omni-resilience-"));
 process.env.OMNI_DATA_DIR = dataDir;
 const workspace = mkdtempSync(path.join(tmpdir(), "omni-resilience-ws-"));
@@ -46,60 +48,6 @@ const workspace = mkdtempSync(path.join(tmpdir(), "omni-resilience-ws-"));
 // ---------------------------------------------------------------------------
 // 脚本化桩服务
 // ---------------------------------------------------------------------------
-function sseChunk(
-  model: string,
-  delta: Record<string, unknown>,
-  finish: string | null = null,
-): string {
-  return `data: ${JSON.stringify({
-    id: "chatcmpl-stub",
-    object: "chat.completion.chunk",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [{ index: 0, delta, finish_reason: finish }],
-  })}\n\n`;
-}
-
-function toolCallChunks(model: string, name: string, args: unknown): string[] {
-  const json = JSON.stringify(args);
-  const chunks = [
-    sseChunk(model, {
-      role: "assistant",
-      content: "",
-      tool_calls: [
-        { index: 0, id: `call_${name}`, type: "function", function: { name, arguments: "" } },
-      ],
-    }),
-  ];
-  for (let i = 0; i < json.length; i += 24) {
-    chunks.push(
-      sseChunk(model, {
-        tool_calls: [{ index: 0, function: { arguments: json.slice(i, i + 24) } }],
-      }),
-    );
-  }
-  chunks.push(sseChunk(model, {}, "tool_calls"));
-  return chunks;
-}
-
-function textChunks(model: string, text: string): string[] {
-  const chunks = [sseChunk(model, { role: "assistant", content: "" })];
-  for (let i = 0; i < text.length; i += 8) {
-    chunks.push(sseChunk(model, { content: text.slice(i, i + 8) }));
-  }
-  chunks.push(
-    `data: ${JSON.stringify({
-      id: "chatcmpl-stub",
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-      usage: { prompt_tokens: 200, completion_tokens: 60, total_tokens: 260 },
-    })}\n\n`,
-  );
-  return chunks;
-}
-
 /**
  * 被掐断的流：有正文增量、但既没有 `finish_reason` 也没有 `[DONE]`。
  * 真实世界的样子是网关 / 服务端中途断开 —— pi-ai 会把它变成
@@ -231,23 +179,9 @@ function toWireShape(
   });
 }
 
-const stub = Bun.serve({
-  port: 0,
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname.endsWith("/models")) {
-      return Response.json({
-        object: "list",
-        data: [{ id: "stub-model", object: "model", created: Date.now(), owned_by: "stub" }],
-      });
-    }
-    const body = (await request.json()) as {
-      model?: string;
-      messages?: { role: string; content?: unknown; tool_calls?: unknown }[];
-      tools?: { function?: { name?: string } }[];
-    };
-    const model = body.model ?? "stub-model";
-    const messages = body.messages ?? [];
+const stub = startStubLlm({
+  respond: async (request) => {
+    const { model, messages } = request;
     const system = messages.find((message) => message.role === "system")?.content;
     const systemText = typeof system === "string" ? system : "";
     const lastUser = messages.filter((message) => message.role === "user").pop()?.content;
@@ -775,7 +709,7 @@ console.log(`\n最终回答：${finalText.slice(0, 200)}\n`);
 // ---------------------------------------------------------------------------
 Agent.deleteConversationEvents(conversation.id);
 Agent.stopAgentRun(conversation.id);
-stub.stop(true);
+stub.stop();
 rmSync(dataDir, { recursive: true, force: true });
 rmSync(workspace, { recursive: true, force: true });
 
