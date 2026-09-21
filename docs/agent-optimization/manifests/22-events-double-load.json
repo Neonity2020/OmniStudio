@@ -1,0 +1,22 @@
+{
+  "id": "22-events-double-load",
+  "allowed_files": [
+    "apps/studio/src/mainview/app/agent/conversation.tsx",
+    "apps/studio/src/mainview/app/agent/conversation.test.tsx"
+  ],
+  "source_files": [
+    "apps/studio/src/mainview/app/agent/conversation.tsx"
+  ],
+  "test_files": [
+    "apps/studio/src/mainview/app/agent/conversation.test.tsx",
+    "apps/studio/src/mainview/app/agent/composer-slash.test.tsx",
+    "apps/studio/src/mainview/app/agent/message.test.tsx"
+  ],
+  "max_source_lines": 15,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ]
+}
