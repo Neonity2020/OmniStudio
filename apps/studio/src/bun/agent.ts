@@ -1961,6 +1961,10 @@ export function makeContextTransform(
   bundle: ModelBundle,
 ): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   return async (messages, signal) => {
+    // 启动期（或两轮之间）按下的停止：这里是「run 已开始、请求还没发出」的唯一插入点。
+    // 内核的 abort() 在 prompt() 之前是 no-op（activeRun 还没建），所以只能从这里抛。
+    // 错误文案带 abort：runAgentTurn 的 catch 按 /abort/i 判定，走已有的「已停止」收尾。
+    if (stopRequests.has(conversationId)) throw new Error("aborted: stop requested before request");
     // 云端模式下窗口来自模型本身（chat-context.ts），不再拿本地引擎的 8k 默认值
     // 当云端窗口 —— 那会让压缩在 60% × 8k 处过早触发，白丢历史。
     const contextWindow = chatContextWindow();
@@ -2450,6 +2454,11 @@ export async function runAgentTurn(opts: {
     return { ok: false, error: "No inference server configured" };
   }
 
+  // 在这里（同步段、任何 await 之前）清上一轮残留的停止标记。
+  // 不能放在后面的 await 之后：启动窗口里新按的停止也会被一起清掉，
+  // 回合就把「这一轮被要求停止」当成「上一轮的残留」忽略了。
+  stopRequests.delete(conversationId);
+
   // 从这里开始有 await（拉起推理服务 / 建会话），必须先占位：
   // 启动段里 `running` 还没置上，不占位的话用户再发一条会并发起第二轮。
   starting.add(conversationId);
@@ -2548,7 +2557,6 @@ export async function runAgentTurn(opts: {
   let committedReasoning = "";
   let stopRequested = false;
   let emptyNudges = 0;
-  stopRequests.delete(conversationId);
   /** user_prompt_submit hook 拦下这一轮时的原因（收尾时如实返回给调用方）。 */
   let hookBlockedReason: string | null = null;
   let promptTokens = 0;
@@ -2937,6 +2945,7 @@ export async function runAgentTurn(opts: {
     if (!aborted) {
       recordEvent({ conversationId, messageId: assistantId, kind: "error", output: msg });
       fullText = fullText ? `${fullText}\n\n⚠️ ${msg}` : `⚠️ ${msg}`;
+      turnError = msg;
     } else {
       fullText = fullText ? `${fullText}\n\n_（已停止）_` : "_（已停止）_";
     }
