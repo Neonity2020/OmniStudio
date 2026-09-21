@@ -2528,6 +2528,8 @@ export async function runAgentTurn(opts: {
    * 把后面那半截收回去，不能连成功回合说过的话一起撤掉。
    */
   const retryLimit = retryAttempts();
+  /** 这一轮的失败原因（outcome 为 error 时填）：收尾时要如实返回给调用方。 */
+  let turnError: string | null = null;
   let committedText = "";
   let committedReasoning = "";
   let stopRequested = false;
@@ -2861,6 +2863,7 @@ export async function runAgentTurn(opts: {
         kind: "error",
         output: outcome.detail,
       });
+      turnError = outcome.detail;
       // 这一轮是"失败被编码成一条空助手消息"的形态（见 agent-outcome.ts），
       // 界面只有 ⚠️ 一行；把完整原因与模型信息落到统一日志，便于定位到具体后端。
       logEvent({
@@ -3033,6 +3036,7 @@ export async function runAgentTurn(opts: {
   }
 
   if (hookBlockedReason) return { ok: false, error: hookBlockedReason };
+  if (turnError) return { ok: false, error: turnError };
   return { ok: true };
 }
 
