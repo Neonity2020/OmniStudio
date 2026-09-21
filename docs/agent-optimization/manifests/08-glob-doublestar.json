@@ -1,0 +1,21 @@
+{
+  "id": "08-glob-doublestar",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent-tools.glob.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-tools.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-tools.glob.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "^\\+export function globToRegExp"
+  ]
+}
