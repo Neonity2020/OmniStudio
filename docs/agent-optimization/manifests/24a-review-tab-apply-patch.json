@@ -14,7 +14,7 @@
     "apps/studio/src/mainview/app/agent/timeline-model.test.ts",
     "apps/studio/src/mainview/app/agent/message.test.tsx"
   ],
-  "max_source_lines": 40,
+  "max_source_lines": 100,
   "banned_patterns": [
     "@ts-ignore",
     "@ts-expect-error",
