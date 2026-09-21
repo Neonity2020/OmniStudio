@@ -293,7 +293,32 @@ export type SettingsKey =
   // 唯一读取点见 bun/embeddings.ts 的 globalEmbeddingDefaults()。
   | "EMBEDDING_MODEL"
   | "EMBEDDING_BASE"
-  | "EMBEDDING_API_KEY";
+  | "EMBEDDING_API_KEY"
+  // SystemOne / JEV（类型化判定：choice / score / noul）。本地与云端两个后端，
+  // 协议与 TypeSafe 官方逐字段对齐（见 shared/systemone.ts），网关在 /v1/systemone
+  // 暴露出去，外部 agent 换 Base URL + Key 即可接入。价格恒为 0：免费。
+  /** local（只用本地）/ cloud（只用云端）；auto（默认）只在用户没选过后端时兜底。
+   *  JEV 页左栏「判定引擎」的 tab 直接写这里，所以它同时是"用户选了哪条路"的记录。 */
+  | "SYSTEMONE_BACKEND"
+  /** 云端 Base URL，默认 TypeSafe 官方 https://api.typesafe.ai。 */
+  | "SYSTEMONE_CLOUD_BASE_URL"
+  | "SYSTEMONE_CLOUD_API_KEY"
+  /** 云端默认模型（官方别名 jev-latest）。 */
+  | "SYSTEMONE_CLOUD_MODEL"
+  /** 自建 / 局域网内的 TypeSafe 兼容服务地址（例：http://127.0.0.1:8100）。 */
+  | "SYSTEMONE_LOCAL_BASE_URL"
+  | "SYSTEMONE_LOCAL_API_KEY"
+  /** 本地默认模型：目录里的 laya-* 名字，或直接填 Hugging Face repo id。 */
+  | "SYSTEMONE_LOCAL_MODEL"
+  /** 本地运行时（laya-mlx）的精度：float16（默认）/ float32。 */
+  | "SYSTEMONE_LOCAL_DTYPE"
+  /** 云端 / 本地服务（HTTP）的单次超时。 */
+  | "SYSTEMONE_TIMEOUT_MS"
+  /**
+   * 本地运行时（laya-mlx worker）的单次超时，默认 600s —— 比 HTTP 那条宽得多，
+   * 因为**第一次调用还要把权重下下来**（几百 MB，取决于网速）。
+   */
+  | "SYSTEMONE_LOCAL_TIMEOUT_MS";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -577,6 +602,20 @@ const DEFAULTS: Record<SettingsKey, string> = {
   EMBEDDING_MODEL: "",
   EMBEDDING_BASE: "",
   EMBEDDING_API_KEY: "",
+  // SystemOne / JEV：默认 auto —— 它只代表"用户还没选过后端"（本地能用就用本地，
+  // 否则云端）。JEV 页左栏的「判定引擎」一切 tab 就把这里改写成 local / cloud，
+  // 之后那一侧是硬选择，另一侧不再兜底。云端地址预填官方，
+  // Key 留空（没 Key 时 auto 会如实报"没有可用后端"而不是偷偷失败）。
+  SYSTEMONE_BACKEND: "auto",
+  SYSTEMONE_CLOUD_BASE_URL: "https://api.typesafe.ai",
+  SYSTEMONE_CLOUD_API_KEY: "",
+  SYSTEMONE_CLOUD_MODEL: "jev-latest",
+  SYSTEMONE_LOCAL_BASE_URL: "",
+  SYSTEMONE_LOCAL_API_KEY: "",
+  SYSTEMONE_LOCAL_MODEL: "laya-latest",
+  SYSTEMONE_LOCAL_DTYPE: "float16",
+  SYSTEMONE_TIMEOUT_MS: "60000",
+  SYSTEMONE_LOCAL_TIMEOUT_MS: "600000",
 };
 
 /**
@@ -624,6 +663,9 @@ export const ENCRYPTED_SETTINGS_KEYS: readonly SettingsKey[] = [
   "SKILLS_GIT_PAT",
   "BACKUP_REMOTE_ACCESS_KEY",
   "BACKUP_REMOTE_SECRET_KEY",
+  // SystemOne / JEV 的两把 Key（云端 TypeSafe、自建本地服务）：同样属于"拿到就能替你花钱"。
+  "SYSTEMONE_CLOUD_API_KEY",
+  "SYSTEMONE_LOCAL_API_KEY",
 ];
 
 /**

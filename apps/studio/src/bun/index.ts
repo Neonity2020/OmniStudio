@@ -9,7 +9,7 @@ import { BrowserWindow } from "electrobun/bun";
 import "./db";
 import { startImageServer, onMediaServerStatusChange } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, initSystemOneBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
 import { installWebBridge } from "./gateway-web";
 import { seedIfNeeded } from "./prompt-library";
 import { initSkills } from "./skills";
@@ -156,6 +156,9 @@ initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
 initMediaSetupBroadcast(mainWindow);
 initPpOcrBroadcast(mainWindow);
+// JEV 的安装日志 / 权重下载进度：**桌面窗口这一份别漏** —— 只接到网页端那份 fake window
+// 上时，桌面端点「下载」什么都看不到（状态查询是拉取、装完才知道，进度是推的）。
+initSystemOneBroadcast(mainWindow);
 initTessInstallBroadcast(mainWindow);
 initSkillsBroadcast(mainWindow);
 initBackupBroadcast(mainWindow);

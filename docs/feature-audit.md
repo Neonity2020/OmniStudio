@@ -9,6 +9,17 @@
 > **增量说明（2026-09-15）**：此后新增了一级菜单 **音乐（`music`，`app/music/index.tsx`，
 > 侧栏创作记录 `app/music/record-list.tsx`，主进程 `bun/music-gen.ts`）**，排在视频之后。
 > 下表保留审计当时（13 个）的编号与结论，新菜单尚未走本文档的梳理流程。
+>
+> **增量说明（后续）**：再新增一级菜单 **JEV（`jev`，`app/jev/index.tsx`，主进程
+> `bun/systemone.ts` + `shared/systemone.ts`）**，排在 **Agent 与通话之间**（默认布局即
+> 该位置；老配置里没有这个 id 时会按默认顺序补在后面，可在 设置 → 外观 → 左侧一级菜单
+> 里拖到想要的位置）。页面结构**对齐语音合成页**：左栏顶部是「判定引擎」切换
+> （本地运行：装 laya-mlx 引擎 / 下权重 / 启动模型；云端接入：Base URL + Key），下面是
+> state 与问题清单与运行按钮；右栏是概率分布结果（空态与产物同语音页一致）；应用侧栏
+> 放五个**中英双语内置示例**（工单分派 / 简历评分 / 内容护栏 / 检索重排 / 意图路由），
+> 点一下装进左栏。协议与 TypeSafe 官方逐字段一致，网关 `POST /v1/systemone` 对外暴露给
+> 其他 Agent，Agent 侧则通过只读工具 `jev_evaluate` 使用它。
+> 详见 [jev-systemone.md](./jev-systemone.md)。
 
 ---
 
@@ -184,6 +195,8 @@ Agent 是三模式（agent / plan / goal）工作台，功能按「会话 / 时�
 | A-20 | 多页签：产出物 / 审查 / 文件 / 终端 / 浏览器 | `right-panel.tsx` + `artifacts-tab` / `review-tab` / `terminal-tab` / `browser-tab` |
 | A-21 | 产出物预览（Markdown / 代码 / 图片 / 音视频 / PDF / HTML iframe） | `artifact-preview.tsx` |
 | A-22 | 面板拖动分隔条（宽度本机记住） | `panel-splitter.tsx` |
+
+（JEV / SystemOne 类型化判定**不在这里** —— 它一度被做成这里的第六个页签，但编辑器加概率分布要的是整屏宽度，窄面板摊不开，所以改成了**独立的一级菜单** `jev`（排在 `agent` 与 `voicecall` 之间，见 §1 的增量说明）。Agent 与它的关系是"用"而不是"装"：通过只读工具 `jev_evaluate` 调用。）
 
 ### 5.2 架构点评
 

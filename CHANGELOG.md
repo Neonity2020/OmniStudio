@@ -8,6 +8,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+## [0.1.4] - 2026-09-21
+
+### Added / 新增
+
+- **JEV / SystemOne 类型化判定：把「是/否」「选哪个」「打几分」变成一次结构化调用**（左侧一级菜单新增 **JEV** 页，默认排在 Agent 与通话之间）。用聊天模型做分类、打分、判断，拿回来的是**生成的一段话** —— 要写解析、格式会飘、同一个输入跑两次可能不一致、一次问几件事还会互相"带节奏"。JEV 换了一条路：`noul`（是/否）、`choice`（在给定选项里选一个）、`score`（在有序档位上打分）三个原语各自返回**概率分布与置信度**，答案被约束在你给的选项或档位里，多个问题一次请求、彼此独立，而且**输出 0 个 token**（一次双向前向，不逐字解码），所以也就不存在"输出跑偏"这件事。
+  - **三个入口、一套协议、同一个后端**（都走 `bun/systemone.ts` 的 `runSystemOne`，所以页面上看到的结果与外部 agent 拿到的必然一致）：**JEV 页**给人用，Agent 工具 **`jev_evaluate`**（只读、免授权，plan 模式也给了 —— 分类 / 打标 / 打分恰好是"先出方案"阶段最需要的东西），网关 **`POST /v1/systemone`** 给外部 agent 与脚本。
+  - **页面结构对齐语音合成页**（左栏参数、右栏产物）：左栏顶部是「判定引擎」分段切换 —— **本地运行**（装 laya-mlx 引擎 → 下权重 → 启动模型）与**云端接入**（Base URL + Key + 测试连接），下面是 state、问题清单与运行按钮；右栏是概率分布，没跑之前是空态。**切 tab 就是换后端**（直接写 `SYSTEMONE_BACKEND`），所以不会再出现"在云端接入里填了 Key 却一直走本地"这种事 —— 此前 tab 只是个视图，真正走哪条由 `auto` 的本地优先决定，本地地址一配云端就永远轮不到。
+  - **这一页最大的门槛是"我该问什么"**，所以应用侧栏放了五个中英双语内置示例（工单分派 / 简历评分 / 内容护栏 / 检索重排 / 意图路由），点一下就把 state 与问题一起装进左栏；中文界面给中文示例，而模型名 / 原语名 / 路径这类要照抄的标识符保持英文。左栏另有一个**一句话生成请求**：把"按技术深度、带人经历、工作年限给这份简历打分"交给当前配置的聊天模型翻成强类型请求体（只输出一个 JSON、按官方契约校验、失败时把校验错误回喂再修一轮），**生成不等于调用** —— 生成失败不会顺带丢一次推理。
+  - **协议与 TypeSafe 官方逐字段对齐**（依据是实测，不是转述）：`POST /v1/systemone` 收发 `{state, model, questions}` / `{model, answers, usage}`；鉴权按官方的两种分法 —— **缺 Key → 403**、**Key 无效 → 401**（body 都是 `{"detail":{"error_type","message"}}`）；校验失败 422，且是 FastAPI 的 `{"detail":[{loc,msg,type,…}]}` 形状；成功与失败都带 `x-typesafe-request-id`。于是**官方 SDK 只改两行**（`TYPESAFE_BASE_URL` / `TYPESAFE_API_KEY`）就能从官方切到本机网关，`typesafe-sdk` / `@typesafe-ai/sdk` 都行。`/v1/models` 是刻意的**超集**：OpenAI 的 `data` 与 TypeSafe 的 `models` 同时给 —— 官方 JS SDK 只读后者、OpenAI 客户端只读前者，分两个端点就做不到"换 Base URL 就能用"。
+  - **本地优先，但后端是硬选择**：装了托管运行时就走本机，也可以指向自建的 TypeSafe 兼容服务；云端用你自己的 Key。`auto` 只作"没选过"时的兜底（本地能用就本地，本地**连不上** —— 只有 502/504 —— 才回落云端并记一条日志；本地正常回的 4xx **不**回落：那是请求的问题，换云端只会再错一次还多花钱）。另外**模型名归一化只对托管运行时做**：自建服务原样转发（那是别人自己的服务器，模型名由它定义，改名会让它认不出来），云端收到 `laya-*` 才换成云端默认模型。
+  - **本地运行时是托管 venv**（`<dataDir>/engines/laya`，仅 Apple Silicon，其他平台如实说"不支持"，不会留下一个装到一半的 venv）：同时登记进**设置 → 模型引擎**（自成一类「类型化判定」），安装 / 卸载 / 占用在那页统一管、「管理模型」跳回 JEV 页，两页共用同一份实现。**卸载只删 venv，权重留在 Hugging Face 缓存里**（引擎与权重分开管，重装不必重下几百 MB）；引擎页还能显式下权重，界面上的「已下载 / 下载中 / 运行中」直接来自 worker 的 `models` / `download` / `load` / `unload` 四条命令。不预先下也行 —— 第一次判定时它自己会拉，只是那时才慢，所以本地那条超时单独一个设置项（`SYSTEMONE_LOCAL_TIMEOUT_MS`，默认 600s；HTTP 那条仍是 60s）。
+  - **免费**：`SYSTEMONE_PRICING` 恒为 0 —— 本地是你自己的机器，云端是你自己的 Key。用量账本照记一行（渠道「JEV 类型化判定」），只记次数与 tokens，**不记金额**；界面上的「免费」标签直接读这个常量。
+  - **附带一个内置技能** `jev-typed-decisions`（`bun/builtin-skills/`，启动时播种到中央技能库）：怎么写问题、怎么读答案、可复制的例子；外部 agent 想知道"什么时候该用类型化判定"也能直接读它。
+  - **回归**：`shared/systemone.test.ts`（校验 / 模型目录 / 错误体 / 请求 id）、`bun/gateway.systemone.test.ts`（拿官方 `@typesafe-ai/sdk` 真调一次，含 401→`AuthenticationError` / 403→`PermissionDeniedError` / 422→`UnprocessableEntityError` 的错误分类、`models.list()`、后端由设置决定、本地名归一化只在托管运行时发生）、`bun/systemone-tools.test.ts`（答案 → 可读文本、问题数夹取、概率只列前几名）、`bun/systemone-laya.test.ts`、`app/jev/drafts.test.ts`（草稿 → 官方请求体）、`app/jev/examples.test.ts`（每个内置示例都能通过官方校验）、`app/jev/index.test.tsx`（切 tab 即换后端）；端到端 `scripts/systemone-smoke.ts` 也进了 `test:smoke`。
+
+### Fixed / 修复
+
+- **设置 → 网关的端点列表漏了 `/v1/systemone`**：网关从这条路由加上开始就一直支持 JEV（根索引与 `/openapi.json` 里都有它），但设置页那张端点清单只列了 OpenAI 兼容的那几套协议，照着它看会得出"网关不支持 JEV"的结论。现在这一行在「模型列表」与「对话补全」之间，标签写明它是**类型化判定**而不是对话模型，下面另补一句说明：它是第二套协议、返回概率而非生成文本、官方 SDK 只改 Base URL 与 Key 即可直连。回归见 `gateway-screen.test.tsx`（这一行必须存在且可复制）。
+
 ## [0.1.3] - 2026-09-21
 
 ### Fixed / 修复

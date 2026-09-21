@@ -232,6 +232,17 @@ import type {
 } from "../ocr";
 import * as PpOcr from "../ppocr";
 import type { PpOcrModelSize } from "../../shared/ocr";
+import * as SystemOne from "../systemone";
+import type { SystemOneAvailability } from "../systemone";
+import * as Laya from "../systemone-laya";
+import * as SystemOneDraft from "../systemone-draft";
+import {
+  SYSTEMONE_DEFAULT_MODEL,
+  newSystemOneRequestId,
+  systemOneValidationBody,
+  validateSystemOneRequest,
+} from "../../shared/systemone";
+import type { SystemOneQuestions, SystemOneResponse } from "../../shared/systemone";
 import * as BgRemove from "../bg-remove";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
@@ -614,6 +625,73 @@ export type AppRPC = {
       getUsageStats: {
         params: { rangeDays?: number } | undefined;
         response: UsageStats;
+      };
+      /**
+       * SystemOne / JEV（Agent → JEV 面板）：跑一次类型化判定。
+       *
+       * 与网关 `/v1/systemone` 共用同一条后端解析与调用路径，所以面板里看到的结果
+       * 与外部 agent 通过网关拿到的完全一致。请求体就是官方形状（`{state, model, questions}`），
+       * 校验失败时 `status` = 422 且 `body` 是 FastAPI 形状的 detail。
+       */
+      systemoneRun: {
+        params: { state: string; questions: Record<string, unknown>; model?: string };
+        response:
+          | { ok: true; response: SystemOneResponse; backend: string; requestId: string }
+          | { ok: false; status: number; body: unknown; message: string; backend: string | null };
+      };
+      /** 后端可用性（当前会走本地还是云端、本地运行时的安装状态、价格 0）。 */
+      systemoneStatus: {
+        params: undefined;
+        response: SystemOneAvailability;
+      };
+      /** 一键安装本地运行时（venv + laya-mlx；Apple Silicon / macOS）。 */
+      systemoneInstallRuntime: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
+      };
+      /** 卸载本地运行时（只删 venv，权重留在 Hugging Face 缓存里）。 */
+      systemoneUninstallRuntime: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      /** 停掉常驻的本地 worker（释放内存；下次调用会自动重启）。 */
+      systemoneStopWorker: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /**
+       * 自然语言 → SystemOne 请求体（`state` + `questions`）。
+       *
+       * 用的是当前配置的聊天模型（不是 JEV 后端），目的只是"把人话翻成请求体"；
+       * 生成结果照常填进编辑器，用户可以手改，也可以直接跑。
+       */
+      systemoneDraft: {
+        params: { instruction: string; text?: string };
+        response:
+          | { ok: true; state: string; questions: SystemOneQuestions; modelUsed: string }
+          | { ok: false; error: string };
+      };
+      /** 下载某个本地权重（laya-mlx 的 repo）到 Hugging Face 缓存；进度走 systemoneModelProgress。 */
+      systemoneDownloadModel: {
+        params: { weights: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 把某个本地权重加载成常驻实例（引擎页的「启动」，不等推理）。 */
+      systemoneStartModel: {
+        params: { weights: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 卸载某个常驻权重（不动 worker 进程）。 */
+      systemoneStopModel: {
+        params: { weights: string };
+        response: { ok: boolean };
+      };
+      /** 试连当前后端（引擎页的「测试连接」）：跑一个最小 noul 问题。 */
+      systemoneTest: {
+        params: undefined;
+        response:
+          | { ok: true; model: string; backend: string; noul: number; latencyMs: number }
+          | { ok: false; status: number; message: string; backend: string | null };
       };
       clearServerLogs: {
         params: undefined;
@@ -3048,6 +3126,12 @@ export type AppRPC = {
     requests: {};
     messages: {
       updateStatus: UpdateInfo;
+      /** JEV 本地运行时（laya-mlx）安装日志：整批推送，与引擎安装同一套 UI 复用。 */
+      systemoneInstallLog: { lines: string[] };
+      /** JEV 本地运行时的阶段（安装 / 加载权重 / 就绪 / 出错）。 */
+      systemonePhase: { phase: string; message: string };
+      /** JEV 本地权重下载进度（真实已落盘字节，按权重名合并推送）。 */
+      systemoneModelProgress: { weights: string; phase: "downloading" | "done"; bytes: number };
       documentChanged: { id: number };
       serverLog: { text: string };
       serverStatusChanged: { status: ServerStatus };
@@ -3362,6 +3446,94 @@ const rpcRequests: NonNullable<
 
   getUsageStats: async ({ rangeDays } = {}) => {
     return getUsageStats(rangeDays);
+  },
+
+  // --- SystemOne / JEV（Agent → JEV 面板）---
+  // 与网关 /v1/systemone 走同一条 runSystemOne：面板里跑出来的结果 = 外部 agent 拿到的结果。
+  systemoneRun: async ({ state, questions, model }) => {
+    const validated = validateSystemOneRequest({ state, model: model || SYSTEMONE_DEFAULT_MODEL, questions });
+    if (!validated.ok) {
+      return {
+        ok: false,
+        status: 422,
+        body: systemOneValidationBody(validated.errors),
+        message: validated.errors.map((e) => `${e.loc.join(".")}: ${e.msg}`).join("; "),
+        backend: null,
+      };
+    }
+    const result = await SystemOne.runSystemOne(validated.value);
+    if (!result.ok) {
+      return { ok: false, status: result.status, body: result.body, message: result.message, backend: result.backend };
+    }
+    return { ok: true, response: result.response, backend: result.backend, requestId: newSystemOneRequestId() };
+  },
+
+  systemoneStatus: async () => {
+    return SystemOne.systemOneAvailability();
+  },
+
+  systemoneDraft: async ({ instruction, text }) => {
+    return SystemOneDraft.draftSystemOneRequest({ instruction, text: text ?? "" });
+  },
+
+  systemoneInstallRuntime: async () => {
+    const result = await Laya.installLayaRuntime();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneUninstallRuntime: async () => {
+    const result = await Laya.uninstallLayaRuntime();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneStopWorker: async () => {
+    const result = await Laya.stopLayaWorker();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneDownloadModel: async ({ weights }) => {
+    if (!weights?.trim()) return { ok: false, error: "缺少权重名" };
+    const result = await Laya.layaDownloadModel(weights.trim());
+    SystemOne.invalidateLocalModels();
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  },
+
+  systemoneStartModel: async ({ weights }) => {
+    if (!weights?.trim()) return { ok: false, error: "缺少权重名" };
+    const result = await Laya.layaLoadModel(weights.trim());
+    SystemOne.invalidateLocalModels();
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  },
+
+  systemoneStopModel: async ({ weights }) => {
+    if (weights?.trim()) await Laya.layaUnloadModel(weights.trim());
+    SystemOne.invalidateLocalModels();
+    return { ok: true };
+  },
+
+  systemoneTest: async () => {
+    const started = Date.now();
+    const result = await SystemOne.runSystemOne({
+      state: "The deployment finished but the smoke test still reports one failure.",
+      model: SYSTEMONE_DEFAULT_MODEL,
+      questions: {
+        reachable: { type: "noul", instructions: "Is the state a short, self-contained sentence?" },
+      },
+    });
+    if (!result.ok) {
+      return { ok: false, status: result.status, message: result.message, backend: result.backend };
+    }
+    const answer = result.response.answers.reachable;
+    return {
+      ok: true,
+      model: result.response.model,
+      backend: result.backend,
+      noul: answer && answer.type === "noul" ? answer.noul : 0,
+      latencyMs: Date.now() - started,
+    };
   },
 
   getLaunchCommand: async ({ path }) => {
@@ -6895,6 +7067,12 @@ const REMOTE_METHODS = new Set<string>([
   "deleteMessage",
   "translateMessage",
   "readChatImage",
+  // JEV / SystemOne（类型化判定）：只读推理调用（不写盘、不装引擎），网页端也能用
+  "systemoneRun",
+  "systemoneStatus",
+  "systemoneTest",
+  // 生成请求体只是一次模型调用（不写盘、不装东西），网页端一并放开。
+  "systemoneDraft",
   // Agent
   "sendAgentMessage",
   "stopAgentRun",
@@ -7064,6 +7242,7 @@ export function initRemoteBroadcast(broadcast: (name: string, payload: unknown) 
   initMlxModelDownloadBroadcast(fakeWin);
   initMediaSetupBroadcast(fakeWin);
   initPpOcrBroadcast(fakeWin);
+  initSystemOneBroadcast(fakeWin);
   initBgRemoveBroadcast(fakeWin);
   initTessInstallBroadcast(fakeWin);
   initSkillsBroadcast(fakeWin);
@@ -7169,6 +7348,31 @@ export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
     },
   );
   PpOcr.onPpOcrModelProgress((p) => send.push(p));
+}
+
+/** JEV 本地运行时（laya-mlx）的安装日志与阶段，推送到前端（日志整批、阶段合并到最新）。 */
+export function initSystemOneBroadcast(win: BrowserWindowWithRPC) {
+  const logs = throttleBatch((lines) => {
+    try {
+      win.webview.rpc?.send.systemoneInstallLog({ lines });
+    } catch {}
+  });
+  Laya.onLayaInstallLog((text) => logs.push(text));
+  const phase = throttleLatest<[{ phase: string; message: string }]>((payload) => {
+    try {
+      win.webview.rpc?.send.systemonePhase(payload);
+    } catch {}
+  });
+  Laya.onLayaPhase((next, message) => phase.push({ phase: next, message }));
+  // 下载进度按权重名合并推送：一次下载几十次回调，逐条推等于把界面打成轮询。
+  const progress = throttleLatest<[{ weights: string; phase: "downloading" | "done"; bytes: number }]>(
+    (payload) => {
+      try {
+        win.webview.rpc?.send.systemoneModelProgress(payload);
+      } catch {}
+    },
+  );
+  Laya.onLayaModelProgress((p) => progress.push(p));
 }
 
 /** 抠图模型下载进度，推送到前端（合并推送：整个下载只关心最新百分比）。 */

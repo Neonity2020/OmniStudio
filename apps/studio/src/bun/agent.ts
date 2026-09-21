@@ -42,6 +42,7 @@ import {
 import { loadProjectInstructions } from "./agent-instructions";
 import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
 import { buildNotesAgentTools } from "./notes-tools";
+import { buildSystemOneAgentTools } from "./systemone-tools";
 import { cancelMediaSetup } from "./media-setup";
 import { buildMcpAgentTools } from "./mcp";
 import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection, memoryRecallSection } from "./memory";
@@ -816,6 +817,8 @@ const READ_ONLY_TOOLS = new Set([
   "memory_search",
   "read_skill",
   "think",
+  // JEV / SystemOne 类型化判定：把一段文本交给判定模型换结构化答案，不碰文件系统。
+  "jev_evaluate",
 ]);
 const INTERACTIVE_TOOLS = new Set(["todo_write", "ask_user", "task", "request_permissions"]);
 
@@ -935,9 +938,12 @@ async function toolsForMode(
   // 笔记三件套（list / search / read）同样是只读：Plan 模式分析需求时也该读得到
   // 用户之前写下的东西。开关关掉时它返回空数组（工具直接不出现）。
   const notesRead = buildNotesAgentTools();
+  // JEV / SystemOne 类型化判定：只读（不碰工作区），三种模式都给 —— 分类 / 打标 / 打分
+  // 这类判断恰好是"先出方案"阶段最需要的东西。
+  const systemOneTools = buildSystemOneAgentTools();
   // Plan 模式只多一个 write_plan：方案要能留痕（否则切回 Agent 模式后模型手里没有那份方案）。
   // 它写的是数据目录，不碰工作区，所以"Plan 模式不改任何东西"这条仍然成立。
-  if (mode === "plan") return [...base, ...mediaRead, ...notesRead, createWritePlan(ctx)];
+  if (mode === "plan") return [...base, ...mediaRead, ...notesRead, ...systemOneTools, createWritePlan(ctx)];
   // 记忆工具带上下文：写入记项目作用域（按工作区隔离）与审计来源（哪个会话写的）。
   const extras = memoryEnabled()
     ? buildMemoryAgentTools({
@@ -946,7 +952,15 @@ async function toolsForMode(
       })
     : [];
   const mcpTools = await buildMcpAgentTools();
-  return [...base, ...mediaRead, ...notesRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
+  return [
+    ...base,
+    ...mediaRead,
+    ...notesRead,
+    ...systemOneTools,
+    ...buildMediaGenTools(ctx),
+    ...extras,
+    ...mcpTools,
+  ];
 }
 
 /**

@@ -43,6 +43,7 @@ import {
 } from "./engine-paths";
 import * as EngineInstall from "./engine-install";
 import * as MlxGen from "./mlx-gen";
+import * as Laya from "./systemone-laya";
 import * as Served from "./model-servers";
 import * as Ocr from "./ocr";
 import * as PpOcr from "./ppocr";
@@ -276,6 +277,32 @@ async function probeMflux(): Promise<LocalEngineStatus> {
   };
 }
 
+async function probeLaya(): Promise<LocalEngineStatus> {
+  const supported = Laya.platformSupported();
+  const status = supported
+    ? await Laya.getLayaStatus()
+    : ({ installed: false, version: "", workerRunning: false } as const);
+  const dir = Laya.layaEngineDirPath();
+  return {
+    id: "laya-mlx",
+    state: status.installed ? "managed" : "missing",
+    version: status.version || null,
+    path: status.installed ? dir : null,
+    managedDir: status.installed ? dir : null,
+    sizeBytes: status.installed ? await engineDirSize(dir) : null,
+    // "运行中"在这个引擎里 = 常驻 worker 在（可能只是把引擎挂着），真正在用它的模型在 JEV 页看。
+    running: "workerRunning" in status ? status.workerRunning : false,
+    canInstall: supported,
+    installNote: supported ? null : "laya-mlx 依赖 MLX，只在 Apple Silicon（arm64）的 macOS 上可用",
+    // 引擎本体很小（就是个 venv），大头是权重 —— 而权重不在这里，它在 HF 缓存里。
+    approxBytes: 120e6,
+    requirement: "需要本机有 Python 3.11–3.13（应用会建独立虚拟环境安装）",
+    canUninstall: status.installed,
+    // 版本跟着 PyPI 走（pip install --upgrade laya-mlx）。
+    upgradeKind: "latest",
+  };
+}
+
 async function probeCloudflared(): Promise<LocalEngineStatus> {
   const bin = Cloudflared.resolveCloudflared();
   const dir = Cloudflared.cloudflaredRootDir();
@@ -312,6 +339,8 @@ async function probeEngine(id: LocalEngineId): Promise<LocalEngineStatus> {
       return await probeTesseract();
     case "mflux":
       return await probeMflux();
+    case "laya-mlx":
+      return await probeLaya();
     case "cloudflared":
       return await probeCloudflared();
   }
@@ -341,6 +370,12 @@ function startEngineLogBridge(): void {
   Ocr.onTesseractInstallLog(relay);
   MlxGen.onInstallLog(relay);
   Cloudflared.onCloudflaredInstallLog(relay);
+  // laya-mlx 的安装日志并到同一条流：引擎页只订阅这一条，第二个通道就是第二处真相。
+  Laya.onLayaInstallLog(relay);
+  // 权重下载进度也并进来（它在引擎页显示为"用过多少磁盘"，在 JEV 页才是模型行进度）。
+  Laya.onLayaModelProgress((p) => {
+    if (p.phase === "done") EngineInstall.publishEngineInstallLog(`[laya-mlx] 权重就绪：${p.weights}`);
+  });
 }
 
 function emitPhase(id: LocalEngineId, phase: EngineInstall.InstallPhase, message: string, percent?: number | null): void {
@@ -465,6 +500,11 @@ async function dispatchInstall(
     case "mflux":
       // mflux 的安装器没有"已装就跳过"的短路，装到一半失败重跑也安全。
       return await MlxGen.downloadMlxEngine();
+    case "laya-mlx": {
+      // 升级就是 pip --upgrade；安装与升级同一条路（与其它引擎一致）。
+      const result = await Laya.installLayaRuntime();
+      return result.ok ? { ok: true, version: result.version } : { ok: false, error: result.error };
+    }
     case "cloudflared":
       return await Cloudflared.installCloudflared();
   }
@@ -586,6 +626,13 @@ async function stopConsumers(id: LocalEngineId): Promise<number> {
       const wasAsr = getSetting("ASR_ENGINE") === "audiocpp";
       return wasTts || wasAsr ? 1 : 0;
     }
+    case "laya-mlx": {
+      // 常驻 worker 持有那个 venv 里的解释器与 mlx，先停它再删目录。
+      const status = await Laya.getLayaStatus();
+      if (!status.workerRunning) return 0;
+      await Laya.stopLayaWorker();
+      return 1;
+    }
     case "paddleocr":
     case "mflux":
       // 这两个的删除函数自己会先停 worker（cleanupPpOcrEngine / removeMlxEngine）。
@@ -619,6 +666,11 @@ async function removeManagedInstall(id: LocalEngineId): Promise<{ ok: boolean; e
         return await PpOcr.cleanupPpOcrEngine();
       case "mflux":
         return await MlxGen.removeMlxEngine();
+      case "laya-mlx": {
+        // 只删托管的 venv；权重留在 Hugging Face 缓存里（uninstallLayaRuntime 的约定）。
+        const result = await Laya.uninstallLayaRuntime();
+        return result.ok ? { ok: true } : { ok: false, error: result.error };
+      }
       case "cloudflared":
         return Cloudflared.removeCloudflared();
       case "tesseract":

@@ -348,6 +348,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 - 嵌入：`POST /v1/embeddings`，代理运行中的嵌入实例（模型页以嵌入类别启动的模型）；无实例 503 并带启动引导
 - 语音：`/v1/audio/speech`、`/v1/audio/transcriptions`（各有四级/多级回退链）
 - 图像：`/v1/images/generations`
+- 类型化判定：`POST /v1/systemone`（JEV / SystemOne：`choice` / `score` / `noul` 三原语，
+  与 TypeSafe 官方协议逐字段对齐，本地 laya-mlx 或云端 TypeSafe 二选一；官方 SDK 换
+  Base URL + Key 即可直连，详见 [jev-systemone.md](./jev-systemone.md)）
 - 素材：`/v1/media`（只读检索本机素材库，与内置 Agent 的 `media_search` 同一份实现）
 - 记忆与知识库：`/v1/memories`、`POST /mcp`
 - 文档：`/health`、`/openapi.json`、`/docs`、`/redoc`
