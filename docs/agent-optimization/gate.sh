@@ -72,7 +72,13 @@ done
 # 2. 改动规模
 TOTAL=0
 for f in $SOURCES; do
-  n="$($GIT diff --numstat HEAD -- "$f" | awk '{s+=$1+$2} END{print s+0}')"
+  # 新建的源码文件还没进索引，`git diff` 看不见它（实测漏过一整个新 hook 文件）：
+  # 未跟踪就按整份行数计，否则规模上限对新增文件等于不设防。
+  if $GIT ls-files --error-unmatch "$f" > /dev/null 2>&1; then
+    n="$($GIT diff --numstat HEAD -- "$f" | awk '{s+=$1+$2} END{print s+0}')"
+  else
+    n="$(wc -l < "$f" 2>/dev/null || echo 0)"
+  fi
   TOTAL=$((TOTAL + n))
 done
 if [ "$TOTAL" -gt "$MAXLINES" ]; then

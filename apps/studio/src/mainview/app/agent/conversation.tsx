@@ -12,6 +12,7 @@ import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { useServerMessageSync } from "@hooks/use-server-message-sync";
+import { useFollowScroll } from "./use-follow-scroll";
 import { AgentComposer } from "./composer";
 import { AgentAssistantMessage, AgentUserMessage } from "./message";
 import { artifactsByMessage as groupArtifactsByMessage, lastAssistantMessageId } from "./artifact-meta";
@@ -156,10 +157,11 @@ export function AgentConversation({
 
   // 新消息 / 新事件进来时贴到底。这里用 scrollTop 直接赋值而不是 scrollIntoView：
   // 后者会连带把外层容器也滚一下，工具条会跳。
+  // 跟随模式：用户往上翻了就别抢滚动条，距底 64px 内才继续跟着贴底（判据见 use-follow-scroll）。
   const lastForScroll = activeMessages[activeMessages.length - 1];
+  const { onScroll: followOnScroll, scrollToBottomIfFollowing } = useFollowScroll(scrollRef);
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    scrollToBottomIfFollowing();
   }, [activeMessages.length, lastForScroll?.content, lastForScroll?.reasoning, events.length]);
 
   /** 事件按所属消息预分组：原来在 messages.map 里逐个 filter 事件，消息一多就是 O(n×m)。 */
@@ -240,7 +242,7 @@ export function AgentConversation({
 
   return (
     <>
-      <div ref={scrollRef} className="thread-scroll">
+      <div ref={scrollRef} className="thread-scroll" onScroll={followOnScroll}>
         <div className="thread-content">
           {!hasMessages ? (
             <div className="thread-hero">
