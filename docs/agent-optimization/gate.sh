@@ -11,6 +11,7 @@
 set -uo pipefail
 
 MANIFEST="${1:?用法: gate.sh <manifest.json> [--baseline|--full]}"
+MANIFEST="$(cd "$(dirname "$MANIFEST")" && pwd)/$(basename "$MANIFEST")"
 MODE="${2:-self}"
 GIT=/usr/bin/git
 
