@@ -21,7 +21,7 @@
  * - 网络默认放行（`AGENT_SANDBOX_NETWORK=1`）：Codex 默认禁网，但本地工作流里
  *   禁网会让装依赖 / 拉模型直接失败；需要严格模式时把它关掉。
  */
-import { existsSync, realpathSync, statSync } from "fs";
+import { existsSync, realpathSync, statSync, writeFileSync } from "fs";
 import os from "os";
 import path from "path";
 
@@ -490,6 +490,25 @@ function subpathFilters(targets: string[]): string {
   return [...expanded].map((value) => `(subpath "${seatbeltString(value)}")`).join(" ");
 }
 
+/**
+ * 文件类凭据路径的覆盖源：一个真实存在的空文件。
+ *
+ * 为什么不用 `/dev/null`：以它为源 `--ro-bind` 上去之后，沙箱内读那个路径拿到的是
+ * 权限拒绝，而 npm / git / curl 读不到凭据文件时的正常路径是「空或不存在」——
+ * 拿到 EACCES 它们会直接报错退出，用户只会觉得「开了沙箱就装不上依赖」。
+ *
+ * 放在数据目录下、按需创建、失败时退回 `/dev/null`（安全性不受影响，只是没那么友好）。
+ */
+export function sandboxBlankFile(): string {
+  try {
+    const target = getDataDir("sandbox-blank");
+    if (!existsSync(target)) writeFileSync(target, "");
+    return target;
+  } catch {
+    return "/dev/null";
+  }
+}
+
 /** 临时目录：只读模式下唯一允许写入的地方（工具链需要 TMPDIR）。 */
 export function sandboxTempRoots(): string[] {
   return [os.tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
@@ -687,6 +706,7 @@ export function wrapShellCommand(
           mode,
           authorizedFolders: opts.authorizedFolders,
           allowNetwork: sandboxAllowsNetwork(),
+          blankFile: sandboxBlankFile(),
         }),
       ],
       mode,

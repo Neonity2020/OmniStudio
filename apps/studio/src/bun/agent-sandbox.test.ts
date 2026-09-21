@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import path from "path";
 
 import {
   bwrapArgs,
+  bwrapAvailable,
   explainSandboxDenial,
   landlockRuleset,
   landlockRulesetSpec,
@@ -19,6 +20,7 @@ import {
   sandboxProfile,
   sandboxStatus,
   sandboxSupported,
+  sandboxBlankFile,
   sandboxTempRoots,
   sandboxWritableRoots,
   effectiveSandboxBackend,
@@ -364,6 +366,40 @@ describe("Linux（bwrap）", () => {
     expect(explainSandboxDenial("bwrap: Can't create file at /tmp/x: Permission denied")).toContain("沙箱");
     // 裸的 Permission denied 不算（普通文件权限问题不该被说成"沙箱拦的"）。
     expect(explainSandboxDenial("cat: /etc/shadow: Permission denied")).toBeNull();
+  });
+
+  test("sandboxBlankFile：返回的数据目录下的空文件真实存在，连续调用复用同一个", () => {
+    const first = sandboxBlankFile();
+    expect(first).toBe(getDataDir("sandbox-blank"));
+    expect(existsSync(first)).toBe(true);
+    expect(statSync(first).size).toBe(0);
+    // 已存在就直接用：写一个字节，再调一次，字节还在。
+    writeFileSync(first, "x");
+    expect(sandboxBlankFile()).toBe(first);
+    expect(statSync(first).size).toBe(1);
+    // 断言完自己清理回零字节，不污染别的用例。
+    writeFileSync(first, "");
+  });
+
+  test("wrapShellCommand：文件类凭据的覆盖源是真实空文件而不是 /dev/null", () => {
+    if (process.platform !== "linux" || !bwrapAvailable()) return;
+    updateSettings({ AGENT_SANDBOX_MODE: "workspace-write" });
+    const previousHome = process.env.HOME;
+    const fakeHome = mkdtempSync(path.join(homedir(), ".omni-bwrap-creds-"));
+    writeFileSync(path.join(fakeHome, ".npmrc"), "//secret token\n");
+    process.env.HOME = fakeHome;
+    try {
+      const wrapped = wrapShellCommand("echo hi", { workspace, shell: "/bin/bash" });
+      expect(wrapped.cmd[0]).toBe("bwrap");
+      const npmrc = path.join(fakeHome, ".npmrc");
+      const blank = sandboxBlankFile();
+      expect(roBind(wrapped.cmd, blank)).toContain(npmrc);
+      expect(roBind(wrapped.cmd, "/dev/null")).not.toContain(npmrc);
+      expect(tmpfsTargets(wrapped.cmd)).not.toContain(npmrc);
+    } finally {
+      process.env.HOME = previousHome;
+      rmSync(fakeHome, { recursive: true, force: true });
+    }
   });
 });
 
