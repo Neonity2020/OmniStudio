@@ -283,7 +283,6 @@ export function AgentComposer({
 }) {
   const t = useT();
   const queryClient = useQueryClient();
-  const activeMessages = useChatStore((s) => s.activeMessages);
   const streaming = useChatStore((s) => s.streaming);
   const running = useAgentStore((s) => s.running);
   const workspace = useAgentStore((s) => s.workspace);
@@ -490,8 +489,9 @@ export function AgentComposer({
     setFileAttachments([]);
     requestAnimationFrame(autoResize);
     const now = Date.now();
+    const current = useChatStore.getState().activeMessages;
     useChatStore.getState().setActiveMessages([
-      ...activeMessages,
+      ...current,
       { id: now, conversationId, role: "user", content, images, createdAt: now },
     ]);
     useChatStore.getState().setStreaming(true);

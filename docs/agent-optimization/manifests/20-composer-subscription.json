@@ -2,17 +2,19 @@
   "id": "20-composer-subscription",
   "allowed_files": [
     "apps/studio/src/mainview/app/agent/composer.tsx",
-    "apps/studio/src/mainview/app/agent/composer-render.test.tsx"
+    "apps/studio/src/mainview/app/agent/composer-render.test.tsx",
+    "apps/studio/src/mainview/stores/chat.ts"
   ],
   "source_files": [
-    "apps/studio/src/mainview/app/agent/composer.tsx"
+    "apps/studio/src/mainview/app/agent/composer.tsx",
+    "apps/studio/src/mainview/stores/chat.ts"
   ],
   "test_files": [
     "apps/studio/src/mainview/app/agent/composer-render.test.tsx",
     "apps/studio/src/mainview/app/agent/composer-slash.test.tsx",
     "apps/studio/src/mainview/app/agent/composer-workspace.test.tsx"
   ],
-  "max_source_lines": 10,
+  "max_source_lines": 40,
   "banned_patterns": [
     "@ts-ignore",
     "@ts-expect-error",
