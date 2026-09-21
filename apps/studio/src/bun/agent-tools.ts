@@ -345,8 +345,15 @@ function globToRegExp(pattern: string): RegExp {
     const ch = pattern[i]!;
     if (ch === "*") {
       if (pattern[i + 1] === "*") {
-        re += ".*";
-        i++;
+        // `**/` = 零层或多层目录前缀（`**/*.ts` 要能匹配根层的文件）；
+        // 不带 `/` 的单独 `**` 照旧表示「任意字符，可跨目录」。
+        if (pattern[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i++;
+        }
       } else {
         re += "[^/]*";
       }

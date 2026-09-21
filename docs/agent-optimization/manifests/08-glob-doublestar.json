@@ -17,5 +17,13 @@
     "\\.skip\\(",
     "\\.todo\\(",
     "^\\+export function globToRegExp"
+  ],
+  "mutations": [
+    {
+      "name": "把 (?:.*/)? 换成朴素的 .*（会错误匹配 src/ab.ts）",
+      "file": "apps/studio/src/bun/agent-tools.ts",
+      "find": "re += \"(?:.*/)?\";",
+      "replace": "re += \".*\";"
+    }
   ]
 }

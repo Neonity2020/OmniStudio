@@ -125,7 +125,7 @@ rm -f /tmp/gate-lint.$$
 # 7. 相关测试必须全绿
 if [ -n "$TESTS" ]; then
   if bun test --parallel $TESTS > /tmp/gate-test.$$ 2>&1; then
-    note "tests PASS ($(grep -cE '^\(pass\)' /tmp/gate-test.$$ || echo '?') pass)"
+    note "tests PASS ($(grep -oE '^ *[0-9]+ pass' /tmp/gate-test.$$ | tail -1 | tr -s ' ' | sed 's/^ //'))"
   else
     bad "tests FAIL"; tail -35 /tmp/gate-test.$$ | sed 's/^/GATE:   /'
   fi
@@ -161,6 +161,37 @@ if [ "$MODE" = "--full" ] && [ -n "$TESTS" ] && [ -n "$SOURCES" ]; then
     bad "restore FAIL 源码未能还原，手工检查 $TMP"
   fi
   rm -rf "$TMP"
+fi
+
+# 9. 定点变异（只在 --full）：把修复处换成一个**看似也对、实则不对**的写法，
+#    测试必须变红。整体回退验红只能证明「测试咬住了这次改动」，抓不住
+#    「测试分不清正确写法和近似写法」。manifest 里没写 mutations 就跳过。
+if [ "$MODE" = "--full" ]; then
+  MUTN="$(bun -e "const m=require('$MANIFEST');console.log((m.mutations||[]).length)" 2>/dev/null)"
+  if [ -n "$MUTN" ] && [ "$MUTN" != "0" ]; then
+    for k in $(seq 0 $((MUTN - 1))); do
+      MNAME="$(bun -e "console.log(require('$MANIFEST').mutations[$k].name)" 2>/dev/null)"
+      MFILE="$(bun -e "console.log(require('$MANIFEST').mutations[$k].file)" 2>/dev/null)"
+      cp "$MFILE" "/tmp/gate-mut.$$"
+      if ! bun -e "
+        const fs=require('fs');const m=require('$MANIFEST').mutations[$k];
+        const p='$MFILE';const s=fs.readFileSync(p,'utf8');
+        if(!s.includes(m.find)){console.error('find-not-present');process.exit(9);}
+        fs.writeFileSync(p,s.replace(m.find,m.replace));
+      " 2>/dev/null; then
+        bad "mutation[$k] '$MNAME' SKIPPED 待替换文本在源码里找不到（manifest 过期）"
+        cp "/tmp/gate-mut.$$" "$MFILE"; rm -f "/tmp/gate-mut.$$"; continue
+      fi
+      if bun test --parallel $TESTS > /dev/null 2>&1; then
+        bad "mutation[$k] '$MNAME' FAIL 换成近似写法后测试仍然全绿 = 用例没有钉住这处语义"
+      else
+        note "mutation[$k] '$MNAME' PASS (变异后测试变红)"
+      fi
+      cp "/tmp/gate-mut.$$" "$MFILE"; rm -f "/tmp/gate-mut.$$"
+    done
+  else
+    note "mutation none (manifest 未配置)"
+  fi
 fi
 
 if [ "$FAIL" = 0 ]; then
