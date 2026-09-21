@@ -320,8 +320,8 @@ export function AgentComposer({
   }, [pendingPrompt]);
 
   const busy = running || streaming;
-  const canSend =
-    (input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0) && !busy;
+  /** 有内容就能发：运行中点它是「排队」（见 handleSend 的 busy 分支），不是打断。 */
+  const canSend = input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0;
 
   const compactMutation = useMutation({
     mutationFn: () => rpcClient.compactAgentConversation({ conversationId }),
