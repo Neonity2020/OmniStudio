@@ -168,6 +168,9 @@ export function capToolResultText(text: string, max = MAX_TOOL_RESULT_CHARS): st
   );
 }
 
+/** 截断时头部占的比例：开头有命令与上下文，结尾有错误与统计，两头都要。 */
+const TRUNCATE_HEAD_RATIO = 0.7;
+
 /**
  * 展示层截断：返回给模型的那段文本。纯函数（转存由调用方做），便于单测。
  *
@@ -178,13 +181,19 @@ export function truncateForModel(
   text: string,
   opts: { maxChars?: number; spillPath?: string | null } = {},
 ): { text: string; truncated: boolean } {
-  const max = opts.maxChars ?? MAX_TOOL_OUTPUT_CHARS;
+  const max = Math.max(0, opts.maxChars ?? MAX_TOOL_OUTPUT_CHARS);
   if (text.length <= max) return { text, truncated: false };
   const rest = text.length - max;
+  const headLen = Math.floor(max * TRUNCATE_HEAD_RATIO);
+  const head = text.slice(0, headLen);
+  const tailLen = max - headLen;
+  const tail = tailLen > 0 ? text.slice(-tailLen) : "";
   const lines = [
-    `${text.slice(0, max)}`,
+    `${head}`,
+    `…（中间省略了约 ${rest} 个字符）…`,
+    `${tail}`,
     "",
-    `…（输出被截断：这里只显示了前 ${max} 个字符，后面还有约 ${rest} 个字符没有显示，**不要**把上面当成完整内容。`,
+    `…（输出被截断：这里只显示了开头和结尾各一段，后面还有约 ${rest} 个字符没有显示，**不要**把上面当成完整内容。`,
   ];
   if (opts.spillPath) {
     lines.push(

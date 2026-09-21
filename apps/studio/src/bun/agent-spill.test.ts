@@ -37,6 +37,71 @@ describe("truncateForModel", () => {
     expect(result.text.startsWith(text.slice(0, 100))).toBe(true);
   });
 
+  test("超限时保留尾部（bash 的失败清单和统计都在结尾）", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    const result = truncateForModel(text, { maxChars: 100 });
+    expect(result.truncated).toBe(true);
+    expect(result.text).toContain("END-MARKER");
+  });
+
+  test("头部仍在最前，结果以原文开头", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    const result = truncateForModel(text, { maxChars: 100 });
+    expect(result.text.startsWith("START-MARKER")).toBe(true);
+  });
+
+  test("中间省略说明里带着正确的省略字符数", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    const result = truncateForModel(text, { maxChars: 100 });
+    expect(result.text).toContain(`省略了约 ${text.length - 100} 个字符`);
+  });
+
+  test("头尾两段合计正好等于 max，不多占窗口（多个 max 值）", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    for (const max of [1, 2, 10, 100]) {
+      const head = Math.floor(max * 0.7);
+      const result = truncateForModel(text, { maxChars: max });
+      expect(result.truncated).toBe(true);
+      // 中间说明永远存在（它把两段原文隔开），找它前后的边界。
+      const midStart = result.text.indexOf("…（中间省略");
+      const markerEnd = result.text.indexOf("\n…（输出被截断");
+      expect(midStart).toBeGreaterThanOrEqual(0);
+      expect(markerEnd).toBeGreaterThan(0);
+      const headPart = result.text.slice(0, head);
+      let tailPart = result.text
+        .slice(midStart, markerEnd)
+        .replace(/^…（中间省略了约 \d+ 个字符）…\n?/, "")
+        .replace(/\n$/, "");
+      expect(headPart).toBe(text.slice(0, head));
+      expect(tailPart).toBe(max - head > 0 ? text.slice(-(max - head)) : "");
+      expect(headPart.length + tailPart.length).toBe(max);
+    }
+  });
+
+  test("maxChars 为 0 时不返回任何原文内容（text.slice(-0) 会吐出整段）", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    const result = truncateForModel(text, { maxChars: 0 });
+    expect(result.truncated).toBe(true);
+    expect(result.text).not.toContain("START-MARKER");
+    expect(result.text).not.toContain("END-MARKER");
+  });
+
+  test("maxChars 为负数时同样不返回原文内容", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    const result = truncateForModel(text, { maxChars: -50 });
+    expect(result.truncated).toBe(true);
+    expect(result.text).not.toContain("START-MARKER");
+    expect(result.text).not.toContain("END-MARKER");
+  });
+
+  test("头部不占满额度：尾部标记不能被头部挤掉（比例不能等于 1）", () => {
+    const text = `START-MARKER\n${"m".repeat(400)}\nEND-MARKER`;
+    const max = 100;
+    const result = truncateForModel(text, { maxChars: max });
+    expect(result.text.length).toBeLessThan(text.length);
+    expect(result.text.lastIndexOf("END-MARKER")).toBeGreaterThan(Math.floor(max * 0.7) + 10);
+  });
+
   test("转存失败（没有路径）时退化成旧文案，但不撒谎说原文还在", () => {
     const text = "y".repeat(MAX_TOOL_OUTPUT_CHARS + 1);
     const result = truncateForModel(text, { spillPath: null });
