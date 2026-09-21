@@ -177,6 +177,21 @@ if [ "$MODE" = "--full" ] && [ -n "$TESTS" ] && [ -n "$SOURCES" ]; then
   rm -rf "$TMP"
 fi
 
+# 8.5 端到端冒烟（只在 --full）：单测全绿也可能改变端到端行为。
+#     agent-resilience-smoke 用内置桩推理服务、1.4 秒跑完、不依赖任何真实服务，
+#     把重试 / 截断转存 / 子智能体 / 压缩串在同一条任务里。第 18b 条（工具输出
+#     上限按窗口缩放）就是被它抓出来改变了压缩触发时机 —— 2340 条单测全绿。
+#     `test:smoke` 里其它脚本要连真实服务，仍然不进门。
+if [ "$MODE" = "--full" ] && [ -f apps/studio/scripts/agent-resilience-smoke.ts ]; then
+  if (cd apps/studio && timeout 300 bun run scripts/agent-resilience-smoke.ts) > /tmp/gate-smoke.$$ 2>&1; then
+    note "smoke-resilience PASS"
+  else
+    bad "smoke-resilience FAIL"
+    grep -E '^✗' /tmp/gate-smoke.$$ | sed 's/^/GATE:   /'
+  fi
+  rm -f /tmp/gate-smoke.$$
+fi
+
 # 9. 定点变异（只在 --full）：把修复处换成一个**看似也对、实则不对**的写法，
 #    测试必须变红。整体回退验红只能证明「测试咬住了这次改动」，抓不住
 #    「测试分不清正确写法和近似写法」。manifest 里没写 mutations 就跳过。
