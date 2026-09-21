@@ -19,10 +19,10 @@
   ],
   "mutations": [
     {
-      "name": "输出也跟着倒过来（顺序被破坏，去重与拼装会错乱）",
+      "name": "分配顺序改回从泛到具体（最具体那层又会被饿死）",
       "file": "apps/studio/src/bun/agent-instructions.ts",
-      "find": "return { files: kept, truncated };",
-      "replace": "return { files: [...kept].reverse(), truncated };"
+      "find": "for (let i = files.length - 1; i >= 0; i -= 1)",
+      "replace": "for (let i = 0; i < files.length; i += 1)"
     }
   ]
 }
