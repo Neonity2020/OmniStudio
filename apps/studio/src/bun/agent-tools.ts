@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "fs";
 import path from "path";
 import { Type } from "typebox";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
@@ -219,9 +219,36 @@ const SECRET_PATH_PATTERNS: RegExp[] = [
   /Library\/Keychains(\/|$)/,
 ];
 
+/**
+ * 解开软链之后判断 target 是不是在 root 底下。
+ *
+ * 必须解软链：工作区里放一个指向区外的软链，字面路径仍在区内，凭据黑名单与
+ * 区外授权会一起被跳过，而 bash 工具自己就能建这个软链。
+ * （`agent-spill.ts` 的 isSpillPath 对转存目录用的是同一套判据。）
+ */
+function isReallyUnder(root: string, target: string): boolean {
+  const r = path.resolve(root);
+  const t = path.resolve(target);
+  if (t !== r && !t.startsWith(r + path.sep)) return false;
+  try {
+    if (!existsSync(r)) return false;
+    const realRoot = realpathSync(r);
+    let probe = t;
+    while (!existsSync(probe)) {
+      const parent = path.dirname(probe);
+      if (parent === probe) return false;
+      probe = parent;
+    }
+    const realProbe = realpathSync(probe);
+    return realProbe === realRoot || realProbe.startsWith(realRoot + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 function assertNotSecret(workspace: string, target: string): void {
   const root = path.resolve(workspace);
-  if (target === root || target.startsWith(root + path.sep)) return;
+  if (isReallyUnder(root, target)) return;
   // 工具输出的转存目录开一个口子：那是应用自己写出来的文件（模型本来就在工具结果里
   // 看过它的前半段），不放开就谈不上"截断之后还能读回来"。数据目录的其余部分
   // （设置表里存着全部云端 API Key）照旧拦死。
@@ -238,7 +265,7 @@ function assertNotSecret(workspace: string, target: string): void {
 /** 写操作必须落在工作区内（或已授权的目录里）。 */
 export function assertInsideWorkspace(workspace: string, target: string) {
   const root = path.resolve(workspace);
-  if (target !== root && !target.startsWith(root + path.sep)) {
+  if (!isReallyUnder(root, target)) {
     throw new Error(`Path outside workspace is not writable: ${target}`);
   }
 }
@@ -275,7 +302,7 @@ function underAny(target: string, folders: string[]): boolean {
 export function assertReadable(ctx: ToolContext, target: string): void {
   const root = path.resolve(ctx.workspace);
   const abs = path.resolve(target);
-  if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (isReallyUnder(root, abs)) return;
   if (isSpillPath(abs)) return;
   if (underAny(abs, authorizedFoldersOf(ctx))) return;
   throw new Error(
@@ -288,7 +315,7 @@ export function assertReadable(ctx: ToolContext, target: string): void {
 export function assertWritable(ctx: ToolContext, target: string): void {
   const root = path.resolve(ctx.workspace);
   const abs = path.resolve(target);
-  if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (isReallyUnder(root, abs)) return;
   if (underAny(abs, authorizedFoldersOf(ctx))) return;
   throw new Error(`Path outside workspace is not writable without permission: ${abs}`);
 }
