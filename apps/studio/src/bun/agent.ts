@@ -1160,8 +1160,17 @@ const sessions = new Map<number, Session>();
 /** 会话是否正在运行（UI 用来禁用输入框 / 显示停止按钮）。 */
 const running = new Set<number>();
 
+/**
+ * 已进入 `runAgentTurn`、但还没走到 `setAgentRunning(true)` 的会话。
+ *
+ * 启动段有两处 await（拉起推理服务、建会话），本地模式下能长达几十秒。
+ * 不把这段算进「在跑」，用户再发一条就会并发起第二轮 —— 两轮共用同一个
+ * Agent 实例与同一批模块级状态。
+ */
+const starting = new Set<number>();
+
 export function isAgentRunning(conversationId: number): boolean {
-  return running.has(conversationId);
+  return running.has(conversationId) || starting.has(conversationId);
 }
 
 /**
@@ -2441,6 +2450,10 @@ export async function runAgentTurn(opts: {
     return { ok: false, error: "No inference server configured" };
   }
 
+  // 从这里开始有 await（拉起推理服务 / 建会话），必须先占位：
+  // 启动段里 `running` 还没置上，不占位的话用户再发一条会并发起第二轮。
+  starting.add(conversationId);
+
   // 本地模式下自动拉起推理服务器（与对话一致）。
   if (getSetting("SERVER_MODE") === "local") {
     const ready = await ensureServerReady();
@@ -2454,6 +2467,7 @@ export async function runAgentTurn(opts: {
         detail: { conversationId },
       });
       emitDone({ conversationId, messageId: Date.now(), content: "", error });
+      starting.delete(conversationId);
       return { ok: false, error };
     }
   }
@@ -2560,6 +2574,7 @@ export async function runAgentTurn(opts: {
 
   const startedAt = performance.now();
   setAgentRunning(conversationId, true);
+  starting.delete(conversationId);
 
   /**
    * 增量按帧批量下发（与对话同一份实现与同一个 40ms 常量，见 chunk-flusher.ts）。
@@ -2932,6 +2947,7 @@ export async function runAgentTurn(opts: {
     flushChunks();
     flusher.dispose();
     setAgentRunning(conversationId, false);
+    starting.delete(conversationId);
     activeMessageIds.delete(conversationId);
     stopRequests.delete(conversationId);
   }
