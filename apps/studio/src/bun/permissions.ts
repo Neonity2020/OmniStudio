@@ -425,10 +425,26 @@ export function evaluate(
   const patterns =
     request.permission === "bash" ? commandPatterns(request.pattern) : [request.pattern];
   const rule = winningRuleFor(rules, request.permission, patterns);
-  if (rule) return { action: rule.action, rule };
-  // 无匹配：交给内置默认表再算一次（smart 模式下依然能覆盖到 doom_loop 等）。
+  if (rule) return downgradeIfDangerous(request, rule);
+  // 默认表兜底（含 auto 的 bash `*` allow 档）同样要过危险命令降级；无匹配则 ask。
   const fallback = winningRuleFor(defaultRules("manual"), request.permission, patterns);
-  return fallback ? { action: fallback.action, rule: null } : { action: "ask", rule: null };
+  return fallback ? downgradeIfDangerous(request, fallback) : { action: "ask", rule: null };
+}
+
+/** 通配的 allow 规则不得放行危险命令（`git *` 不等于「以 git 开头的字符串我都信」）：降成 ask；精确规则、deny、ask 一律不动。 */
+function downgradeIfDangerous(
+  request: Pick<PermissionRequest, "permission" | "pattern">,
+  rule: PermissionRule,
+): Decision {
+  if (
+    rule.action === "allow" &&
+    request.permission === "bash" &&
+    (rule.pattern.includes("*") || rule.pattern.includes("?")) &&
+    isDangerousCommand(request.pattern)
+  ) {
+    return { action: "ask", rule };
+  }
+  return { action: rule.action, rule };
 }
 
 /** 路径是否在工作区内。 */

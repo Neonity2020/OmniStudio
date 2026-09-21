@@ -20,10 +20,16 @@
   ],
   "mutations": [
     {
-      "name": "只降级自定义规则、放过默认表兜底（auto 档下洞还在）",
+      "name": "精确规则也一并降级（把「对着原文批过的」也拦掉）",
       "file": "apps/studio/src/bun/permissions.ts",
-      "find": "  const fallback = winningRuleFor(defaultRules(\"manual\"), request.permission, patterns);",
-      "replace": "  const fallback = winningRuleFor(defaultRules(\"manual\"), request.permission, patterns);\n  if (fallback) return { action: fallback.action, rule: null };"
+      "find": "(rule.pattern.includes(\"*\") || rule.pattern.includes(\"?\")) &&",
+      "replace": "true &&"
+    },
+    {
+      "name": "不再限定 bash（别的权限也被误降级）",
+      "file": "apps/studio/src/bun/permissions.ts",
+      "find": "request.permission === \"bash\" &&",
+      "replace": ""
     }
   ]
 }
