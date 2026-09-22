@@ -11,6 +11,7 @@ import { useUILang } from "@stores/ui-lang";
 import { buildQuestions, type QuestionDraft } from "../app/jev/drafts";
 import { jevExamples } from "../app/jev/examples";
 import { clampGridSize, clampWallCount, GRID_SIZE, GRID_WALLS } from "../app/jev/playground/scenarios";
+import { defaultMarketRange, marketSpan, type MarketSymbol } from "../app/jev/playground/market-data";
 
 /** 左栏顶部那个切换：本地运行 / 云端接入（与语音合成页的"推理引擎"同一处位置）。 */
 export type JevEngineTab = "local" | "cloud";
@@ -44,6 +45,17 @@ type JevState = {
   gridWalls: number;
   setGridSize: (size: number) => void;
   setGridWalls: (count: number) => void;
+  /**
+   * 行情回放的设置：标的、区间两端（`YYYY-MM-DD`）、以及用户写的策略。
+   * 和盘面设置同理 —— 改任何一项都要整局重开，所以必须活得比组件久。
+   */
+  marketSymbol: MarketSymbol;
+  marketFrom: string;
+  marketTo: string;
+  marketStrategy: string;
+  setMarketSymbol: (symbol: MarketSymbol) => void;
+  setMarketRange: (range: { from?: string; to?: string }) => void;
+  setMarketStrategy: (strategy: string) => void;
   /** AI 生成的草稿填进来（同样是一次性内容，不算某个示例）。 */
   applyDraft: (payload: { state: string; drafts: QuestionDraft[] }) => void;
   reset: () => void;
@@ -102,6 +114,21 @@ export const useJevStore = create<JevState>((set) => ({
       return { gridSize, gridWalls: clampWallCount(gridSize, prev.gridWalls) };
     }),
   setGridWalls: (count) => set((prev) => ({ gridWalls: clampWallCount(prev.gridSize, count) })),
+  marketSymbol: "shc",
+  marketFrom: defaultMarketRange("shc").from,
+  marketTo: defaultMarketRange("shc").to,
+  marketStrategy: "",
+  // 换标的不动区间：三份行情覆盖的日期基本一致，用户刚挑好的区间不该被换个指数抹掉。
+  // 只把两端夹回新行情的覆盖范围，免得选到一个空窗口。
+  setMarketSymbol: (marketSymbol) =>
+    set((prev) => {
+      const span = marketSpan(marketSymbol);
+      const clamp = (date: string) => (date < span.first ? span.first : date > span.last ? span.last : date);
+      return { marketSymbol, marketFrom: clamp(prev.marketFrom), marketTo: clamp(prev.marketTo) };
+    }),
+  setMarketRange: ({ from, to }) =>
+    set((prev) => ({ marketFrom: from ?? prev.marketFrom, marketTo: to ?? prev.marketTo })),
+  setMarketStrategy: (marketStrategy) => set({ marketStrategy }),
 }));
 
 

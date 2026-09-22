@@ -17,8 +17,15 @@ import type {
   SystemOneChoiceQuestion,
   SystemOneNoulQuestion,
   SystemOneQuestions,
+  SystemOneScoreQuestion,
 } from "../../../../shared/systemone";
-
+import {
+  clampMarketWindow,
+  marketBars,
+  MARKET_META,
+  type MarketBar,
+  type MarketSymbol,
+} from "./market-data";
 // ---------------------------------------------------------------------------
 // 场景 A：grid-runner（5×5 网格寻路 —— 连续决策）
 //
@@ -488,6 +495,344 @@ export function triageStats(outcomes: readonly TriageOutcome[]): TriageStats {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 C：market-replay（行情回放 —— 连续决策 + 可算成绩 + 用户给的条件）
+//
+// 一根真实日线 = 一次判定：问方向（choice）与风险档位（score）。信号在**收盘时**
+// 给出，收益按**下一根**的收盘算 —— 这样既不偷看未来，也不需要盘中数据。
+// 跑完可以拿策略净值和"买入持有"对照：这是演练场里唯一一个有客观外部基准的场景。
+//
+// 用户可以写一段自己的策略（可留空）。它作为 `state.strategy` 单独一个字段进去，
+// instructions 里点名说"这是交易者写下的偏好"—— 不是把它拼进 instructions 正文：
+// 那等于让一段用户自由文本改写任务本身的定义，一旦有人写"忽略上面的规则"就没法收场。
+// ---------------------------------------------------------------------------
+
+export type MarketAction = "buy" | "hold" | "sell";
+
+export const MARKET_ACTIONS: readonly MarketAction[] = ["buy", "hold", "sell"];
+
+/**
+ * 单边手续费（换一次仓位收一次）。0.05% 是个偏保守的整数档：不收手续费的话，
+ * "每天翻来覆去换仓"在净值上不吃任何亏，跑出来的成绩会好看得不真实。
+ */
+export const MARKET_FEE = 0.0005;
+
+/**
+ * 风险档位（`score` 问题）。**有序**，档位号就是下标 —— 0 最平静、3 最紧张。
+ * 演练场里前两个场景都没用上 `score`，这里补上协议的第三种问题类型。
+ */
+export const MARKET_RISK_LEVELS: readonly string[] = [
+  "Calm: small range, volume near its average, price sitting close to the 20-day average.",
+  "Normal: ordinary day-to-day movement, nothing that changes how a position should be sized.",
+  "Elevated: wide range or unusual volume, or price stretched well away from the 20-day average.",
+  "Stress: a large move against a backdrop of heavy volume, or a sharp drop from the recent high.",
+];
+
+/** 回放现场。`index` 是"下一根要判定的日线"在 `bars` 里的下标。 */
+export type MarketReplayState = {
+  symbol: MarketSymbol;
+  from: string;
+  to: string;
+  /** 用户写的策略（已 trim）；空串 = 不附加条件。 */
+  strategy: string;
+  /** 回放窗口内的日线（升序）。 */
+  bars: readonly MarketBar[];
+  /** 窗口第一根在全量序列里的下标 —— 指标要往窗口之前回看。 */
+  offset: number;
+  index: number;
+  position: "long" | "flat";
+  /** 建仓价（`flat` 时为 0）。 */
+  entry: number;
+  /** 策略净值，开局 1。 */
+  equity: number;
+  /** 换仓次数（收过手续费的那些）。 */
+  trades: number;
+  over: boolean;
+};
+
+/**
+ * 能判定的根数 = 窗口根数 − 1。
+ *
+ * 最后一根没有"下一根"来兑现收益，所以不问它 —— 否则最后一步的答案既不影响净值
+ * 也无法验证，纯粹是一次白跑的调用。
+ */
+export function marketSteps(state: MarketReplayState): number {
+  return Math.max(0, state.bars.length - 1);
+}
+
+/** 开局（纯函数）。窗口为空或只有一根时直接是 `over`，界面据此提示区间太短。 */
+export function newMarketReplay(options: {
+  symbol: MarketSymbol;
+  from: string;
+  to: string;
+  strategy?: string;
+}): MarketReplayState {
+  const window = clampMarketWindow(options.symbol, options.from, options.to);
+  return {
+    symbol: options.symbol,
+    from: options.from,
+    to: options.to,
+    strategy: (options.strategy ?? "").trim(),
+    bars: window.bars,
+    offset: window.offset,
+    index: 0,
+    position: "flat",
+    entry: 0,
+    equity: 1,
+    trades: 0,
+    over: window.bars.length < 2,
+  };
+}
+
+/** 当前这根（`over` 之后返回最后一根，调用方不用到处判空）。 */
+export function marketCurrentBar(state: MarketReplayState): MarketBar | null {
+  const bar = state.bars[Math.min(state.index, state.bars.length - 1)];
+  return bar ?? null;
+}
+
+export type MarketIndicators = {
+  changePct: number;
+  ma5: number;
+  ma20: number;
+  vsMa20Pct: number;
+  rangePct: number;
+  volumeVs20d: number;
+  high20: number;
+  low20: number;
+  drawdownPct: number;
+  /** 连涨（正）/ 连跌（负）的天数。 */
+  streak: number;
+};
+
+function mean(values: number[]): number {
+  if (values.length === 0) return 0;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+/**
+ * 指标：都在**全量序列**上算（`absolute` 是全量下标），不是只在回放窗口里算。
+ *
+ * 这样窗口第一根就有完整的 20 日均线 —— 否则用户把区间掐在某一天，头二十根的
+ * 指标全是"只有几根数据的均值"，模型看到的和图上画的对不上。
+ */
+export function marketIndicators(symbol: MarketSymbol, absolute: number): MarketIndicators {
+  const all = marketBars(symbol);
+  const bar = all[absolute];
+  if (!bar) {
+    return { changePct: 0, ma5: 0, ma20: 0, vsMa20Pct: 0, rangePct: 0, volumeVs20d: 1, high20: 0, low20: 0, drawdownPct: 0, streak: 0 };
+  }
+  const prev = all[absolute - 1];
+  const back = (n: number) => all.slice(Math.max(0, absolute - n + 1), absolute + 1);
+  const closes = back(20).map((item) => item.close);
+  const ma5 = mean(back(5).map((item) => item.close));
+  const ma20 = mean(closes);
+  const volumes = back(20).map((item) => item.volume);
+  const avgVolume = mean(volumes);
+  const high20 = Math.max(...back(20).map((item) => item.high));
+  const low20 = Math.min(...back(20).map((item) => item.low));
+  let streak = 0;
+  for (let i = absolute; i > 0; i--) {
+    const cur = all[i];
+    const before = all[i - 1];
+    if (!cur || !before) break;
+    const up = cur.close >= before.close;
+    if (streak === 0) streak = up ? 1 : -1;
+    else if (up && streak > 0) streak += 1;
+    else if (!up && streak < 0) streak -= 1;
+    else break;
+  }
+  return {
+    changePct: prev ? round2(((bar.close - prev.close) / prev.close) * 100) : 0,
+    ma5: Math.round(ma5),
+    ma20: Math.round(ma20),
+    vsMa20Pct: ma20 > 0 ? round2(((bar.close - ma20) / ma20) * 100) : 0,
+    rangePct: bar.close > 0 ? round2(((bar.high - bar.low) / bar.close) * 100) : 0,
+    volumeVs20d: avgVolume > 0 ? round2(bar.volume / avgVolume) : 1,
+    high20,
+    low20,
+    drawdownPct: high20 > 0 ? round2(((bar.close - high20) / high20) * 100) : 0,
+    streak,
+  };
+}
+
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+/**
+ * 局面 → JEV 的 `state`（英文对象）。
+ *
+ * 和网格场景同一个原则：能算的都替它算好（涨跌幅、相对量、离均线多远、回撤），
+ * encoder 类小模型不会自己做这些算术。成交量给的是**对 20 日均量的倍数**而不是
+ * 绝对值 —— 各市场口径不同，绝对值对模型没有意义（见 `market-data.ts` 文件头）。
+ */
+export function marketReplayState(state: MarketReplayState): Record<string, unknown> {
+  const bar = marketCurrentBar(state);
+  const meta = MARKET_META[state.symbol];
+  if (!bar) return { task: "Index daily replay", description: "No bars in the selected range." };
+  const absolute = state.offset + Math.min(state.index, state.bars.length - 1);
+  const ind = marketIndicators(state.symbol, absolute);
+  const all = marketBars(state.symbol);
+  const recent = all.slice(Math.max(0, absolute - 4), absolute + 1).map((item, i, rows) => {
+    const before = rows[i - 1];
+    return {
+      date: item.date,
+      close: item.close,
+      change_pct: before ? round2(((item.close - before.close) / before.close) * 100) : null,
+    };
+  });
+  const payload: Record<string, unknown> = {
+    task: "Daily index replay",
+    description:
+      "One trading day of a stock index is shown. Decide what the position should be for the next " +
+      "trading day. The decision is made on today's close and takes effect on the next close, so no " +
+      "future information is available. Answer from the numbers below only.",
+    symbol: { code: meta.code, name: meta.name, market: meta.market, currency: meta.currency },
+    date: bar.date,
+    bar: { open: bar.open, high: bar.high, low: bar.low, close: bar.close },
+    change_pct: ind.changePct,
+    // 相对量：1.0 = 与近 20 日均量持平，2.0 = 放量一倍。
+    volume_vs_20d: ind.volumeVs20d,
+    ma5: ind.ma5,
+    ma20: ind.ma20,
+    close_vs_ma20_pct: ind.vsMa20Pct,
+    day_range_pct: ind.rangePct,
+    high_20d: ind.high20,
+    low_20d: ind.low20,
+    drawdown_from_20d_high_pct: ind.drawdownPct,
+    // 正数 = 连涨几天，负数 = 连跌几天。
+    streak_days: ind.streak,
+    recent_days: recent,
+    position: state.position,
+    entry_price: state.position === "long" ? state.entry : null,
+    unrealized_pct:
+      state.position === "long" && state.entry > 0 ? round2(((bar.close - state.entry) / state.entry) * 100) : null,
+    bars_done: state.index,
+    bars_total: marketSteps(state),
+    fee_per_switch_pct: round2(MARKET_FEE * 100),
+  };
+  // 空策略不写字段：让模型看到一个空字符串，等于凭空给它一条"没有内容的规则"。
+  if (state.strategy) payload.strategy = state.strategy;
+  return payload;
+}
+
+export function marketReplayQuestions(state: MarketReplayState): SystemOneQuestions {
+  return {
+    action: marketActionQuestion(state),
+    risk: marketRiskQuestion(),
+  };
+}
+
+/**
+ * 方向题。带策略时在 instructions 末尾加一句：策略是**交易者写下的偏好**，
+ * 按它裁剪选择 —— 措辞上把它钉死在"数据"的位置，而不是任务定义的一部分。
+ */
+export function marketActionQuestion(state: MarketReplayState): SystemOneChoiceQuestion {
+  const base =
+    "What should the position be for the next trading day? The position is either long (fully invested) " +
+    "or flat (in cash). Pick one action.";
+  const withStrategy = state.strategy
+    ? `${base} The trader has written down a strategy in state.strategy. Treat it as the trader's own ` +
+      "stated preference about when to be long and when to be flat, and follow it where it applies to today's numbers."
+    : base;
+  return {
+    type: "choice",
+    instructions: withStrategy,
+    criteria: {
+      buy: "Go long, or stay long: the evidence favours holding the index over the next day.",
+      hold: "Keep the current position unchanged, whatever it is: the evidence does not favour either side.",
+      sell: "Go flat, or stay flat: the evidence favours being out of the index over the next day.",
+    },
+  };
+}
+
+export function marketRiskQuestion(): SystemOneScoreQuestion {
+  return {
+    type: "score",
+    instructions:
+      "How stressed does this trading day look, judged from the range, the volume and how far price " +
+      "has travelled from its 20-day average?",
+    criteria: [...MARKET_RISK_LEVELS],
+  };
+}
+
+export type MarketDecision = {
+  next: MarketReplayState;
+  /** 这一步判定的那根。 */
+  bar: MarketBar;
+  action: MarketAction;
+  /** 判定后的仓位。 */
+  position: "long" | "flat";
+  /** 是否换了仓（换了才收手续费）。 */
+  switched: boolean;
+  /** 下一根的收盘涨跌（小数，0.01 = 涨 1%）—— 这一步真正兑现的行情。 */
+  ret: number;
+  /** 这一步之后的净值。 */
+  equity: number;
+};
+
+/**
+ * 推进一步（纯函数、不可变更新）。
+ *
+ * `hold` 保持原仓位（包括"一直空着"），`buy` / `sell` 只在真的换边时收手续费。
+ * 收益按下一根的**收盘对收盘**算：信号在今天收盘给出，持有的是明天一整天。
+ */
+export function applyMarketDecision(state: MarketReplayState, action: MarketAction): MarketDecision {
+  const bar = state.bars[state.index] as MarketBar;
+  const next = state.bars[state.index + 1];
+  const position: "long" | "flat" = action === "buy" ? "long" : action === "sell" ? "flat" : state.position;
+  const switched = position !== state.position;
+  let equity = state.equity;
+  if (switched) equity *= 1 - MARKET_FEE;
+  const ret = next && bar.close > 0 ? next.close / bar.close - 1 : 0;
+  if (position === "long") equity *= 1 + ret;
+  const index = state.index + 1;
+  return {
+    next: {
+      ...state,
+      index,
+      position,
+      entry: position === "long" ? (state.position === "long" ? state.entry : bar.close) : 0,
+      equity,
+      trades: state.trades + (switched ? 1 : 0),
+      over: index >= marketSteps(state),
+    },
+    bar,
+    action,
+    position,
+    switched,
+    ret,
+    equity,
+  };
+}
+
+export type MarketStats = {
+  /** 已判定的根数。 */
+  steps: number;
+  /** 策略收益（百分数，4.2 = +4.2%）。 */
+  returnPct: number;
+  /** 同区间买入持有的收益（百分数）。 */
+  benchmarkPct: number;
+  trades: number;
+};
+
+/**
+ * 成绩单。基准是**同一段窗口**的买入持有 —— 只报策略收益是没有意义的：
+ * 一段普涨行情里闭着眼睛满仓也能赚，能说明问题的是它跟基准差多少。
+ */
+export function marketStats(state: MarketReplayState): MarketStats {
+  const first = state.bars[0];
+  // 基准只算到"最后一根被兑现的日线"，与策略净值的区间严格一致。
+  const last = state.bars[Math.min(state.index, state.bars.length - 1)];
+  const benchmark = first && last && first.close > 0 ? last.close / first.close - 1 : 0;
+  return {
+    steps: state.index,
+    returnPct: round2((state.equity - 1) * 100),
+    benchmarkPct: round2(benchmark * 100),
+    trades: state.trades,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 统一导出
 // ---------------------------------------------------------------------------
 
@@ -508,5 +853,10 @@ export const PLAYGROUND_SCENARIOS: readonly PlaygroundScenario[] = [
     id: "ticket-triage",
     nameKey: "jev.playground.ticketTriage.name",
     descKey: "jev.playground.ticketTriage.desc",
+  },
+  {
+    id: "market-replay",
+    nameKey: "jev.playground.marketReplay.name",
+    descKey: "jev.playground.marketReplay.desc",
   },
 ];

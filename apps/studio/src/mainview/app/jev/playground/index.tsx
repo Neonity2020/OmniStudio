@@ -24,6 +24,8 @@ import { useJevStore } from "@stores/jev";
 import { useJevMetrics } from "@stores/jev-metrics";
 import { useT } from "@stores/ui-lang";
 import { Button } from "@ui/button";
+import { Input } from "@ui/input";
+import { Textarea } from "@ui/textarea";
 import {
   applyMove,
   GRID_SIZE_MAX,
@@ -46,7 +48,24 @@ import { GridView, type GridMoveMark } from "./grid-view";
 export const STEP_PAUSE_MS = 260;
 import { RunLog, type RunLogEntry } from "./run-log";
 import { TriageView, type TriageRow } from "./triage-view";
-import type { SystemOneChoiceAnswer, SystemOneNoulAnswer } from "../../../../shared/systemone";
+import { MarketView, type MarketMark } from "./market-view";
+import {
+  applyMarketDecision,
+  marketReplayQuestions,
+  marketReplayState,
+  marketSteps,
+  newMarketReplay,
+  type MarketAction,
+  type MarketReplayState,
+} from "./scenarios";
+import {
+  clampMarketWindow,
+  MARKET_MAX_BARS,
+  MARKET_META,
+  MARKET_SYMBOLS,
+  marketSpan,
+} from "./market-data";
+import type { SystemOneChoiceAnswer, SystemOneNoulAnswer, SystemOneScoreAnswer } from "../../../../shared/systemone";
 
 /** 一次判定调用：计时，并把响应里的问题答案按名字摘出来。 */
 async function runOnce(
@@ -54,7 +73,7 @@ async function runOnce(
   questions: Record<string, unknown>,
   names: string[],
 ): Promise<
-  | { ok: true; choice?: SystemOneChoiceAnswer; noul?: SystemOneNoulAnswer; ms: number }
+  | { ok: true; choice?: SystemOneChoiceAnswer; noul?: SystemOneNoulAnswer; score?: SystemOneScoreAnswer; ms: number }
   | { ok: false; status: number; message: string }
 > {
   const started = performance.now();
@@ -69,13 +88,15 @@ async function runOnce(
   if (!result.ok) return { ok: false, status: result.status, message: result.message };
   let choice: SystemOneChoiceAnswer | undefined;
   let noul: SystemOneNoulAnswer | undefined;
+  let score: SystemOneScoreAnswer | undefined;
   for (const name of names) {
     const answer = result.response.answers[name];
     if (!answer) continue;
     if (answer.type === "choice") choice = answer;
     if (answer.type === "noul") noul = answer;
+    if (answer.type === "score") score = answer;
   }
-  return { ok: true, choice, noul, ms };
+  return { ok: true, choice, noul, score, ms };
 }
 
 export function JevPlayground() {
@@ -87,6 +108,14 @@ export function JevPlayground() {
   const gridWalls = useJevStore((s) => s.gridWalls);
   const setGridSize = useJevStore((s) => s.setGridSize);
   const setGridWalls = useJevStore((s) => s.setGridWalls);
+  // 行情回放的设置（同理：改任何一项都整局重开）。
+  const marketSymbol = useJevStore((s) => s.marketSymbol);
+  const marketFrom = useJevStore((s) => s.marketFrom);
+  const marketTo = useJevStore((s) => s.marketTo);
+  const marketStrategy = useJevStore((s) => s.marketStrategy);
+  const setMarketSymbol = useJevStore((s) => s.setMarketSymbol);
+  const setMarketRange = useJevStore((s) => s.setMarketRange);
+  const setMarketStrategy = useJevStore((s) => s.setMarketStrategy);
 
   // 后端状态（与判定台同一查询：跑之前先看一眼"能不能跑"）。
   const status = useQuery({
@@ -98,6 +127,11 @@ export function JevPlayground() {
   const [gridState, setGridState] = useState<GridRunnerState>(() => newGridRunner({ size: gridSize, walls: gridWalls }));
   const [trail, setTrail] = useState<[number, number][]>([]);
   const [triageRows, setTriageRows] = useState<TriageRow[]>(() => TICKETS.map((ticket) => ({ ticket })));
+  const [marketState, setMarketState] = useState<MarketReplayState>(() =>
+    newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }),
+  );
+  /** 图上每根的判定标记（按下标）。 */
+  const [marks, setMarks] = useState<MarketMark[]>([]);
   const [log, setLog] = useState<RunLogEntry[]>([]);
   /**
    * 最近一步的落点，棋盘拿它做动画：走通了是滑过去，撞墙 / 撞边界是"顶一下"再弹回。
@@ -132,9 +166,14 @@ export function JevPlayground() {
    */
   const gridRef = useRef(gridState);
   const rowsRef = useRef(triageRows);
+  const marketRef = useRef(marketState);
   const putGrid = (next: GridRunnerState) => {
     gridRef.current = next;
     setGridState(next);
+  };
+  const putMarket = (next: MarketReplayState) => {
+    marketRef.current = next;
+    setMarketState(next);
   };
   const putRows = (next: TriageRow[]) => {
     rowsRef.current = next;
@@ -148,13 +187,15 @@ export function JevPlayground() {
     putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
     putRows(TICKETS.map((ticket) => ({ ticket })));
+    putMarket(newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }));
+    setMarks([]);
     setLastMove(null);
     setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
     setRunning(false);
     setError(null);
     setDone(false);
-  }, [scenarioId, gridSize, gridWalls]);
+  }, [scenarioId, gridSize, gridWalls, marketSymbol, marketFrom, marketTo, marketStrategy]);
 
   // 卸载时中止正在跑的循环。
   useEffect(
@@ -209,6 +250,54 @@ export function JevPlayground() {
         },
       ]);
       return move.next.over ? "finished" : "continue";
+    }
+
+    if (scenario.id === "market-replay") {
+      // 局面同样从 ref 读（见 gridRef 的注释）。
+      const market = marketRef.current;
+      if (market.over) return "finished";
+      const outcome = await runOnce(marketReplayState(market), marketReplayQuestions(market), ["action", "risk"]);
+      if (!outcome.ok) {
+        setError({ status: outcome.status, message: outcome.message });
+        return "error";
+      }
+      if (cancelRef.current) return "cancelled";
+      const choice = outcome.choice;
+      // 答不上来就按 hold 处理：它是三个动作里唯一"什么都不改"的那个，拿它兜底
+      // 不会凭空给净值加上一笔没人做过的交易。
+      const action = (choice?.choice ?? "hold") as MarketAction;
+      const decision = applyMarketDecision(market, action);
+      putMarket(decision.next);
+      setMarks((prev) => [
+        ...prev,
+        { index: market.index, action, confidence: choice?.confidence ?? 0, risk: outcome.score?.score ?? null },
+      ]);
+      setLog((prev) => {
+        const step = prev.length + 1;
+        const entries: RunLogEntry[] = [
+          ...prev,
+          {
+            step,
+            question: "action",
+            choice: choice?.choice ?? "—",
+            confidence: choice?.confidence,
+            probabilities: choice?.probabilities ?? {},
+            ms: outcome.ms,
+          },
+        ];
+        if (outcome.score) {
+          entries.push({
+            step,
+            question: "risk",
+            choice: String(outcome.score.score),
+            confidence: outcome.score.confidence,
+            probabilities: outcome.score.probabilities,
+            ms: outcome.ms,
+          });
+        }
+        return entries;
+      });
+      return decision.next.over ? "finished" : "continue";
     }
 
     // ticket-triage：一条工单两个问题（一次调用带回来）。
@@ -311,6 +400,8 @@ export function JevPlayground() {
     putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
     putRows(TICKETS.map((ticket) => ({ ticket })));
+    putMarket(newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }));
+    setMarks([]);
     setLastMove(null);
     setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
@@ -335,8 +426,18 @@ export function JevPlayground() {
   const noSignal = tally.steps >= 4 && tally.wasted / tally.steps >= 0.5;
 
   const answered = triageRows.filter((row) => row.choice !== undefined).length;
-  const stepNumber = scenario.id === "grid-runner" ? gridState.steps + 1 : answered + 1;
-  const totalSteps = scenario.id === "grid-runner" ? gridState.maxSteps : TICKETS.length;
+  const marketTotal = marketSteps(marketState);
+  const stepNumber =
+    scenario.id === "grid-runner"
+      ? gridState.steps + 1
+      : scenario.id === "market-replay"
+        ? marketState.index + 1
+        : answered + 1;
+  const totalSteps =
+    scenario.id === "grid-runner" ? gridState.maxSteps : scenario.id === "market-replay" ? marketTotal : TICKETS.length;
+  // 用户选的区间里到底有多少根、是不是被上限截过 —— 下面的提示要如实说清楚。
+  const marketWindow = clampMarketWindow(marketSymbol, marketFrom, marketTo);
+  const marketSpanDates = marketSpan(marketSymbol);
 
   return (
     <div className="flex h-full min-h-0 flex-1">
@@ -421,6 +522,80 @@ export function JevPlayground() {
           </div>
         ) : null}
 
+        {/* 行情设置：标的、区间、策略。跑的过程中锁住 —— 半程换标的没有意义。 */}
+        {scenario.id === "market-replay" ? (
+          <div className="flex flex-col gap-2">
+            <span className="text-[11px] font-medium">{t("jev.playground.market.settings")}</span>
+            <div className="flex flex-wrap gap-1.5">
+              {MARKET_SYMBOLS.map((symbol) => (
+                <Button
+                  key={symbol}
+                  size="sm"
+                  variant={symbol === marketSymbol ? "secondary" : "ghost"}
+                  disabled={running}
+                  onClick={() => setMarketSymbol(symbol)}
+                >
+                  {t(MARKET_META[symbol].nameKey)}
+                </Button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <label className="flex-1 text-[11px] text-muted-foreground">
+                {t("jev.playground.market.from")}
+                <Input
+                  type="date"
+                  className="mt-1 h-7 text-xs"
+                  value={marketFrom}
+                  min={marketSpanDates.first}
+                  max={marketSpanDates.last}
+                  disabled={running}
+                  onChange={(event) => setMarketRange({ from: event.target.value })}
+                />
+              </label>
+              <label className="flex-1 text-[11px] text-muted-foreground">
+                {t("jev.playground.market.to")}
+                <Input
+                  type="date"
+                  className="mt-1 h-7 text-xs"
+                  value={marketTo}
+                  min={marketSpanDates.first}
+                  max={marketSpanDates.last}
+                  disabled={running}
+                  onChange={(event) => setMarketRange({ to: event.target.value })}
+                />
+              </label>
+            </div>
+            <p className="text-[10px] leading-4 text-muted-foreground">
+              {marketWindow.truncated
+                ? t("jev.playground.market.rangeHintTruncated", {
+                    bars: String(marketWindow.bars.length),
+                    available: String(marketWindow.available),
+                    max: String(MARKET_MAX_BARS),
+                  })
+                : t("jev.playground.market.rangeHint", {
+                    bars: String(marketWindow.bars.length),
+                    steps: String(Math.max(0, marketWindow.bars.length - 1)),
+                    first: marketSpanDates.first,
+                    last: marketSpanDates.last,
+                  })}
+            </p>
+            <span className="text-[11px] font-medium">{t("jev.playground.market.strategy")}</span>
+            <Textarea
+              className="min-h-20 text-xs"
+              value={marketStrategy}
+              disabled={running}
+              placeholder={t("jev.playground.market.strategyPlaceholder")}
+              onChange={(event) => setMarketStrategy(event.target.value)}
+            />
+            <p className="text-[10px] leading-4 text-muted-foreground">
+              {marketStrategy.trim()
+                ? t("jev.playground.market.strategyOn")
+                : t("jev.playground.market.strategyOff")}
+            </p>
+            <p className="text-[10px] leading-4 text-muted-foreground">{t("jev.playground.market.disclaimer")}</p>
+          </div>
+        ) : null}
+
         {error ? (
           <div className="jev-note error">
             <strong>{t("jev.failed", { status: String(error.status) })}</strong>
@@ -440,6 +615,10 @@ export function JevPlayground() {
             <span className="jev-pill">
               {t("jev.playground.grid.steps", { n: String(gridState.steps), max: String(gridState.maxSteps) })}
             </span>
+          ) : scenario.id === "market-replay" ? (
+            <span className="jev-pill">
+              {t("jev.playground.market.progress", { done: String(marketState.index), total: String(marketTotal) })}
+            </span>
           ) : (
             <span className="jev-pill">
               {t("jev.playground.triage.progress", { done: String(answered), total: String(TICKETS.length) })}
@@ -455,6 +634,10 @@ export function JevPlayground() {
         <div className="min-h-0 flex-1 overflow-hidden">
           {scenario.id === "grid-runner" ? (
             <GridView state={gridState} trail={trail} lastMove={lastMove} />
+          ) : scenario.id === "market-replay" ? (
+            <div className="h-full overflow-y-auto">
+              <MarketView state={marketState} marks={marks} />
+            </div>
           ) : (
             <div className="h-full overflow-y-auto">
               <TriageView rows={triageRows} />

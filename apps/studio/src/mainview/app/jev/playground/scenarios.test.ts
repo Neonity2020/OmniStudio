@@ -13,6 +13,7 @@ import { validateSystemOneRequest } from "../../../../shared/systemone";
 import type {
   SystemOneChoiceQuestion,
   SystemOneNoulQuestion,
+  SystemOneScoreQuestion,
 } from "../../../../shared/systemone";
 import {
   applyMove,
@@ -33,7 +34,27 @@ import {
   ticketState,
   type GridDirection,
   type TriageOutcome,
+  applyMarketDecision,
+  marketActionQuestion,
+  marketIndicators,
+  marketReplayQuestions,
+  marketReplayState,
+  marketStats,
+  marketSteps,
+  newMarketReplay,
+  MARKET_ACTIONS,
+  MARKET_FEE,
+  MARKET_RISK_LEVELS,
 } from "./scenarios";
+import {
+  clampMarketWindow,
+  defaultMarketRange,
+  marketBars,
+  marketSpan,
+  MARKET_MAX_BARS,
+  MARKET_SYMBOLS,
+  type MarketBar,
+} from "./market-data";
 
 // ---------------------------------------------------------------------------
 // 场景 A：grid-runner
@@ -291,9 +312,9 @@ describe("ticket-triage：统计（triageStats）", () => {
 // ---------------------------------------------------------------------------
 
 describe("PLAYGROUND_SCENARIOS", () => {
-  test("两个场景的 id 与 i18n key 都齐", () => {
-    expect(PLAYGROUND_SCENARIOS).toHaveLength(2);
-    expect(PLAYGROUND_SCENARIOS.map((s) => s.id)).toEqual(["grid-runner", "ticket-triage"]);
+  test("三个场景的 id 与 i18n key 都齐", () => {
+    expect(PLAYGROUND_SCENARIOS).toHaveLength(3);
+    expect(PLAYGROUND_SCENARIOS.map((s) => s.id)).toEqual(["grid-runner", "ticket-triage", "market-replay"]);
     for (const scenario of PLAYGROUND_SCENARIOS) {
       expect(scenario.nameKey).toBeTypeOf("string");
       expect(scenario.descKey).toBeTypeOf("string");
@@ -401,5 +422,197 @@ describe("grid-runner：盘面设置", () => {
     expect(state.steps).toBe(gridMaxSteps(8));
     expect(state.over).toBe(true);
     expect(state.atGoal).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 场景 C：market-replay（行情回放）
+// ---------------------------------------------------------------------------
+
+describe("market-data：打包进来的历史行情", () => {
+  test("三个标的都解析得出来，且按日期升序、价格自洽", () => {
+    for (const symbol of MARKET_SYMBOLS) {
+      const bars = marketBars(symbol);
+      expect(bars.length).toBeGreaterThan(1000);
+      for (let i = 0; i < bars.length; i++) {
+        const bar = bars[i] as MarketBar;
+        expect(bar.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+        // 最高价不低于开收，最低价不高于开收 —— 解析错位（把列读串）最先破的就是这条。
+        expect(bar.high).toBeGreaterThanOrEqual(Math.max(bar.open, bar.close));
+        expect(bar.low).toBeLessThanOrEqual(Math.min(bar.open, bar.close));
+        expect(bar.close).toBeGreaterThan(0);
+        expect(bar.volume).toBeGreaterThanOrEqual(0);
+        const prev = bars[i - 1];
+        if (prev) expect(bar.date > prev.date).toBe(true);
+      }
+    }
+  });
+
+  test("默认区间落在覆盖范围内，且就是最后 60 根", () => {
+    for (const symbol of MARKET_SYMBOLS) {
+      const span = marketSpan(symbol);
+      const range = defaultMarketRange(symbol);
+      expect(range.from >= span.first).toBe(true);
+      expect(range.to).toBe(span.last);
+      expect(clampMarketWindow(symbol, range.from, range.to).bars).toHaveLength(60);
+    }
+  });
+
+  test("窗口：两端闭区间、点反了自动对调、超过上限只留靠前的部分", () => {
+    const span = marketSpan("shc");
+    const window = clampMarketWindow("shc", "2024-01-01", "2024-03-31");
+    expect(window.bars.length).toBeGreaterThan(30);
+    for (const bar of window.bars) {
+      expect(bar.date >= "2024-01-01").toBe(true);
+      expect(bar.date <= "2024-03-31").toBe(true);
+    }
+    // 第一根在全量里的下标要对得上（指标靠它往窗口之前回看）。
+    expect(marketBars("shc")[window.offset]?.date).toBe(window.bars[0]?.date);
+    // 反着点一样的结果。
+    expect(clampMarketWindow("shc", "2024-03-31", "2024-01-01").bars).toEqual(window.bars);
+    const whole = clampMarketWindow("shc", span.first, span.last);
+    expect(whole.truncated).toBe(true);
+    expect(whole.bars).toHaveLength(MARKET_MAX_BARS);
+    expect(whole.bars[0]?.date).toBe(span.first);
+    // 区间里一根都没有（周末）：空窗口而不是崩。
+    expect(clampMarketWindow("shc", "2024-01-06", "2024-01-07").bars).toHaveLength(0);
+  });
+});
+
+describe("market-replay：净值与仓位", () => {
+  const RANGE = { symbol: "shc" as const, from: "2024-01-02", to: "2024-02-29" };
+
+  test("开局：空仓、净值 1、判定次数 = 根数 − 1", () => {
+    const start = newMarketReplay(RANGE);
+    expect(start.position).toBe("flat");
+    expect(start.equity).toBe(1);
+    expect(start.index).toBe(0);
+    expect(start.over).toBe(false);
+    expect(marketSteps(start)).toBe(start.bars.length - 1);
+  });
+
+  test("区间不足两根：直接结束（界面据此提示区间太短）", () => {
+    const tiny = newMarketReplay({ symbol: "shc", from: "2024-01-02", to: "2024-01-02" });
+    expect(tiny.bars).toHaveLength(1);
+    expect(tiny.over).toBe(true);
+    expect(marketSteps(tiny)).toBe(0);
+  });
+
+  test("一直空仓：净值不动，也不收手续费", () => {
+    let state = newMarketReplay(RANGE);
+    while (!state.over) state = applyMarketDecision(state, "sell").next;
+    expect(state.equity).toBe(1);
+    expect(state.trades).toBe(0);
+    expect(marketStats(state).returnPct).toBe(0);
+  });
+
+  test("第一根买入后一直持有：净值 ≈ 同区间买入持有（差的就是那一次手续费）", () => {
+    let state = newMarketReplay(RANGE);
+    state = applyMarketDecision(state, "buy").next;
+    while (!state.over) state = applyMarketDecision(state, "hold").next;
+    expect(state.trades).toBe(1);
+    expect(state.position).toBe("long");
+    // 净值 = (1 − 手续费) × 区间首尾收盘之比。成绩单上的两个百分数都取到两位小数，
+    // 所以这里拿**没取整的** equity 去比，不然比的是四舍五入的误差。
+    const first = state.bars[0] as MarketBar;
+    const last = state.bars[state.bars.length - 1] as MarketBar;
+    expect(state.equity).toBeCloseTo((1 - MARKET_FEE) * (last.close / first.close), 12);
+    const stats = marketStats(state);
+    expect(stats.returnPct).toBeCloseTo((state.equity - 1) * 100, 2);
+    expect(stats.benchmarkPct).toBeCloseTo((last.close / first.close - 1) * 100, 2);
+  });
+
+  test("hold 保持原仓位，buy / sell 只在真换边时收手续费", () => {
+    const start = newMarketReplay(RANGE);
+    const first = applyMarketDecision(start, "buy");
+    expect(first.switched).toBe(true);
+    expect(first.position).toBe("long");
+    // 已经是多头时再 buy：不算换仓。
+    const again = applyMarketDecision(first.next, "buy");
+    expect(again.switched).toBe(false);
+    expect(again.next.trades).toBe(1);
+    // 建仓价是"给出信号的那根"的收盘，且 hold 不会把它改掉。
+    expect(first.next.entry).toBe(first.bar.close);
+    const held = applyMarketDecision(again.next, "hold");
+    expect(held.next.entry).toBe(first.next.entry);
+    expect(held.next.position).toBe("long");
+    const out = applyMarketDecision(held.next, "sell");
+    expect(out.switched).toBe(true);
+    expect(out.next.position).toBe("flat");
+    expect(out.next.entry).toBe(0);
+    expect(out.next.trades).toBe(2);
+  });
+
+  test("兑现的是下一根的收盘涨跌（不偷看未来，也不少算一天）", () => {
+    const start = newMarketReplay(RANGE);
+    const bars = start.bars;
+    const move = applyMarketDecision(start, "buy");
+    const expectedRet = (bars[1] as MarketBar).close / (bars[0] as MarketBar).close - 1;
+    expect(move.ret).toBeCloseTo(expectedRet, 12);
+    expect(move.equity).toBeCloseTo((1 - MARKET_FEE) * (1 + expectedRet), 12);
+  });
+
+  test("跑满：index 停在判定次数上，不会多问最后那根", () => {
+    let state = newMarketReplay(RANGE);
+    let steps = 0;
+    while (!state.over && steps < 500) {
+      state = applyMarketDecision(state, "hold").next;
+      steps++;
+    }
+    expect(state.over).toBe(true);
+    expect(steps).toBe(state.bars.length - 1);
+    expect(state.index).toBe(marketSteps(state));
+  });
+});
+
+describe("market-replay：发给模型的请求", () => {
+  test("state / questions 过官方校验，且含成交量与仓位", () => {
+    const start = newMarketReplay({ symbol: "spx", from: "2020-03-02", to: "2020-04-30" });
+    const state = marketReplayState(start);
+    const result = validateSystemOneRequest({
+      state,
+      model: "jev-latest",
+      questions: marketReplayQuestions(start),
+    });
+    expect(result.ok).toBe(true);
+    expect(state.volume_vs_20d).toBeTypeOf("number");
+    expect(state.position).toBe("flat");
+    expect(state.bars_total).toBe(marketSteps(start));
+    // 两个问题一个 choice 一个 score —— score 是演练场里唯一用上这个类型的地方。
+    const questions = marketReplayQuestions(start);
+    expect(questions.action?.type).toBe("choice");
+    expect(questions.risk?.type).toBe("score");
+    expect(Object.keys((questions.action as SystemOneChoiceQuestion).criteria)).toEqual([...MARKET_ACTIONS]);
+    expect((questions.risk as SystemOneScoreQuestion).criteria).toHaveLength(MARKET_RISK_LEVELS.length);
+  });
+
+  test("策略：留空不写字段，填了就带上，并在 instructions 里点名", () => {
+    const blank = newMarketReplay({ symbol: "shc", from: "2024-01-02", to: "2024-02-29" });
+    expect(marketReplayState(blank).strategy).toBeUndefined();
+    expect(String(marketActionQuestion(blank).instructions)).not.toContain("state.strategy");
+
+    const withStrategy = newMarketReplay({
+      symbol: "shc",
+      from: "2024-01-02",
+      to: "2024-02-29",
+      strategy: "  Long only, and never add on a down day.  ",
+    });
+    // 前后空白要 trim 掉：用户从别处粘进来的策略经常带一堆空格 / 换行。
+    expect(marketReplayState(withStrategy).strategy).toBe("Long only, and never add on a down day.");
+    expect(String(marketActionQuestion(withStrategy).instructions)).toContain("state.strategy");
+    // 只写空白等于没写。
+    const spaces = newMarketReplay({ symbol: "shc", from: "2024-01-02", to: "2024-02-29", strategy: "   \n  " });
+    expect(marketReplayState(spaces).strategy).toBeUndefined();
+  });
+
+  test("指标在全量序列上算：窗口第一根也有完整的 20 日均线", () => {
+    const window = clampMarketWindow("hsi", "2023-06-01", "2023-06-30");
+    const ind = marketIndicators("hsi", window.offset);
+    const all = marketBars("hsi");
+    const closes = all.slice(window.offset - 19, window.offset + 1).map((bar) => bar.close);
+    expect(closes).toHaveLength(20);
+    const ma20 = Math.round(closes.reduce((sum, value) => sum + value, 0) / 20);
+    expect(ind.ma20).toBe(ma20);
+    expect(ind.volumeVs20d).toBeGreaterThan(0);
   });
 });
