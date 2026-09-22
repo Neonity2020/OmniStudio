@@ -3787,3 +3787,68 @@ button.pi-brand:hover {
   line-height: 1.5;
   margin: 0;
 }
+
+/* ---------------------------------------------------------------------------
+   演练场 · 网格寻路的运行动画
+   一局跑下来最该看清的是"这一步动了没有"：走通了由棋子那段 transform 过渡负责，
+   走不通就靠下面这两个——棋子往目标方向顶一下，目标格亮一圈。
+   --------------------------------------------------------------------------- */
+
+/* 棋子常驻的光晕：跟着棋子走，一眼认得出"现在在这"。 */
+.jev-grid-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: jev-grid-halo 1.8s ease-out infinite;
+}
+@keyframes jev-grid-halo {
+  0% {
+    opacity: 0.5;
+    scale: 1;
+  }
+  70% {
+    opacity: 0;
+    scale: 1.45;
+  }
+  100% {
+    opacity: 0;
+    scale: 1.45;
+  }
+}
+
+/* 撞墙 / 撞边界：顶向目标格三分之一格再弹回。 */
+.jev-grid-bump {
+  animation: jev-grid-bump 260ms ease-out;
+}
+@keyframes jev-grid-bump {
+  0% {
+    translate: 0 0;
+  }
+  45% {
+    translate: var(--jev-bump-x, 0) var(--jev-bump-y, 0);
+  }
+  100% {
+    translate: 0 0;
+  }
+}
+
+/* 被撞到的那一格亮一圈。 */
+.jev-grid-hit {
+  stroke: var(--color-destructive);
+  animation: jev-grid-hit 420ms ease-out;
+}
+@keyframes jev-grid-hit {
+  0% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jev-grid-halo,
+  .jev-grid-bump,
+  .jev-grid-hit {
+    animation: none;
+  }
+}

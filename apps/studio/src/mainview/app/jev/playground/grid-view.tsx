@@ -12,10 +12,21 @@
  * 撞墙的那一步位置不变，折线上是同一个点重复 —— 画出来看不见，但步数会涨，
  * 这正是要让用户看到的代价。
  */
+import type React from "react";
 import { Bot, BrickWall, Flag, Home } from "lucide-react";
 
 import { useT } from "@stores/ui-lang";
 import { GRID_START, type GridRunnerState } from "./scenarios";
+
+/** 最近一步的落点（父组件每步更新，`seq` 用来重放动画）。 */
+export type GridMoveMark = {
+  seq: number;
+  /** 这一步想去的格子（撞边界时会落在盘外）。 */
+  target: [number, number];
+  /** 真的挪过去了（false = 撞墙或撞边界，位置没变但步数照计）。 */
+  moved: boolean;
+  inBounds: boolean;
+};
 
 /** 一格里图标的边长与左上角偏移（格子是 1×1）。 */
 const ICON = 0.56;
@@ -32,7 +43,15 @@ function pathPoints(trail: readonly [number, number][]): [number, number][] {
   return points;
 }
 
-export function GridView({ state, trail }: { state: GridRunnerState; trail: [number, number][] }) {
+export function GridView({
+  state,
+  trail,
+  lastMove,
+}: {
+  state: GridRunnerState;
+  trail: [number, number][];
+  lastMove?: GridMoveMark | null;
+}) {
   const t = useT();
   const size = state.size;
   const side = "min(100cqw, 100cqh)";
@@ -42,6 +61,10 @@ export function GridView({ state, trail }: { state: GridRunnerState; trail: [num
   const points = pathPoints(trail);
   // 线条宽度跟着盘面走：10×10 用 5×5 的线宽会把格子糊住。
   const stroke = 0.5 / size;
+  // 走不通的那一步：往目标方向顶三分之一格再弹回来。
+  const bump = !!lastMove && !lastMove.moved;
+  const bumpX = bump ? (lastMove.target[1] - state.pos[1]) * 0.3 : 0;
+  const bumpY = bump ? (lastMove.target[0] - state.pos[0]) * 0.3 : 0;
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col gap-2">
@@ -140,8 +163,29 @@ export function GridView({ state, trail }: { state: GridRunnerState; trail: [num
           </Flag>
 
           {/*
+            撞墙那一步：位置不变，只有目标格亮一下。没有这个反馈的话，"模型连着撞
+            同一堵墙"在界面上和"卡住了"一模一样 —— 而这恰恰是最常见的一种跑法。
+            key 带 seq：连撞同一格时也要每步重放一次。
+          */}
+          {bump && lastMove?.inBounds ? (
+            <rect
+              key={`hit-${lastMove.seq}`}
+              className="jev-grid-hit"
+              x={lastMove.target[1] + 0.04}
+              y={lastMove.target[0] + 0.04}
+              width={0.92}
+              height={0.92}
+              rx={0.12}
+              fill="none"
+              strokeWidth={stroke}
+            />
+          ) : null}
+
+          {/*
             角色。位置用 transform 而不是直接改坐标：加一段过渡之后，每一步是"滑"
             过去的 —— 一眼看得出它往哪个方向动了，而不是忽然出现在另一格。
+            走不通的那一步则往目标方向顶一下再弹回来（内层 g 负责，免得和外层的
+            translate 抢同一个属性）。
           */}
           <g
             style={{
@@ -149,17 +193,29 @@ export function GridView({ state, trail }: { state: GridRunnerState; trail: [num
               transition: "transform 220ms ease",
             }}
           >
-            <circle cx={0.5} cy={0.5} r={0.42} className="fill-primary stroke-primary" strokeWidth={stroke / 2} />
-            <Bot
-              x={ICON_PAD}
-              y={ICON_PAD}
-              width={ICON}
-              height={ICON}
-              className="text-primary-foreground"
-              strokeWidth={2}
+            <g
+              key={bump ? `bump-${lastMove?.seq}` : "still"}
+              className={bump ? "jev-grid-bump" : undefined}
+              style={
+                bump
+                  ? ({ "--jev-bump-x": `${bumpX}px`, "--jev-bump-y": `${bumpY}px` } as React.CSSProperties)
+                  : undefined
+              }
             >
-              <title>{t("jev.playground.grid.markerHere")}</title>
-            </Bot>
+              {/* 常驻的一圈光晕：跑起来时跟着棋子走，一眼认得出"现在在这"。 */}
+              <circle cx={0.5} cy={0.5} r={0.42} className="jev-grid-halo fill-primary/30" />
+              <circle cx={0.5} cy={0.5} r={0.42} className="fill-primary stroke-primary" strokeWidth={stroke / 2} />
+              <Bot
+                x={ICON_PAD}
+                y={ICON_PAD}
+                width={ICON}
+                height={ICON}
+                className="text-primary-foreground"
+                strokeWidth={2}
+              >
+                <title>{t("jev.playground.grid.markerHere")}</title>
+              </Bot>
+            </g>
           </g>
         </svg>
       </div>

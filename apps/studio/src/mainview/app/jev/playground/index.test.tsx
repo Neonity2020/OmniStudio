@@ -70,7 +70,7 @@ mock.module("@lib/rpc", () => ({
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
-const { JevPlayground } = await import("./index");
+const { JevPlayground, STEP_PAUSE_MS } = await import("./index");
 const { useJevStore } = await import("@stores/jev");
 const { translate } = await import("../../../../shared/i18n");
 
@@ -119,9 +119,9 @@ test("「开始」一步步把棋子走到终点（守住「整轮循环都在�
     await act(async () => {
       button(container, zh("jev.playground.start")).click();
     });
-    // 循环每步之间让出一帧，等它跑完。
+    // 每步之间有一段看得清的停顿（STEP_PAUSE_MS），等它跑满 8 步。
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS * 10));
     });
 
     // 每一步问的都是**新**局面：起点只出现一次，后面的位置各不相同。
@@ -177,12 +177,123 @@ test("工单分派：连着跑会一条条往下判，而不是反复判第一�
       button(container, zh("jev.playground.start")).click();
     });
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS * 10));
     });
     const text = container.textContent ?? "";
     expect(text).toContain(zh("jev.playground.done"));
   } finally {
     unmount();
     useJevStore.getState().setScenarioId(null);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 棋盘的运行动画（动画本身是瞬时的，截图抓不到，只能断言图元真的画出来了）
+// ---------------------------------------------------------------------------
+
+const { GridView } = await import("./grid-view");
+const { newGridRunner, applyMove } = await import("./scenarios");
+
+/** 直接挂一个棋盘（不跑判定），用来看某个局面画出了什么。 */
+async function mountGrid(node: React.ReactElement): Promise<{ container: HTMLElement; unmount: () => void }> {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  let root: ReturnType<typeof createRoot>;
+  await act(async () => {
+    root = createRoot(container);
+    root.render(node);
+  });
+  return {
+    container,
+    unmount: () => {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("路径随每一步接长：折线的点数跟着轨迹走", async () => {
+  const start = newGridRunner();
+  const one = applyMove(start, "down").next;
+  const two = applyMove(one, "right").next;
+
+  const before = await mountGrid(<GridView state={start} trail={[]} lastMove={null} />);
+  try {
+    // 还没动过：只有起点一个点，不画线（选择器限定在棋盘里 —— 图例里也有一条小折线）。
+    expect(before.container.querySelector("svg[role='img'] polyline")).toBeNull();
+  } finally {
+    before.unmount();
+  }
+
+  const after = await mountGrid(
+    <GridView state={two} trail={[one.pos, two.pos]} lastMove={{ seq: 2, target: two.pos, moved: true, inBounds: true }} />,
+  );
+  try {
+    const line = after.container.querySelector("svg[role='img'] polyline");
+    expect(line).not.toBeNull();
+    // 起点 + 两步 = 三个点（格子中心）。
+    expect((line?.getAttribute("points") ?? "").trim().split(/\s+/)).toHaveLength(3);
+    // 走通的一步不该有撞墙动画。
+    expect(after.container.querySelector(".jev-grid-bump")).toBeNull();
+    expect(after.container.querySelector(".jev-grid-hit")).toBeNull();
+  } finally {
+    after.unmount();
+  }
+});
+
+test("撞墙那一步有反馈：棋子顶一下、被撞的格子亮一圈", async () => {
+  // 这条盯的就是"看着像卡住了"：位置不变、步数在涨，界面必须说出"它撞了那一格"。
+  const start = newGridRunner();
+  const blocked = applyMove(start, "left"); // 起点往左 = 撞边界，位置不变
+  expect(blocked.moved).toBe(false);
+
+  const { container, unmount } = await mountGrid(
+    <GridView
+      state={blocked.next}
+      trail={[blocked.next.pos]}
+      lastMove={{ seq: 1, target: blocked.target, moved: false, inBounds: blocked.inBounds }}
+    />,
+  );
+  try {
+    expect(container.querySelector(".jev-grid-bump")).not.toBeNull();
+    // 撞的是盘外（边界），盘面上没有格子可亮 —— 只顶一下。
+    expect(container.querySelector(".jev-grid-hit")).toBeNull();
+  } finally {
+    unmount();
+  }
+
+  // 撞盘内的障碍：那一格要亮起来。
+  const toWall = applyMove(applyMove(start, "down").next, "right"); // (1,0) → (1,1) 不是障碍
+  const atWall = applyMove(toWall.next, "right"); // (1,1) → (1,2) 是障碍
+  expect(atWall.moved).toBe(false);
+  const hit = await mountGrid(
+    <GridView
+      state={atWall.next}
+      trail={[toWall.next.pos, atWall.next.pos]}
+      lastMove={{ seq: 3, target: atWall.target, moved: false, inBounds: atWall.inBounds }}
+    />,
+  );
+  try {
+    expect(hit.container.querySelector(".jev-grid-bump")).not.toBeNull();
+    expect(hit.container.querySelector(".jev-grid-hit")).not.toBeNull();
+  } finally {
+    hit.unmount();
+  }
+});
+
+test("图元是图标不是文字（一格几毫米宽时文字糊成一团）", async () => {
+  const { container, unmount } = await mountGrid(<GridView state={newGridRunner()} trail={[]} lastMove={null} />);
+  try {
+    const board = container.querySelector("svg[role='img']");
+    expect(board).not.toBeNull();
+    // 盘面里没有裸文字，只有图标与无障碍用的 <title>。
+    const texts = [...(board?.querySelectorAll("text") ?? [])];
+    expect(texts).toHaveLength(0);
+    const titles = [...(board?.querySelectorAll("title") ?? [])].map((node) => node.textContent);
+    expect(titles).toContain(zh("jev.playground.grid.markerWall"));
+    expect(titles).toContain(zh("jev.playground.grid.markerGoal"));
+    expect(titles).toContain(zh("jev.playground.grid.markerHere"));
+  } finally {
+    unmount();
   }
 });

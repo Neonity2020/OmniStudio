@@ -39,7 +39,10 @@ import {
   type GridRunnerState,
   triageStats,
 } from "./scenarios";
-import { GridView } from "./grid-view";
+import { GridView, type GridMoveMark } from "./grid-view";
+
+/** 每步之间的停顿：和棋子那段 220ms 过渡对齐，刚好看清它从哪格挪到哪格。 */
+export const STEP_PAUSE_MS = 260;
 import { RunLog, type RunLogEntry } from "./run-log";
 import { TriageView, type TriageRow } from "./triage-view";
 import type { SystemOneChoiceAnswer, SystemOneNoulAnswer } from "../../../../shared/systemone";
@@ -93,6 +96,12 @@ export function JevPlayground() {
   const [trail, setTrail] = useState<[number, number][]>([]);
   const [triageRows, setTriageRows] = useState<TriageRow[]>(() => TICKETS.map((ticket) => ({ ticket })));
   const [log, setLog] = useState<RunLogEntry[]>([]);
+  /**
+   * 最近一步的落点，棋盘拿它做动画：走通了是滑过去，撞墙 / 撞边界是"顶一下"再弹回。
+   * `seq` 每步 +1 —— 连着撞同一堵墙时位置和目标格都不变，没有它动画只播一次，
+   * 看起来就跟死机一样（而这恰恰是模型最常见的表现）。
+   */
+  const [lastMove, setLastMove] = useState<GridMoveMark | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<{ status: number; message: string } | null>(null);
   const [done, setDone] = useState(false);
@@ -126,6 +135,7 @@ export function JevPlayground() {
     putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
     putRows(TICKETS.map((ticket) => ({ ticket })));
+    setLastMove(null);
     setLog([]);
     setRunning(false);
     setError(null);
@@ -162,6 +172,12 @@ export function JevPlayground() {
       const move = applyMove(grid, direction);
       putGrid(move.next);
       setTrail((prev) => [...prev, move.next.pos]);
+      setLastMove((prev) => ({
+        seq: (prev?.seq ?? 0) + 1,
+        target: move.target,
+        moved: move.moved,
+        inBounds: move.inBounds,
+      }));
       setLog((prev) => [
         ...prev,
         {
@@ -261,8 +277,9 @@ export function JevPlayground() {
         const result = await advance();
         if (result === "cancelled") return; // 重置 / 卸载：不清现场，只停。
         if (result !== "continue") break;
-        // 让出一帧，把棋盘 / 工单行 / 日志画出来再跑下一步。
-        await new Promise((resolve) => setTimeout(resolve, 0));
+        // 步与步之间留一个能看清的节奏：棋子滑过去要 220ms，让出一帧就接着跑的话
+        // 本地后端能在一两帧里跑完一整局，界面上只剩最后一格 —— 等于没有动画。
+        await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS));
       }
       setDone(true);
     } finally {
@@ -275,6 +292,7 @@ export function JevPlayground() {
     putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
     putRows(TICKETS.map((ticket) => ({ ticket })));
+    setLastMove(null);
     setLog([]);
     setRunning(false);
     setError(null);
@@ -399,7 +417,7 @@ export function JevPlayground() {
         */}
         <div className="min-h-0 flex-1 overflow-hidden">
           {scenario.id === "grid-runner" ? (
-            <GridView state={gridState} trail={trail} />
+            <GridView state={gridState} trail={trail} lastMove={lastMove} />
           ) : (
             <div className="h-full overflow-y-auto">
               <TriageView rows={triageRows} />
