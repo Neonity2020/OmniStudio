@@ -833,6 +833,440 @@ export function marketStats(state: MarketReplayState): MarketStats {
 }
 
 // ---------------------------------------------------------------------------
+// 场景 D：breakout（打砖块 —— 实时闭环）
+//
+// 与前三个场景的根本区别：**世界自己在动**。球每一帧都在飞，判定只在每隔
+// `decideEvery` 帧发生一次 —— 一次判定要管住接下来的那几帧。这是演练场里第一个
+// "模型跟不上就真的会漏球"的场景，也是唯一一个把「判定频率」本身做成可调参数的。
+//
+// 一次 `advance()` = 一次判定 + 按这个动作推进 `decideEvery` 帧。帧推进是纯函数，
+// 没有 requestAnimationFrame：UI 拿到的是"这一段跑完的结果 + 球在这段里的轨迹"，
+// 按段画出来。真让它 60fps 地跑反而没法看 —— 一次判定几百毫秒，画面早跑没了。
+//
+// 落点 `predicted_x` 是我们替它算好的（照着反射一路推到板子那一行）。理由和网格
+// 场景把四个方向摊开一样：encoder 类小模型不会自己做外推，与其让它猜，不如把
+// "球会掉在哪"写进 state，让这道题真正考的是"要不要动、往哪动"。
+// ---------------------------------------------------------------------------
+
+export type BreakoutAction = "left" | "stay" | "right";
+
+export const BREAKOUT_ACTIONS: readonly BreakoutAction[] = ["left", "stay", "right"];
+
+/** 场地尺寸（用户单位，SVG 的 viewBox 直接就是它）。 */
+export const BREAKOUT_W = 300;
+export const BREAKOUT_H = 220;
+/** 顶边（上面留一条边框线）。 */
+export const BREAKOUT_TOP = 8;
+export const BREAKOUT_PADDLE_W = 46;
+export const BREAKOUT_PADDLE_H = 6;
+export const BREAKOUT_PADDLE_Y = 194;
+/** 板子每帧挪多少（一次判定管 5 帧 = 16 像素，约三分之一个板宽）。 */
+export const BREAKOUT_PADDLE_SPEED = 3.2;
+export const BREAKOUT_BALL_R = 3.2;
+
+/** 砖块布局：5 行 × 8 列，行号越小分越高。 */
+export const BREAKOUT_ROWS = 5;
+export const BREAKOUT_COLS = 8;
+const BRICK_W = 34;
+const BRICK_H = 10;
+const BRICK_X0 = 8;
+const BRICK_Y0 = 26;
+const BRICK_GAP_X = 2;
+const BRICK_GAP_Y = 3;
+
+export const BREAKOUT_LIVES = 3;
+
+/**
+ * 判定间隔的可调范围（帧）。
+ *
+ * 下限 2 是"几乎每帧都问"——最跟手，但一局要几百次判定；上限 12 时板子每次要
+ * 瞎走 38 像素（将近一个板宽），基本接不住球了。默认 5 是两边折中。
+ */
+export const BREAKOUT_EVERY_MIN = 2;
+export const BREAKOUT_EVERY_MAX = 12;
+export const BREAKOUT_EVERY_DEFAULT = 5;
+
+/**
+ * 一局最多判定多少次。
+ *
+ * 和行情回放的 250 根同理：每次判定是一次 `systemoneRun`，150 次已经是"跑一次
+ * 要等一分钟"的量级。到了上限就收场，按当时的分数算成绩。
+ */
+export const BREAKOUT_MAX_DECISIONS = 150;
+
+export function clampBreakoutEvery(value: number): number {
+  if (!Number.isFinite(value)) return BREAKOUT_EVERY_DEFAULT;
+  return Math.min(BREAKOUT_EVERY_MAX, Math.max(BREAKOUT_EVERY_MIN, Math.floor(value)));
+}
+
+export type BreakoutBrick = {
+  /** 左上角。 */
+  x: number;
+  y: number;
+  row: number;
+  col: number;
+  /** 打掉给多少分（上面的行更值钱）。 */
+  points: number;
+  alive: boolean;
+};
+
+export type BreakoutBall = { x: number; y: number; vx: number; vy: number };
+
+export type BreakoutState = {
+  frame: number;
+  decisions: number;
+  decideEvery: number;
+  ball: BreakoutBall;
+  /** 板子**左边缘**。 */
+  paddleX: number;
+  bricks: BreakoutBrick[];
+  score: number;
+  lives: number;
+  /** 接到球的次数 / 漏掉的次数。 */
+  hits: number;
+  misses: number;
+  /** 全部砖块打光。 */
+  cleared: boolean;
+  over: boolean;
+};
+
+function buildBricks(): BreakoutBrick[] {
+  const bricks: BreakoutBrick[] = [];
+  for (let row = 0; row < BREAKOUT_ROWS; row++) {
+    for (let col = 0; col < BREAKOUT_COLS; col++) {
+      bricks.push({
+        x: BRICK_X0 + col * (BRICK_W + BRICK_GAP_X),
+        y: BRICK_Y0 + row * (BRICK_H + BRICK_GAP_Y),
+        row,
+        col,
+        points: (BREAKOUT_ROWS - row) * 10,
+        alive: true,
+      });
+    }
+  }
+  return bricks;
+}
+
+/**
+ * 发球（纯函数、不随机）。
+ *
+ * 开球方向只由剩余命数决定：同一档设置跑出来永远是同一局 —— 不然"换个模型再跑
+ * 一次"比的是两局不同的球路，成绩没法对照。
+ */
+function serve(lives: number): BreakoutBall {
+  return { x: BREAKOUT_W / 2, y: 150, vx: lives % 2 === 1 ? 1.5 : -1.5, vy: -2.2 };
+}
+
+export function newBreakout(options?: { decideEvery?: number }): BreakoutState {
+  const decideEvery = clampBreakoutEvery(options?.decideEvery ?? BREAKOUT_EVERY_DEFAULT);
+  return {
+    frame: 0,
+    decisions: 0,
+    decideEvery,
+    ball: serve(BREAKOUT_LIVES),
+    paddleX: BREAKOUT_W / 2 - BREAKOUT_PADDLE_W / 2,
+    bricks: buildBricks(),
+    score: 0,
+    lives: BREAKOUT_LIVES,
+    hits: 0,
+    misses: 0,
+    cleared: false,
+    over: false,
+  };
+}
+
+export function paddleCenter(state: BreakoutState): number {
+  return state.paddleX + BREAKOUT_PADDLE_W / 2;
+}
+
+export function bricksLeft(state: BreakoutState): number {
+  return state.bricks.reduce((sum, brick) => sum + (brick.alive ? 1 : 0), 0);
+}
+
+/**
+ * 落点预测：把球一路推到板子那一行，左右墙与天花板照常反射。
+ *
+ * 只算球自己的轨迹，不管板子和砖块 —— 中途打到砖会改方向，所以这是个"如果一路
+ * 无阻挡"的估计。够用了：模型要的是"往左还是往右"，不是精确到像素。
+ */
+export function predictLanding(ball: BreakoutBall): { x: number; frames: number } {
+  let { x, y, vx, vy } = ball;
+  const target = BREAKOUT_PADDLE_Y - BREAKOUT_BALL_R;
+  let frames = 0;
+  // 上限保护：贴着水平飞的球理论上要很久才落下来，别让纯函数转到天荒地老。
+  while (frames < 600 && !(y >= target && vy > 0)) {
+    x += vx;
+    y += vy;
+    if (x < BREAKOUT_BALL_R) {
+      x = BREAKOUT_BALL_R;
+      vx = -vx;
+    }
+    if (x > BREAKOUT_W - BREAKOUT_BALL_R) {
+      x = BREAKOUT_W - BREAKOUT_BALL_R;
+      vx = -vx;
+    }
+    if (y < BREAKOUT_TOP + BREAKOUT_BALL_R) {
+      y = BREAKOUT_TOP + BREAKOUT_BALL_R;
+      vy = -vy;
+    }
+    frames++;
+  }
+  return { x: Math.round(x * 10) / 10, frames };
+}
+
+/** 推进一帧（纯函数）。返回新局面；`lost` 表示这一帧漏了球。 */
+function stepFrame(state: BreakoutState, action: BreakoutAction): BreakoutState {
+  let paddleX = state.paddleX;
+  if (action === "left") paddleX -= BREAKOUT_PADDLE_SPEED;
+  if (action === "right") paddleX += BREAKOUT_PADDLE_SPEED;
+  paddleX = Math.min(BREAKOUT_W - BREAKOUT_PADDLE_W - 2, Math.max(2, paddleX));
+
+  let { x, y, vx, vy } = state.ball;
+  x += vx;
+  y += vy;
+  if (x < BREAKOUT_BALL_R) {
+    x = BREAKOUT_BALL_R;
+    vx = -vx;
+  }
+  if (x > BREAKOUT_W - BREAKOUT_BALL_R) {
+    x = BREAKOUT_W - BREAKOUT_BALL_R;
+    vx = -vx;
+  }
+  if (y < BREAKOUT_TOP + BREAKOUT_BALL_R) {
+    y = BREAKOUT_TOP + BREAKOUT_BALL_R;
+    vy = -vy;
+  }
+
+  // 砖块：一帧最多打掉一块（同时压到两块的边角时取先找到的那块 —— 一帧打两块
+  // 会让分数跳得莫名其妙，而且两次反弹会互相抵消）。
+  let bricks = state.bricks;
+  let score = state.score;
+  const hitIndex = bricks.findIndex(
+    (brick) =>
+      brick.alive &&
+      x > brick.x - BREAKOUT_BALL_R &&
+      x < brick.x + BRICK_W + BREAKOUT_BALL_R &&
+      y > brick.y - BREAKOUT_BALL_R &&
+      y < brick.y + BRICK_H + BREAKOUT_BALL_R,
+  );
+  if (hitIndex >= 0) {
+    const brick = bricks[hitIndex] as BreakoutBrick;
+    bricks = bricks.map((item, index) => (index === hitIndex ? { ...item, alive: false } : item));
+    score += brick.points;
+    vy = -vy;
+  }
+
+  // 板子：从上往下撞到板面才算接住（vy > 0），接球点越靠边、回球角度越斜。
+  let hits = state.hits;
+  if (vy > 0 && y + BREAKOUT_BALL_R >= BREAKOUT_PADDLE_Y && y - BREAKOUT_BALL_R <= BREAKOUT_PADDLE_Y + BREAKOUT_PADDLE_H) {
+    if (x >= paddleX - BREAKOUT_BALL_R && x <= paddleX + BREAKOUT_PADDLE_W + BREAKOUT_BALL_R) {
+      vy = -Math.abs(vy);
+      y = BREAKOUT_PADDLE_Y - BREAKOUT_BALL_R;
+      const offset = (x - (paddleX + BREAKOUT_PADDLE_W / 2)) / (BREAKOUT_PADDLE_W / 2);
+      vx = Math.max(-2.6, Math.min(2.6, vx + offset * 0.9));
+      hits += 1;
+    }
+  }
+
+  let lives = state.lives;
+  let misses = state.misses;
+  let ball: BreakoutBall = { x, y, vx, vy };
+  if (y - BREAKOUT_BALL_R > BREAKOUT_H) {
+    misses += 1;
+    lives -= 1;
+    ball = lives > 0 ? serve(lives) : ball;
+  }
+
+  const cleared = bricks.every((brick) => !brick.alive);
+  return {
+    ...state,
+    frame: state.frame + 1,
+    ball,
+    paddleX,
+    bricks,
+    score,
+    lives,
+    hits,
+    misses,
+    cleared,
+    over: cleared || lives <= 0,
+  };
+}
+
+/** 局面 → JEV 的 `state`（英文对象）。 */
+export function breakoutState(state: BreakoutState): Record<string, unknown> {
+  const landing = predictLanding(state.ball);
+  const center = paddleCenter(state);
+  const offset = Math.round((landing.x - center) * 10) / 10;
+  return {
+    task: "Breakout paddle control",
+    description:
+      "A ball bounces inside a box. A paddle at the bottom must be under the ball when it comes down, " +
+      "or a life is lost. The paddle only moves left or right. This decision is held for the next " +
+      `${state.decideEvery} frames, and the paddle moves ${BREAKOUT_PADDLE_SPEED} units per frame while it is held.`,
+    field: { width: BREAKOUT_W, height: BREAKOUT_H, paddle_row: BREAKOUT_PADDLE_Y },
+    ball: { x: Math.round(state.ball.x * 10) / 10, y: Math.round(state.ball.y * 10) / 10 },
+    ball_velocity: { x: Math.round(state.ball.vx * 100) / 100, y: Math.round(state.ball.vy * 100) / 100 },
+    ball_going_down: state.ball.vy > 0,
+    paddle: {
+      left: Math.round(state.paddleX * 10) / 10,
+      center: Math.round(center * 10) / 10,
+      right: Math.round((state.paddleX + BREAKOUT_PADDLE_W) * 10) / 10,
+      width: BREAKOUT_PADDLE_W,
+    },
+    // 落点是替它算好的（见 predictLanding 的注释）。
+    predicted_landing_x: landing.x,
+    frames_until_landing: landing.frames,
+    // 正数 = 球会落在板子右边，负数 = 落在左边。这是这道题真正的信号。
+    landing_minus_paddle_center: offset,
+    // 同一件事再给一个分类说法：数值比较靠的是"符号"，写成词能让 criteria 对得更实。
+    landing_side: offset > BREAKOUT_PADDLE_W / 2 ? "right" : offset < -BREAKOUT_PADDLE_W / 2 ? "left" : "centred",
+    // 已经贴着墙了：再往那边选就是空转一整段（模型看不见这件事就会一直顶着墙）。
+    paddle_at_left_edge: state.paddleX <= 2.001,
+    paddle_at_right_edge: state.paddleX >= BREAKOUT_W - BREAKOUT_PADDLE_W - 2.001,
+    // 板子这一段最多能挪多远 —— 差得比这还多，就是"追不上了"。
+    paddle_reach_per_decision: Math.round(BREAKOUT_PADDLE_SPEED * state.decideEvery * 10) / 10,
+    bricks_left: bricksLeft(state),
+    score: state.score,
+    lives: state.lives,
+    decisions_made: state.decisions,
+    decisions_max: BREAKOUT_MAX_DECISIONS,
+  };
+}
+
+export function breakoutQuestions(state: BreakoutState): SystemOneQuestions {
+  return { paddle_move: breakoutChoiceQuestion(state) };
+}
+
+/**
+ * 三个选项的说明必须**各自描述一个能对上 state 的具体情形**，不能只是"往左挪 /
+ * 往右挪"。
+ *
+ * 最初那版写的是 `Move the paddle left, up to 16 units...` 与 `Move the paddle
+ * right, up to 16 units...` —— 两句话除了方向词一模一样。JEV 是给每个选项的说明
+ * 打分的 encoder：说明之间没有区分度，它就只能按别的东西打破平局，于是**一整局
+ * 都选同一个方向，板子顶死在墙上再也不回来**（实测就是这个样子）。
+ *
+ * 现在每条说明都点名 `landing_minus_paddle_center` 的符号，外加"已经贴着墙了"这件
+ * 事 —— 和网格场景把每个方向"会走到哪、撞不撞墙"写进 criteria 是同一招。
+ */
+export function breakoutChoiceQuestion(state: BreakoutState): SystemOneChoiceQuestion {
+  const reach = Math.round(BREAKOUT_PADDLE_SPEED * state.decideEvery * 10) / 10;
+  const half = BREAKOUT_PADDLE_W / 2;
+  return {
+    type: "choice",
+    instructions:
+      "Which way should the paddle move for the next few frames? Put the paddle centre where the ball " +
+      "will come down. The field is " +
+      `${BREAKOUT_W} units wide and the paddle can travel at most ${reach} units before the next decision.`,
+    criteria: {
+      left:
+        "The ball comes down to the LEFT of the paddle: landing_minus_paddle_center is negative, so the " +
+        "paddle centre is to the right of the landing point and has to come back left. Only useful while " +
+        "paddle_at_left_edge is false — at the edge the paddle cannot go any further.",
+      stay:
+        `The paddle is already under the landing point: landing_minus_paddle_center is within about ${half} ` +
+        "units of zero, so moving either way would take the paddle off the landing point.",
+      right:
+        "The ball comes down to the RIGHT of the paddle: landing_minus_paddle_center is positive, so the " +
+        "paddle centre is to the left of the landing point and has to move right. Only useful while " +
+        "paddle_at_right_edge is false — at the edge the paddle cannot go any further.",
+    },
+  };
+}
+
+/**
+ * 一帧的快照 —— 球**和板子**都要记。
+ *
+ * 一开始这里只记了球的位置，结果界面上板子只能画在"这一段跑完之后"的位置上：
+ * 每隔半秒（一次判定的往返）瞬移十几像素，看着就是"板子根本没动"。动画要连续，
+ * 就得有每一帧的板子在哪。
+ */
+export type BreakoutFrame = {
+  x: number;
+  y: number;
+  paddleX: number;
+  /** 这一帧是"漏球之后重新发球"：位置是跳过去的，中间那段不存在，别连线也别插值。 */
+  served: boolean;
+};
+
+export type BreakoutMove = {
+  next: BreakoutState;
+  action: BreakoutAction;
+  /** 这一段里的每一帧（含起始那一帧），界面拿它逐帧播出来。 */
+  frames: BreakoutFrame[];
+  /** 这一段打掉几块砖、接到 / 漏掉几次。 */
+  broken: number;
+  caught: number;
+  lost: number;
+};
+
+/**
+ * 一次判定 = 推进 `decideEvery` 帧，整段都用同一个动作。
+ *
+ * 中途结束（漏完命 / 清屏）就提前收手，剩下的帧不跑 —— 多跑的那几帧既不该计分，
+ * 画出来也是一段"已经结束之后还在动"的轨迹。
+ */
+export function applyBreakoutAction(state: BreakoutState, action: BreakoutAction): BreakoutMove {
+  let current = state;
+  const frames: BreakoutFrame[] = [
+    { x: state.ball.x, y: state.ball.y, paddleX: state.paddleX, served: false },
+  ];
+  const before = { hits: state.hits, misses: state.misses };
+  for (let i = 0; i < state.decideEvery; i++) {
+    if (current.over) break;
+    const previous = current;
+    current = stepFrame(current, action);
+    frames.push({
+      x: current.ball.x,
+      y: current.ball.y,
+      paddleX: current.paddleX,
+      // 漏球那一帧：球被挪回发球点，位置是断开的。
+      served: current.misses !== previous.misses && current.lives > 0,
+    });
+  }
+  const decisions = state.decisions + 1;
+  const next: BreakoutState = {
+    ...current,
+    decisions,
+    over: current.over || decisions >= BREAKOUT_MAX_DECISIONS,
+  };
+  return {
+    next,
+    action,
+    frames,
+    // 打掉几块要数砖，不能拿分数差去除以 10 —— 每行分值不同（上面那行一块就 50 分）。
+    broken: bricksLeft(state) - bricksLeft(next),
+    caught: next.hits - before.hits,
+    lost: next.misses - before.misses,
+  };
+}
+
+export type BreakoutStats = {
+  score: number;
+  /** 打掉的砖 / 总砖数。 */
+  broken: number;
+  total: number;
+  lives: number;
+  decisions: number;
+  hits: number;
+  misses: number;
+};
+
+export function breakoutStats(state: BreakoutState): BreakoutStats {
+  const total = BREAKOUT_ROWS * BREAKOUT_COLS;
+  return {
+    score: state.score,
+    broken: total - bricksLeft(state),
+    total,
+    lives: state.lives,
+    decisions: state.decisions,
+    hits: state.hits,
+    misses: state.misses,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // 统一导出
 // ---------------------------------------------------------------------------
 
@@ -858,5 +1292,10 @@ export const PLAYGROUND_SCENARIOS: readonly PlaygroundScenario[] = [
     id: "market-replay",
     nameKey: "jev.playground.marketReplay.name",
     descKey: "jev.playground.marketReplay.desc",
+  },
+  {
+    id: "breakout",
+    nameKey: "jev.playground.breakout.name",
+    descKey: "jev.playground.breakout.desc",
   },
 ];

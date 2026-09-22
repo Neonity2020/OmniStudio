@@ -49,6 +49,7 @@ export const STEP_PAUSE_MS = 260;
 import { RunLog, type RunLogEntry } from "./run-log";
 import { TriageView, type TriageRow } from "./triage-view";
 import { MarketView, type MarketMark } from "./market-view";
+import { BreakoutView } from "./breakout-view";
 import {
   applyMarketDecision,
   marketReplayQuestions,
@@ -57,6 +58,16 @@ import {
   newMarketReplay,
   type MarketAction,
   type MarketReplayState,
+  applyBreakoutAction,
+  breakoutQuestions,
+  breakoutState,
+  newBreakout,
+  BREAKOUT_EVERY_MAX,
+  BREAKOUT_EVERY_MIN,
+  BREAKOUT_MAX_DECISIONS,
+  type BreakoutAction,
+  type BreakoutFrame,
+  type BreakoutState,
 } from "./scenarios";
 import {
   clampMarketWindow,
@@ -116,6 +127,8 @@ export function JevPlayground() {
   const setMarketSymbol = useJevStore((s) => s.setMarketSymbol);
   const setMarketRange = useJevStore((s) => s.setMarketRange);
   const setMarketStrategy = useJevStore((s) => s.setMarketStrategy);
+  const breakoutEvery = useJevStore((s) => s.breakoutEvery);
+  const setBreakoutEvery = useJevStore((s) => s.setBreakoutEvery);
 
   // 后端状态（与判定台同一查询：跑之前先看一眼"能不能跑"）。
   const status = useQuery({
@@ -132,6 +145,9 @@ export function JevPlayground() {
   );
   /** 图上每根的判定标记（按下标）。 */
   const [marks, setMarks] = useState<MarketMark[]>([]);
+  const [breakout, setBreakout] = useState<BreakoutState>(() => newBreakout({ decideEvery: breakoutEvery }));
+  /** 最近一次判定里的每一帧（球 + 板子）；界面拿它把这一段播出来。 */
+  const [ballFrames, setBallFrames] = useState<BreakoutFrame[]>([]);
   const [log, setLog] = useState<RunLogEntry[]>([]);
   /**
    * 最近一步的落点，棋盘拿它做动画：走通了是滑过去，撞墙 / 撞边界是"顶一下"再弹回。
@@ -167,6 +183,7 @@ export function JevPlayground() {
   const gridRef = useRef(gridState);
   const rowsRef = useRef(triageRows);
   const marketRef = useRef(marketState);
+  const breakoutRef = useRef(breakout);
   const putGrid = (next: GridRunnerState) => {
     gridRef.current = next;
     setGridState(next);
@@ -174,6 +191,10 @@ export function JevPlayground() {
   const putMarket = (next: MarketReplayState) => {
     marketRef.current = next;
     setMarketState(next);
+  };
+  const putBreakout = (next: BreakoutState) => {
+    breakoutRef.current = next;
+    setBreakout(next);
   };
   const putRows = (next: TriageRow[]) => {
     rowsRef.current = next;
@@ -189,13 +210,15 @@ export function JevPlayground() {
     putRows(TICKETS.map((ticket) => ({ ticket })));
     putMarket(newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }));
     setMarks([]);
+    putBreakout(newBreakout({ decideEvery: breakoutEvery }));
+    setBallFrames([]);
     setLastMove(null);
     setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
     setRunning(false);
     setError(null);
     setDone(false);
-  }, [scenarioId, gridSize, gridWalls, marketSymbol, marketFrom, marketTo, marketStrategy]);
+  }, [scenarioId, gridSize, gridWalls, marketSymbol, marketFrom, marketTo, marketStrategy, breakoutEvery]);
 
   // 卸载时中止正在跑的循环。
   useEffect(
@@ -273,7 +296,9 @@ export function JevPlayground() {
         { index: market.index, action, confidence: choice?.confidence ?? 0, risk: outcome.score?.score ?? null },
       ]);
       setLog((prev) => {
-        const step = prev.length + 1;
+        // 步号 = 第几根日线，不是日志条数：一根产生两条（action + risk），
+        // 拿 `prev.length + 1` 会数成 1、1、3、3、5……
+        const step = market.index + 1;
         const entries: RunLogEntry[] = [
           ...prev,
           {
@@ -289,7 +314,9 @@ export function JevPlayground() {
           entries.push({
             step,
             question: "risk",
-            choice: String(outcome.score.score),
+            // `score` 是**期望值**，允许落在两档之间（判定台也是 toFixed(2)）——
+            // 直接 String() 会把 1.4975924667851 整串塞进日志那一行。
+            choice: outcome.score.score.toFixed(2),
             confidence: outcome.score.confidence,
             probabilities: outcome.score.probabilities,
             ms: outcome.ms,
@@ -298,6 +325,35 @@ export function JevPlayground() {
         return entries;
       });
       return decision.next.over ? "finished" : "continue";
+    }
+
+    if (scenario.id === "breakout") {
+      const game = breakoutRef.current;
+      if (game.over) return "finished";
+      const outcome = await runOnce(breakoutState(game), breakoutQuestions(game), ["paddle_move"]);
+      if (!outcome.ok) {
+        setError({ status: outcome.status, message: outcome.message });
+        return "error";
+      }
+      if (cancelRef.current) return "cancelled";
+      const choice = outcome.choice;
+      // 答不上来就按 stay 处理：板子不动是三个动作里唯一"不主动制造新错误"的那个。
+      const action = (choice?.choice ?? "stay") as BreakoutAction;
+      const move = applyBreakoutAction(game, action);
+      putBreakout(move.next);
+      setBallFrames(move.frames);
+      setLog((prev) => [
+        ...prev,
+        {
+          step: game.decisions + 1,
+          question: "paddle_move",
+          choice: choice?.choice ?? "—",
+          confidence: choice?.confidence,
+          probabilities: choice?.probabilities ?? {},
+          ms: outcome.ms,
+        },
+      ]);
+      return move.next.over ? "finished" : "continue";
     }
 
     // ticket-triage：一条工单两个问题（一次调用带回来）。
@@ -336,7 +392,8 @@ export function JevPlayground() {
       ),
     );
     setLog((prev) => {
-      const step = prev.length + 1;
+      // 同上：一条工单两个问题，步号要按"第几条工单"数。
+      const step = nextIndex + 1;
       return [
         ...prev,
         {
@@ -402,6 +459,8 @@ export function JevPlayground() {
     putRows(TICKETS.map((ticket) => ({ ticket })));
     putMarket(newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }));
     setMarks([]);
+    putBreakout(newBreakout({ decideEvery: breakoutEvery }));
+    setBallFrames([]);
     setLastMove(null);
     setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
@@ -432,9 +491,17 @@ export function JevPlayground() {
       ? gridState.steps + 1
       : scenario.id === "market-replay"
         ? marketState.index + 1
-        : answered + 1;
+        : scenario.id === "breakout"
+          ? breakout.decisions + 1
+          : answered + 1;
   const totalSteps =
-    scenario.id === "grid-runner" ? gridState.maxSteps : scenario.id === "market-replay" ? marketTotal : TICKETS.length;
+    scenario.id === "grid-runner"
+      ? gridState.maxSteps
+      : scenario.id === "market-replay"
+        ? marketTotal
+        : scenario.id === "breakout"
+          ? BREAKOUT_MAX_DECISIONS
+          : TICKETS.length;
   // 用户选的区间里到底有多少根、是不是被上限截过 —— 下面的提示要如实说清楚。
   const marketWindow = clampMarketWindow(marketSymbol, marketFrom, marketTo);
   const marketSpanDates = marketSpan(marketSymbol);
@@ -544,24 +611,34 @@ export function JevPlayground() {
                 {t("jev.playground.market.from")}
                 <Input
                   type="date"
-                  className="mt-1 h-7 text-xs"
+                  className="mt-1 h-7 text-xs read-only:text-muted-foreground"
                   value={marketFrom}
                   min={marketSpanDates.first}
                   max={marketSpanDates.last}
-                  disabled={running}
-                  onChange={(event) => setMarketRange({ from: event.target.value })}
+                  // 跑的过程中用 readOnly 而不是 disabled：WebKit 把 disabled 的
+                  // date 输入框整个画空（日期直接看不见了），readOnly 照常显示值。
+                  readOnly={running}
+                  aria-disabled={running}
+                  onChange={(event) => {
+                    if (running) return;
+                    setMarketRange({ from: event.target.value });
+                  }}
                 />
               </label>
               <label className="flex-1 text-[11px] text-muted-foreground">
                 {t("jev.playground.market.to")}
                 <Input
                   type="date"
-                  className="mt-1 h-7 text-xs"
+                  className="mt-1 h-7 text-xs read-only:text-muted-foreground"
                   value={marketTo}
                   min={marketSpanDates.first}
                   max={marketSpanDates.last}
-                  disabled={running}
-                  onChange={(event) => setMarketRange({ to: event.target.value })}
+                  readOnly={running}
+                  aria-disabled={running}
+                  onChange={(event) => {
+                    if (running) return;
+                    setMarketRange({ to: event.target.value });
+                  }}
                 />
               </label>
             </div>
@@ -596,6 +673,28 @@ export function JevPlayground() {
           </div>
         ) : null}
 
+        {/* 打砖块设置：只有一个旋钮 —— 判定间隔。跑的过程中锁住。 */}
+        {scenario.id === "breakout" ? (
+          <div className="flex flex-col gap-2">
+            <span className="text-[11px] font-medium">{t("jev.playground.breakout.settings")}</span>
+            <StepperRow
+              label={t("jev.playground.breakout.every")}
+              value={t("jev.playground.breakout.everyValue", { n: String(breakoutEvery) })}
+              disabled={running}
+              canDecrease={breakoutEvery > BREAKOUT_EVERY_MIN}
+              canIncrease={breakoutEvery < BREAKOUT_EVERY_MAX}
+              onDecrease={() => setBreakoutEvery(breakoutEvery - 1)}
+              onIncrease={() => setBreakoutEvery(breakoutEvery + 1)}
+            />
+            <p className="text-[10px] leading-4 text-muted-foreground">
+              {t("jev.playground.breakout.settingsHint", {
+                reach: (breakoutEvery * 3.2).toFixed(1),
+                max: String(BREAKOUT_MAX_DECISIONS),
+              })}
+            </p>
+          </div>
+        ) : null}
+
         {error ? (
           <div className="jev-note error">
             <strong>{t("jev.failed", { status: String(error.status) })}</strong>
@@ -619,6 +718,13 @@ export function JevPlayground() {
             <span className="jev-pill">
               {t("jev.playground.market.progress", { done: String(marketState.index), total: String(marketTotal) })}
             </span>
+          ) : scenario.id === "breakout" ? (
+            <span className="jev-pill">
+              {t("jev.playground.breakout.progress", {
+                score: String(breakout.score),
+                lives: String(breakout.lives),
+              })}
+            </span>
           ) : (
             <span className="jev-pill">
               {t("jev.playground.triage.progress", { done: String(answered), total: String(TICKETS.length) })}
@@ -638,6 +744,8 @@ export function JevPlayground() {
             <div className="h-full overflow-y-auto">
               <MarketView state={marketState} marks={marks} />
             </div>
+          ) : scenario.id === "breakout" ? (
+            <BreakoutView state={breakout} frames={ballFrames} />
           ) : (
             <div className="h-full overflow-y-auto">
               <TriageView rows={triageRows} />

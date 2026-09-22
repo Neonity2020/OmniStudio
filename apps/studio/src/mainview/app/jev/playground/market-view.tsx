@@ -138,19 +138,24 @@ export function MarketView({ state, marks }: { state: MarketReplayState; marks: 
       </svg>
 
       {/* 成绩：策略 vs 买入持有。只报策略收益没意义 —— 普涨行情里满仓也赚。 */}
-      <div className="grid flex-none grid-cols-4 gap-2">
-        <Metric label={t("jev.playground.market.position")} value={t(`jev.playground.market.position.${state.position}`)} />
-        <Metric
-          label={t("jev.playground.market.return")}
-          value={percent(stats.returnPct)}
-          tone={stats.returnPct >= 0 ? "up" : "down"}
-        />
-        <Metric
-          label={t("jev.playground.market.benchmark")}
-          value={percent(stats.benchmarkPct)}
-          tone={stats.benchmarkPct >= 0 ? "up" : "down"}
-        />
-        <Metric label={t("jev.playground.market.trades")} value={String(stats.trades)} />
+      {/* 窄栏里四格会挤成一团（900px 窗口下右栏只剩两百来像素）：按**这一栏自己的
+          宽度**折成两行，而不是按窗口宽度 —— 左栏是固定的 380px，窗口断点说明不了
+          右栏还剩多少。 */}
+      <div className="@container flex-none">
+        <div className="grid grid-cols-2 gap-2 @[420px]:grid-cols-4">
+          <Metric label={t("jev.playground.market.position")} value={t(`jev.playground.market.position.${state.position}`)} />
+          <Metric
+            label={t("jev.playground.market.return")}
+            value={percent(stats.returnPct)}
+            tone={stats.returnPct >= 0 ? "up" : "down"}
+          />
+          <Metric
+            label={t("jev.playground.market.benchmark")}
+            value={percent(stats.benchmarkPct)}
+            tone={stats.benchmarkPct >= 0 ? "up" : "down"}
+          />
+          <Metric label={t("jev.playground.market.trades")} value={String(stats.trades)} />
+        </div>
       </div>
 
       <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">

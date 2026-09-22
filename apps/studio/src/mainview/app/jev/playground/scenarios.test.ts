@@ -45,6 +45,29 @@ import {
   MARKET_ACTIONS,
   MARKET_FEE,
   MARKET_RISK_LEVELS,
+  applyBreakoutAction,
+  breakoutQuestions,
+  breakoutState,
+  breakoutStats,
+  bricksLeft,
+  clampBreakoutEvery,
+  newBreakout,
+  paddleCenter,
+  predictLanding,
+  BREAKOUT_ACTIONS,
+  BREAKOUT_BALL_R,
+  BREAKOUT_COLS,
+  BREAKOUT_EVERY_MAX,
+  BREAKOUT_EVERY_MIN,
+  BREAKOUT_H,
+  BREAKOUT_LIVES,
+  BREAKOUT_MAX_DECISIONS,
+  BREAKOUT_PADDLE_W,
+  BREAKOUT_ROWS,
+  BREAKOUT_W,
+  type BreakoutAction,
+  type BreakoutFrame,
+  type BreakoutState,
 } from "./scenarios";
 import {
   clampMarketWindow,
@@ -312,9 +335,14 @@ describe("ticket-triage：统计（triageStats）", () => {
 // ---------------------------------------------------------------------------
 
 describe("PLAYGROUND_SCENARIOS", () => {
-  test("三个场景的 id 与 i18n key 都齐", () => {
-    expect(PLAYGROUND_SCENARIOS).toHaveLength(3);
-    expect(PLAYGROUND_SCENARIOS.map((s) => s.id)).toEqual(["grid-runner", "ticket-triage", "market-replay"]);
+  test("四个场景的 id 与 i18n key 都齐", () => {
+    expect(PLAYGROUND_SCENARIOS).toHaveLength(4);
+    expect(PLAYGROUND_SCENARIOS.map((s) => s.id)).toEqual([
+      "grid-runner",
+      "ticket-triage",
+      "market-replay",
+      "breakout",
+    ]);
     for (const scenario of PLAYGROUND_SCENARIOS) {
       expect(scenario.nameKey).toBeTypeOf("string");
       expect(scenario.descKey).toBeTypeOf("string");
@@ -614,5 +642,234 @@ describe("market-replay：发给模型的请求", () => {
     const ma20 = Math.round(closes.reduce((sum, value) => sum + value, 0) / 20);
     expect(ind.ma20).toBe(ma20);
     expect(ind.volumeVs20d).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 场景 D：breakout（打砖块）
+// ---------------------------------------------------------------------------
+
+/** 连跑若干次判定，动作由回调给出（模拟模型）。 */
+function playBreakout(
+  state: BreakoutState,
+  pick: (s: BreakoutState) => BreakoutAction,
+  rounds: number,
+): BreakoutState {
+  let current = state;
+  for (let i = 0; i < rounds && !current.over; i++) current = applyBreakoutAction(current, pick(current)).next;
+  return current;
+}
+
+describe("breakout：开局与设置", () => {
+  test("开局：3 命、40 块砖、板子居中、未结束", () => {
+    const start = newBreakout();
+    expect(start.lives).toBe(BREAKOUT_LIVES);
+    expect(start.bricks).toHaveLength(BREAKOUT_ROWS * BREAKOUT_COLS);
+    expect(bricksLeft(start)).toBe(BREAKOUT_ROWS * BREAKOUT_COLS);
+    expect(paddleCenter(start)).toBeCloseTo(BREAKOUT_W / 2, 6);
+    expect(start.score).toBe(0);
+    expect(start.over).toBe(false);
+  });
+
+  test("判定间隔夹在范围里", () => {
+    expect(clampBreakoutEvery(0)).toBe(BREAKOUT_EVERY_MIN);
+    expect(clampBreakoutEvery(99)).toBe(BREAKOUT_EVERY_MAX);
+    expect(clampBreakoutEvery(Number.NaN)).toBe(5);
+    expect(newBreakout({ decideEvery: 99 }).decideEvery).toBe(BREAKOUT_EVERY_MAX);
+    // 1 帧一判不在可选范围里（下限是 2）：越界一律贴边，不是原样放行。
+    expect(newBreakout({ decideEvery: 1 }).decideEvery).toBe(BREAKOUT_EVERY_MIN);
+  });
+
+  test("同样的动作序列跑两次，结果一模一样（没有随机数）", () => {
+    const pick = (s: BreakoutState): BreakoutAction =>
+      predictLanding(s.ball).x > paddleCenter(s) ? "right" : "left";
+    const a = playBreakout(newBreakout(), pick, 40);
+    const b = playBreakout(newBreakout(), pick, 40);
+    expect(a.score).toBe(b.score);
+    expect(a.lives).toBe(b.lives);
+    expect(a.ball).toEqual(b.ball);
+    expect(a.paddleX).toBe(b.paddleX);
+  });
+});
+
+describe("breakout：一次判定 = 一段帧", () => {
+  test("推进的帧数就是判定间隔，每帧都记下球与板子", () => {
+    const start = newBreakout({ decideEvery: 4 });
+    const move = applyBreakoutAction(start, "right");
+    expect(move.next.frame).toBe(4);
+    expect(move.next.decisions).toBe(1);
+    // 帧表含起始那一帧，所以是 帧数 + 1 条。
+    expect(move.frames).toHaveLength(5);
+    // 板子的位置必须**逐帧**记下来 —— 只记球的话，界面上板子只能画在这一段的
+    // 终点位置，每隔一次判定瞬移一次，看着就是"板子没动"。
+    const paddles = move.frames.map((frame) => frame.paddleX);
+    expect(paddles[0]).toBe(start.paddleX);
+    expect(paddles[4]).toBe(move.next.paddleX);
+    for (let i = 1; i < paddles.length; i++) {
+      expect((paddles[i] as number) - (paddles[i - 1] as number)).toBeCloseTo(3.2, 6);
+    }
+    // 没漏球的一段里不该有"发球"标记（有的话界面会把轨迹切断）。
+    expect(move.frames.some((frame) => frame.served)).toBe(false);
+  });
+
+  test("漏球之后那一帧打上 served：位置是跳过去的，界面据此断开轨迹", () => {
+    // 板子躲到最左边，球放在右下角直奔底线。
+    let state: BreakoutState = {
+      ...newBreakout({ decideEvery: 6 }),
+      paddleX: 2,
+      ball: { x: 260, y: 180, vx: 1.2, vy: 2.6 },
+    };
+    let served: BreakoutFrame | undefined;
+    for (let i = 0; i < 10 && !served; i++) {
+      const move = applyBreakoutAction(state, "stay");
+      served = move.frames.find((frame) => frame.served);
+      state = move.next;
+    }
+    expect(served).toBeDefined();
+    // 打上标记的那一帧就是重新发的球：已经回到场地中段，离底线远得很。
+    expect((served as BreakoutFrame).y).toBeLessThan(BREAKOUT_H - 40);
+    expect(state.misses).toBeGreaterThan(0);
+    expect(state.lives).toBeLessThan(BREAKOUT_LIVES);
+  });
+
+  test("left / right 整段都在挪板子，stay 一动不动", () => {
+    const start = newBreakout({ decideEvery: 5 });
+    const left = applyBreakoutAction(start, "left").next;
+    const right = applyBreakoutAction(start, "right").next;
+    const stay = applyBreakoutAction(start, "stay").next;
+    expect(left.paddleX).toBeCloseTo(start.paddleX - 5 * 3.2, 6);
+    expect(right.paddleX).toBeCloseTo(start.paddleX + 5 * 3.2, 6);
+    expect(stay.paddleX).toBe(start.paddleX);
+  });
+
+  test("板子撞到边就停住，不会跑出场地", () => {
+    const far = playBreakout(newBreakout(), () => "left", 30);
+    expect(far.paddleX).toBeGreaterThanOrEqual(2);
+    const other = playBreakout(newBreakout(), () => "right", 30);
+    expect(other.paddleX + BREAKOUT_PADDLE_W).toBeLessThanOrEqual(BREAKOUT_W - 2);
+  });
+
+  test("球始终在场地左右边界之内（反射不会漏算）", () => {
+    let state = newBreakout({ decideEvery: 3 });
+    for (let i = 0; i < 60 && !state.over; i++) {
+      const move = applyBreakoutAction(state, i % 2 === 0 ? "left" : "right");
+      for (const { x } of move.frames) {
+        expect(x).toBeGreaterThanOrEqual(BREAKOUT_BALL_R - 0.001);
+        expect(x).toBeLessThanOrEqual(BREAKOUT_W - BREAKOUT_BALL_R + 0.001);
+      }
+      state = move.next;
+    }
+  });
+});
+
+describe("breakout：计分、命数与收场", () => {
+  test("打到砖：砖少了、分数涨、球反弹回来", () => {
+    // 让球从砖阵**下方**直上飞过去，跑到打中为止 —— 球必须从外面撞上来，起点塞在
+    // 砖堆里的话它会在砖缝里连撞好几下，测的就不是"撞一次砖会怎样"了。
+    let state: BreakoutState = { ...newBreakout({ decideEvery: 2 }), ball: { x: 40, y: 110, vx: 0, vy: -2.2 } };
+    let before = bricksLeft(state);
+    let broke = 0;
+    for (let i = 0; i < 20 && broke === 0; i++) {
+      before = bricksLeft(state);
+      const move = applyBreakoutAction(state, "stay");
+      broke = move.broken;
+      state = move.next;
+    }
+    expect(broke).toBeGreaterThan(0);
+    // `broken` 报的必须就是真少掉的块数（别再拿分数差去除以 10 —— 每行分值不同）。
+    expect(bricksLeft(state)).toBe(before - broke);
+    expect(state.score).toBeGreaterThan(0);
+    // 打中之后球改朝下（撞的是砖的底面）。
+    expect(state.ball.vy).toBeGreaterThan(0);
+  });
+
+  test("漏球扣一条命，三条用完就结束", () => {
+    // 板子一直往左躲，球必然漏掉。
+    const state = playBreakout(newBreakout({ decideEvery: 6 }), () => "left", BREAKOUT_MAX_DECISIONS);
+    expect(state.misses).toBeGreaterThan(0);
+    expect(state.over).toBe(true);
+    expect(state.lives).toBe(0);
+    expect(breakoutStats(state).lives).toBe(0);
+  });
+
+  test("判定次数到上限就收场（一局不会无限跑下去）", () => {
+    // 跟着落点走 = 基本不会漏球，所以结束的原因只能是判定次数用完。
+    const state = playBreakout(
+      newBreakout({ decideEvery: 2 }),
+      (s) => {
+        const offset = predictLanding(s.ball).x - paddleCenter(s);
+        return Math.abs(offset) < 4 ? "stay" : offset > 0 ? "right" : "left";
+      },
+      BREAKOUT_MAX_DECISIONS + 10,
+    );
+    expect(state.over).toBe(true);
+    expect(state.decisions).toBeLessThanOrEqual(BREAKOUT_MAX_DECISIONS);
+    // 会接球（这条同时证明板子跟得上、接球判定有效）。
+    expect(state.hits).toBeGreaterThan(0);
+  });
+});
+
+describe("breakout：落点预测与请求", () => {
+  test("预测的落点和真把球推过去落的地方一致", () => {
+    // 球放在砖阵**下方**、朝右下飞，板子躲到最左边：一路不碰砖也不会被接住，
+    // 中途撞一次右墙 —— 正好把反射那段也验了。
+    // （不能改成"把砖全打掉"来腾地方：砖清光 = cleared = 这一局当场结束。）
+    const every = BREAKOUT_EVERY_MIN;
+    const clean: BreakoutState = {
+      ...newBreakout({ decideEvery: every }),
+      paddleX: 2,
+      ball: { x: 250, y: 120, vx: 2.6, vy: 2.2 },
+    };
+    const predicted = predictLanding(clean.ball);
+    let state = clean;
+    let decisions = 0;
+    while (decisions < 300) {
+      state = applyBreakoutAction(state, "stay").next;
+      decisions++;
+      if (state.ball.y >= 194 - BREAKOUT_BALL_R && state.ball.vy > 0) break;
+    }
+    // 判定是按段推进的（一段 `every` 帧），所以落点最多差一段的位移 —— 对得上
+    // 预测就说明反射那几下算对了，这正是要守的东西。
+    const drift = Math.abs(2.6) * every;
+    expect(Math.abs(state.ball.x - predicted.x)).toBeLessThanOrEqual(drift);
+    expect(Math.abs(decisions * every - predicted.frames)).toBeLessThanOrEqual(every);
+  });
+
+  test("state / questions 过官方校验，且带上真正的信号", () => {
+    const start = newBreakout({ decideEvery: 5 });
+    const state = breakoutState(start);
+    const result = validateSystemOneRequest({ state, model: "jev-latest", questions: breakoutQuestions(start) });
+    expect(result.ok).toBe(true);
+    expect(state.landing_minus_paddle_center).toBeTypeOf("number");
+    expect(state.paddle_reach_per_decision).toBeCloseTo(16, 6);
+    expect(state.bricks_left).toBe(BREAKOUT_ROWS * BREAKOUT_COLS);
+    // 开局板子居中，两边都没贴墙。
+    expect(state.paddle_at_left_edge).toBe(false);
+    expect(state.paddle_at_right_edge).toBe(false);
+    const questions = breakoutQuestions(start);
+    expect(Object.keys((questions.paddle_move as SystemOneChoiceQuestion).criteria)).toEqual([...BREAKOUT_ACTIONS]);
+  });
+
+  test("贴墙时 state 要说出来（模型看不见就会一直顶着墙空转）", () => {
+    let state = newBreakout({ decideEvery: 5 });
+    for (let i = 0; i < 20; i++) state = applyBreakoutAction(state, "left").next;
+    const left = breakoutState(state);
+    expect(left.paddle_at_left_edge).toBe(true);
+    expect(left.paddle_at_right_edge).toBe(false);
+  });
+
+  test("三个选项的说明必须互不相同，且各自点名落点在哪一侧", () => {
+    const criteria = (breakoutQuestions(newBreakout()).paddle_move as SystemOneChoiceQuestion).criteria;
+    const left = String(criteria.left);
+    const right = String(criteria.right);
+    const stay = String(criteria.stay);
+    // 这是这个场景踩过的坑：left / right 只差一个方向词时，判定模型没有可分辨的
+    // 信号，一整局都会选同一边，板子顶死在墙上再也不回来。
+    expect(left).not.toBe(right);
+    expect(left).toContain("negative");
+    expect(right).toContain("positive");
+    expect(left).toContain("paddle_at_left_edge");
+    expect(right).toContain("paddle_at_right_edge");
+    expect(stay).toContain("landing_minus_paddle_center");
   });
 });

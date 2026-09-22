@@ -10,7 +10,14 @@ import { create } from "zustand";
 import { useUILang } from "@stores/ui-lang";
 import { buildQuestions, type QuestionDraft } from "../app/jev/drafts";
 import { jevExamples } from "../app/jev/examples";
-import { clampGridSize, clampWallCount, GRID_SIZE, GRID_WALLS } from "../app/jev/playground/scenarios";
+import {
+  clampBreakoutEvery,
+  clampGridSize,
+  clampWallCount,
+  BREAKOUT_EVERY_DEFAULT,
+  GRID_SIZE,
+  GRID_WALLS,
+} from "../app/jev/playground/scenarios";
 import { defaultMarketRange, marketSpan, type MarketSymbol } from "../app/jev/playground/market-data";
 
 /** 左栏顶部那个切换：本地运行 / 云端接入（与语音合成页的"推理引擎"同一处位置）。 */
@@ -56,6 +63,9 @@ type JevState = {
   setMarketSymbol: (symbol: MarketSymbol) => void;
   setMarketRange: (range: { from?: string; to?: string }) => void;
   setMarketStrategy: (strategy: string) => void;
+  /** 打砖块：每隔几帧判定一次（唯一可调的参数，也是这个场景真正的变量）。 */
+  breakoutEvery: number;
+  setBreakoutEvery: (every: number) => void;
   /** AI 生成的草稿填进来（同样是一次性内容，不算某个示例）。 */
   applyDraft: (payload: { state: string; drafts: QuestionDraft[] }) => void;
   reset: () => void;
@@ -129,6 +139,8 @@ export const useJevStore = create<JevState>((set) => ({
   setMarketRange: ({ from, to }) =>
     set((prev) => ({ marketFrom: from ?? prev.marketFrom, marketTo: to ?? prev.marketTo })),
   setMarketStrategy: (marketStrategy) => set({ marketStrategy }),
+  breakoutEvery: BREAKOUT_EVERY_DEFAULT,
+  setBreakoutEvery: (every) => set({ breakoutEvery: clampBreakoutEvery(every) }),
 }));
 
 

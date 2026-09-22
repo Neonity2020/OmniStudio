@@ -92,6 +92,24 @@ const PLAYGROUND_UI_KEYS = [
   "jev.playground.market.legendSell",
   "jev.playground.market.legendHold",
   "jev.playground.market.legendSize",
+  // 打砖块
+  "jev.playground.breakout.settings",
+  "jev.playground.breakout.every",
+  "jev.playground.breakout.everyValue",
+  "jev.playground.breakout.settingsHint",
+  "jev.playground.breakout.progress",
+  "jev.playground.breakout.score",
+  "jev.playground.breakout.lives",
+  "jev.playground.breakout.bricks",
+  "jev.playground.breakout.catches",
+  "jev.playground.breakout.decisions",
+  "jev.playground.breakout.aria",
+  "jev.playground.breakout.cleared",
+  "jev.playground.breakout.gameOver",
+  "jev.playground.breakout.legendLanding",
+  "jev.playground.breakout.legendOffset",
+  "jev.playground.breakout.legendTrail",
+  "jev.playground.breakout.legendLeft",
   // 运行日志
   "jev.playground.log.empty",
   "jev.playground.log.step",
@@ -112,6 +130,12 @@ const PLACEHOLDERS: Record<string, string[][]> = {
   "jev.playground.market.progress": [["done", "total"]],
   "jev.playground.market.rangeHint": [["bars", "steps", "first", "last"]],
   "jev.playground.market.rangeHintTruncated": [["bars", "available", "max"]],
+  "jev.playground.breakout.everyValue": [["n"]],
+  "jev.playground.breakout.settingsHint": [["reach", "max"]],
+  "jev.playground.breakout.progress": [["score", "lives"]],
+  "jev.playground.breakout.decisions": [["n", "max"]],
+  "jev.playground.breakout.legendOffset": [["value"]],
+  "jev.playground.breakout.legendLeft": [["n"]],
   "jev.playground.log.confidence": [["value"]],
 };
 
@@ -130,6 +154,9 @@ const SAMPLE_VALUES: Record<string, string> = {
   first: "2019-01-02",
   last: "2026-09-21",
   available: "300",
+  reach: "16.0",
+  score: "120",
+  lives: "2",
 };
 
 test("演练场用到的 i18n key 无重复，且全部以 jev.playground. 开头", () => {

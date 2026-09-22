@@ -6,6 +6,8 @@
  * 组件，不能为了演练场动它）、以及这一步的耗时（调用前后各取一次
  * `performance.now()`，差值取整）。
  */
+import { useEffect, useRef } from "react";
+
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 
@@ -42,13 +44,42 @@ function ProbabilityBar({ label, value }: { label: string; value: number }) {
 
 export function RunLog({ entries }: { entries: RunLogEntry[] }) {
   const t = useT();
+  const boxRef = useRef<HTMLDivElement>(null);
+  /**
+   * 是否"粘"在最新一条上。
+   *
+   * 网格 / 工单那会儿一局最多十几条，日志停在顶上也看得见；打砖块一局能有一百多条，
+   * 不自动跟到底部的话，跑起来之后看到的永远是第 1 步 —— 等于这块面板白摆。
+   * 但用户往回翻的时候不能把他拽回去，所以只在"本来就贴着底"时才跟。
+   */
+  const stickRef = useRef(true);
+
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    // 重置（条目清零）之后回到跟随状态，否则下一局会停在用户上次翻到的地方。
+    if (entries.length === 0) {
+      stickRef.current = true;
+      return;
+    }
+    if (stickRef.current) box.scrollTop = box.scrollHeight;
+  }, [entries.length]);
+
   if (entries.length === 0) {
     return <p className="px-1 text-[11px] text-muted-foreground">{t("jev.playground.log.empty")}</p>;
   }
   return (
     // 只允许竖向滚：右栏窄的时候，横向滚动条会把本来就矮的日志区又吃掉一条，
     // 而且要横拖才看得全一行 —— 抬头那一行改成可换行，窄栏里自己折下去。
-    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto pb-2">
+    <div
+      ref={boxRef}
+      // 离底部 24px 以内就算"贴着底"：滚动条的小数误差和刚好差半行都别算成"用户翻走了"。
+      onScroll={(event) => {
+        const box = event.currentTarget;
+        stickRef.current = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+      }}
+      className="flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto pb-2"
+    >
       {entries.map((entry) => {
         const probs = Object.entries(entry.probabilities).sort((a, b) => b[1] - a[1]);
         return (
