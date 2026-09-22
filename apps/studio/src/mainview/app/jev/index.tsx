@@ -25,7 +25,17 @@ import { JevPlayground } from "./playground";
 import { QuestionEditor } from "./questions";
 import { buildCallExample, buildQuestions } from "./drafts";
 
+/**
+ * 侧栏顶部的两段切换：判定台（`JevConsole`）/ 演练场（`JevPlayground`）。
+ * 分叉必须在这一层：判定台自己有一批 hook，若在它内部按 view 提前 return，
+ * 切到演练场的那次渲染就会少跑一批 hook（Rendered fewer hooks than expected）。
+ */
 export function JevScreen() {
+  const view = useJevStore((s) => s.view);
+  return view === "playground" ? <JevPlayground /> : <JevConsole />;
+}
+
+function JevConsole() {
   const t = useT();
   const queryClient = useQueryClient();
   // 状态放 store：侧栏点示例要改这里正在编辑的草稿，两处隔着 MainLayout 的层级。
@@ -36,9 +46,6 @@ export function JevScreen() {
   const model = useJevStore((s) => s.model);
   const setModel = useJevStore((s) => s.setModel);
   const applyDraft = useJevStore((s) => s.applyDraft);
-  // 侧栏顶部的两段切换：判定台（下面这一整屏）/ 演练场（自动跑场景）。两半互不干扰。
-  const view = useJevStore((s) => s.view);
-  if (view === "playground") return <JevPlayground />;
   const [result, setResult] = useState<JevRunResult | undefined>(undefined);
   const [copied, setCopied] = useState(false);
 
