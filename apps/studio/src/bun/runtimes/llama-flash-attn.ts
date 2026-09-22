@@ -65,9 +65,13 @@ export function parseServerHelpSupport(help: string): ServerHelpSupport {
  *    （老版没有「关」这个选择，auto 听它自己的默认，行为与加开关前一致）；
  *  - `none`：一个参数都不发。
  */
+/** 合法取值白名单：拼命令行的地方自己校验，不依赖上游 updateSettings 的枚举检查。 */
+const FLASH_ATTN_VALUES = new Set(["auto", "on", "off"]);
+
 export function flashAttnArgs(setting: string | null | undefined, support: FlashAttnSupport): string[] {
-  if (support === "tristate") return ["--flash-attn", setting ?? "auto"];
-  if (support === "boolean") return setting === "on" ? ["--flash-attn"] : [];
+  const value = setting != null && FLASH_ATTN_VALUES.has(setting) ? setting : "auto";
+  if (support === "tristate") return ["--flash-attn", value];
+  if (support === "boolean") return value === "on" ? ["--flash-attn"] : [];
   return [];
 }
 

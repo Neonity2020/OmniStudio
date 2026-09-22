@@ -71,8 +71,8 @@ function rawCallFromObject(obj: Record<string, unknown>): RawCall | null {
 
 /* ---------------- Format 1: hermes ------------------------------- */
 
-const HERMES_OPEN = "<tool_call>">;
-const HERMES_CLOSE = "</tool_call>">;
+const HERMES_OPEN = "<tool_call>";
+const HERMES_CLOSE = "</tool_call>";
 
 function parseHermes(text: string): InlineToolCall[] {
   const out: InlineToolCall[] = [];
@@ -107,7 +107,7 @@ function parseHermes(text: string): InlineToolCall[] {
 
 /* ---------------- Format 2: function-tag ------------------------- */
 
-const FUNC_OPEN_RE = /<function=([A-Za-z0-9_.-]+)[\s>]/g;
+const FUNC_OPEN_RE = /<function=([A-Za-z0-9_.-]+)(?:>|\s|(?=\{))/g;
 const FUNC_CLOSE = "</" + "function>";
 const FUNC_OPEN_MARKER = "<function=";
 
@@ -115,7 +115,7 @@ function parseFunctionTag(text: string): InlineToolCall[] {
   const out: InlineToolCall[] = [];
   for (let m = FUNC_OPEN_RE.exec(text); m !== null; m = FUNC_OPEN_RE.exec(text)) {
     const start = m.index;
-    const tagName = m[1];
+    const tagName = m[1]!;
     const bodyStart = m.index + m[0].length;
     const closeIdx = text.indexOf(FUNC_CLOSE, bodyStart);
     let nextOpenIdx = -1;
@@ -226,14 +226,19 @@ function parseGemma(text: string): InlineToolCall[] {
     if (idx === -1) break;
     const bodyStart = idx + GEMMA_OPEN.length;
     const closeIdx = text.indexOf(GEMMA_CLOSE, bodyStart);
+    // end = 这段调用在原文里的结束位置（含闭合标签）；
+    // bodyEnd = JSON 正文的结束位置（不含闭合标签）—— 与 parseHermes 同一套区分。
     let end: number;
+    let bodyEnd: number;
     if (closeIdx !== -1) {
+      bodyEnd = closeIdx;
       end = closeIdx + GEMMA_CLOSE.length;
     } else {
       const fence = text.indexOf(GEMMA_FENCE_OPEN, bodyStart);
-      end = fence !== -1 ? fence : text.length;
+      bodyEnd = fence !== -1 ? fence : text.length;
+      end = bodyEnd;
     }
-    const raw = text.slice(bodyStart, end).trim();
+    const raw = text.slice(bodyStart, bodyEnd).trim();
     const obj = raw.startsWith("{") ? parseJsonObject(raw) : null;
     if (obj) {
       const call = rawCallFromObject(obj);
