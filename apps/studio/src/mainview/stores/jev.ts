@@ -10,6 +10,7 @@ import { create } from "zustand";
 import { useUILang } from "@stores/ui-lang";
 import { buildQuestions, type QuestionDraft } from "../app/jev/drafts";
 import { jevExamples } from "../app/jev/examples";
+import { clampGridSize, clampWallCount, GRID_SIZE, GRID_WALLS } from "../app/jev/playground/scenarios";
 
 /** 左栏顶部那个切换：本地运行 / 云端接入（与语音合成页的"推理引擎"同一处位置）。 */
 export type JevEngineTab = "local" | "cloud";
@@ -35,6 +36,14 @@ type JevState = {
   /** 演练场当前选中的场景 id（侧栏高亮用）；还没点过任何场景时是 null。 */
   scenarioId: string | null;
   setScenarioId: (id: string | null) => void;
+  /**
+   * 网格寻路的盘面设置：边长与障碍数量。放 store 而不是组件 state —— 改了要整局
+   * 重开（`index.tsx` 拿它当重置的依赖），留在组件里会被"换场景再换回来"抹掉。
+   */
+  gridSize: number;
+  gridWalls: number;
+  setGridSize: (size: number) => void;
+  setGridWalls: (count: number) => void;
   /** AI 生成的草稿填进来（同样是一次性内容，不算某个示例）。 */
   applyDraft: (payload: { state: string; drafts: QuestionDraft[] }) => void;
   reset: () => void;
@@ -83,6 +92,16 @@ export const useJevStore = create<JevState>((set) => ({
   setView: (view) => set({ view }),
   scenarioId: null,
   setScenarioId: (scenarioId) => set({ scenarioId }),
+  gridSize: GRID_SIZE,
+  gridWalls: GRID_WALLS.length,
+  // 边长变了，障碍数量要跟着夹回新盘面的上限：10×10 摆着 25 个障碍，缩回 4×4
+  // 就只剩 4 个位置，不夹的话生成器会一直试到放不下，用户看到的是"数字没变但障碍变少了"。
+  setGridSize: (size) =>
+    set((prev) => {
+      const gridSize = clampGridSize(size);
+      return { gridSize, gridWalls: clampWallCount(gridSize, prev.gridWalls) };
+    }),
+  setGridWalls: (count) => set((prev) => ({ gridWalls: clampWallCount(prev.gridSize, count) })),
 }));
 
 

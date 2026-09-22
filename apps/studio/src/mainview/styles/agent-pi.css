@@ -3756,7 +3756,9 @@ button.pi-brand:hover {
 }
 .jev-prob-track {
   flex: none;
-  width: 84px;
+  /* 窄栏里（演练场的运行日志）按比例收，宽栏仍是原来的 84px —— 固定宽度会把
+     标签挤成 "ri…"、"d…"，而这一列正是要读的"模型选了哪个方向"。 */
+  width: clamp(36px, 28%, 84px);
   height: 5px;
   overflow: hidden;
   border-radius: 3px;

@@ -47,8 +47,43 @@ export const GRID_SIZE = 5;
 export const GRID_START: [number, number] = [0, 0];
 export const GRID_GOAL: [number, number] = [4, 4];
 export const GRID_WALLS: readonly [number, number][] = [[1, 2], [2, 3]];
-/** 步数上限（超过即结束，不论是否到达终点）。 */
+/** 默认尺寸（5×5）下的步数上限；别的尺寸走 `gridMaxSteps`。 */
 export const GRID_MAX_STEPS = 20;
+
+/**
+ * 可调范围。下限 4 是"还能看出寻路"的最小盘，上限 10 是格子缩到看不清之前的极限
+ * （10×10 = 100 格，每步仍只问一个四选一的问题，跑满也就几十次判定）。
+ */
+export const GRID_SIZE_MIN = 4;
+export const GRID_SIZE_MAX = 10;
+
+/**
+ * 步数上限随盘面走：最短路是 `2 * (size - 1)` 步，给两倍半的余量 —— 够撞几次墙、
+ * 绕一段远路，又不至于让一条走不出去的轨迹拖到几十次判定。
+ * 默认的 5×5 正好回到 20，和以前一模一样。
+ */
+export function gridMaxSteps(size: number): number {
+  return (size - 1) * 5;
+}
+
+/**
+ * 一个盘面最多摆几个障碍：四分之一的格子。再多就很容易把盘面切成两半 —— 那时
+ * 生成器只能一个个试着放弃，用户拖到头却发现障碍没变多，不如把上限说清楚。
+ */
+export function maxWallsFor(size: number): number {
+  return Math.floor((size * size) / 4);
+}
+
+/** 值夹在范围里（界面传进来的都是用户点出来的，越界就贴边）。 */
+export function clampGridSize(size: number): number {
+  if (!Number.isFinite(size)) return GRID_SIZE;
+  return Math.min(GRID_SIZE_MAX, Math.max(GRID_SIZE_MIN, Math.floor(size)));
+}
+
+export function clampWallCount(size: number, count: number): number {
+  if (!Number.isFinite(count)) return 0;
+  return Math.min(maxWallsFor(size), Math.max(0, Math.floor(count)));
+}
 
 export type GridRunnerState = {
   size: number;
@@ -58,6 +93,8 @@ export type GridRunnerState = {
   walls: [number, number][];
   /** 已经用掉的步数（非法移动也计数 —— 撞墙也是有代价的，这正是想展示给用户的）。 */
   steps: number;
+  /** 这一局的步数上限（随尺寸变，见 `gridMaxSteps`）。 */
+  maxSteps: number;
   atGoal: boolean;
   over: boolean;
 };
@@ -73,14 +110,95 @@ export type GridRunnerMove = {
   moved: boolean;
 };
 
-/** 开局（纯函数：任何时刻可以从一个局面重新开局）。 */
-export function newGridRunner(): GridRunnerState {
+/** 32 位小 PRNG：同样的 seed 永远给同一串数，所以"同一档设置 = 同一个盘面"。 */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 起点能不能走到终点（BFS，把 `walls` 当不可通行）。 */
+function gridSolvable(size: number, walls: readonly [number, number][]): boolean {
+  const blocked = new Set(walls.map(([r, c]) => `${r},${c}`));
+  const goal = `${size - 1},${size - 1}`;
+  if (blocked.has("0,0") || blocked.has(goal)) return false;
+  const seen = new Set(["0,0"]);
+  const queue: [number, number][] = [[0, 0]];
+  while (queue.length > 0) {
+    const [row, col] = queue.shift() as [number, number];
+    if (`${row},${col}` === goal) return true;
+    for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+      const r = row + dr;
+      const c = col + dc;
+      const key = `${r},${c}`;
+      if (r < 0 || c < 0 || r >= size || c >= size) continue;
+      if (blocked.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      queue.push([r, c]);
+    }
+  }
+  return false;
+}
+
+/**
+ * 按尺寸与数量摆障碍。
+ *
+ * 两条硬要求：**盘面必须可解**（每放一个都用 BFS 验一遍，堵死了就换一格），
+ * 同一档设置**必须摆出同一个盘面**（seed 只由 size 与 count 决定）—— 否则用户
+ * 点一下「重置」盘面就变了，没法比较"同一局面下模型的选择"。
+ *
+ * 起点与终点不放障碍；要的数量放不下时就放到放不下为止（上限见 `maxWallsFor`）。
+ */
+export function buildGridWalls(size: number, count: number): [number, number][] {
+  const wanted = clampWallCount(size, count);
+  if (wanted === 0) return [];
+  const cells: [number, number][] = [];
+  for (let row = 0; row < size; row++) {
+    for (let col = 0; col < size; col++) {
+      if (row === 0 && col === 0) continue;
+      if (row === size - 1 && col === size - 1) continue;
+      cells.push([row, col]);
+    }
+  }
+  // Fisher–Yates，随机源是那个定死 seed 的 PRNG。
+  const rand = mulberry32(size * 1000 + wanted);
+  for (let i = cells.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    const a = cells[i] as [number, number];
+    const b = cells[j] as [number, number];
+    cells[i] = b;
+    cells[j] = a;
+  }
+  const walls: [number, number][] = [];
+  for (const cell of cells) {
+    if (walls.length >= wanted) break;
+    const candidate: [number, number][] = [...walls, cell];
+    if (gridSolvable(size, candidate)) walls.push(cell);
+  }
+  return walls.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+}
+
+/**
+ * 开局（纯函数：任何时刻可以从一个局面重新开局）。
+ *
+ * 不带参数就是默认的 5×5 两障碍 —— 那两个位置 (1,2) / (2,3) 是挑过的（见上面的
+ * 注释），不交给生成器重摆。改过尺寸或障碍数才按设置生成。
+ */
+export function newGridRunner(options?: { size?: number; walls?: number }): GridRunnerState {
+  const size = clampGridSize(options?.size ?? GRID_SIZE);
+  const wallCount = clampWallCount(size, options?.walls ?? GRID_WALLS.length);
+  const isDefault = size === GRID_SIZE && wallCount === GRID_WALLS.length;
   return {
-    size: GRID_SIZE,
+    size,
     pos: [...GRID_START],
-    goal: [...GRID_GOAL],
-    walls: GRID_WALLS.map(([r, c]) => [r, c]),
+    goal: [size - 1, size - 1],
+    walls: isDefault ? GRID_WALLS.map(([r, c]) => [r, c]) : buildGridWalls(size, wallCount),
     steps: 0,
+    maxSteps: gridMaxSteps(size),
     atGoal: false,
     over: false,
   };
@@ -99,19 +217,21 @@ function isWall(state: GridRunnerState, row: number, col: number): boolean {
 export function gridRunnerState(state: GridRunnerState): Record<string, unknown> {
   const { size, pos, goal, walls, steps, over, atGoal } = state;
   return {
-    task: "5x5 grid pathfinding",
+    // 盘面大小与步数上限都跟着设置走：state 里写的数字必须就是这一局真正的规则，
+    // 不然模型按"20 步"盘算，实际却在第 45 步才结束。
+    task: `${size}x${size} grid pathfinding`,
     description:
       "A single agent moves on a grid. It starts at the start cell and must reach the goal cell. " +
       "It may move one cell per step: up, down, left or right. A step into a wall or an obstacle " +
       "does not move the agent, but it still costs one step. The walk ends when the agent reaches " +
-      "the goal cell, or when it has used more than 20 steps.",
+      `the goal cell, or when it has used more than ${state.maxSteps} steps.`,
     grid_size: size,
     start: { row: GRID_START[0], col: GRID_START[1] },
     current: { row: pos[0], col: pos[1] },
     goal: { row: goal[0], col: goal[1] },
     obstacles: walls.map(([row, col]) => ({ row, col })),
     steps_used: steps,
-    max_steps: GRID_MAX_STEPS,
+    max_steps: state.maxSteps,
     at_goal: atGoal,
     finished: over,
     moves: {
@@ -196,7 +316,7 @@ export function applyMove(state: GridRunnerState, direction: GridDirection): Gri
     steps,
     atGoal: moved && row === state.goal[0] && col === state.goal[1],
   };
-  next.over = next.atGoal || steps >= GRID_MAX_STEPS;
+  next.over = next.atGoal || steps >= next.maxSteps;
   return { next, inBounds, hitsWall, target: [row, col], moved };
 }
 

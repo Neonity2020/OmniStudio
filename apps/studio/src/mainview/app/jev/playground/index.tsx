@@ -15,7 +15,7 @@
  * 发给模型的 state / criteria 全部来自 `scenarios.ts`（英文）；这里的界面
  * 文案走 i18n，不拼进请求体。
  */
-import { PlayIcon, PlusCircleIcon, RotateCcwIcon } from "lucide-react";
+import { MinusIcon, PlayIcon, PlusCircleIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
@@ -25,7 +25,9 @@ import { useT } from "@stores/ui-lang";
 import { Button } from "@ui/button";
 import {
   applyMove,
-  GRID_MAX_STEPS,
+  GRID_SIZE_MAX,
+  GRID_SIZE_MIN,
+  maxWallsFor,
   newGridRunner,
   type GridDirection,
   gridChoiceQuestion,
@@ -74,6 +76,11 @@ export function JevPlayground() {
   const t = useT();
   const scenarioId = useJevStore((s) => s.scenarioId);
   const scenario = PLAYGROUND_SCENARIOS.find((s) => s.id === scenarioId) ?? null;
+  // 盘面设置（只有网格场景用得上）：改一下就整局重开，见下面那个 effect。
+  const gridSize = useJevStore((s) => s.gridSize);
+  const gridWalls = useJevStore((s) => s.gridWalls);
+  const setGridSize = useJevStore((s) => s.setGridSize);
+  const setGridWalls = useJevStore((s) => s.setGridWalls);
 
   // 后端状态（与判定台同一查询：跑之前先看一眼"能不能跑"）。
   const status = useQuery({
@@ -82,7 +89,7 @@ export function JevPlayground() {
   });
 
   // ---------- 运行现场（两个场景各一份；重置 / 换场景时整体重建） ----------
-  const [gridState, setGridState] = useState<GridRunnerState>(() => newGridRunner());
+  const [gridState, setGridState] = useState<GridRunnerState>(() => newGridRunner({ size: gridSize, walls: gridWalls }));
   const [trail, setTrail] = useState<[number, number][]>([]);
   const [triageRows, setTriageRows] = useState<TriageRow[]>(() => TICKETS.map((ticket) => ({ ticket })));
   const [log, setLog] = useState<RunLogEntry[]>([]);
@@ -93,17 +100,18 @@ export function JevPlayground() {
   // 卸载或重置时中止正在跑的循环（只置标志，循环每步之间检查一次）。
   const cancelRef = useRef(false);
 
-  // 换场景 = 重置运行现场（回到未开始状态）。
+  // 换场景、改盘面 = 重置运行现场（回到未开始状态）。盘面变了还接着上一局跑，
+  // 轨迹与障碍就对不上了 —— 那是比"设置没生效"更难看懂的状态。
   useEffect(() => {
     cancelRef.current = false;
-    setGridState(newGridRunner());
+    setGridState(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
     setTriageRows(TICKETS.map((ticket) => ({ ticket })));
     setLog([]);
     setRunning(false);
     setError(null);
     setDone(false);
-  }, [scenarioId]);
+  }, [scenarioId, gridSize, gridWalls]);
 
   // 卸载时中止正在跑的循环。
   useEffect(
@@ -242,7 +250,7 @@ export function JevPlayground() {
 
   const reset = () => {
     cancelRef.current = true;
-    setGridState(newGridRunner());
+    setGridState(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
     setTriageRows(TICKETS.map((ticket) => ({ ticket })));
     setLog([]);
@@ -262,7 +270,7 @@ export function JevPlayground() {
 
   const answered = triageRows.filter((row) => row.choice !== undefined).length;
   const stepNumber = scenario.id === "grid-runner" ? gridState.steps + 1 : answered + 1;
-  const totalSteps = scenario.id === "grid-runner" ? GRID_MAX_STEPS : TICKETS.length;
+  const totalSteps = scenario.id === "grid-runner" ? gridState.maxSteps : TICKETS.length;
 
   return (
     <div className="flex h-full min-h-0 flex-1">
@@ -305,6 +313,37 @@ export function JevPlayground() {
           ) : null}
         </div>
 
+        {/* 盘面设置：只有网格场景有。跑的过程中锁住 —— 半局换盘面没有意义。 */}
+        {scenario.id === "grid-runner" ? (
+          <div className="flex flex-col gap-2">
+            <span className="text-[11px] font-medium">{t("jev.playground.grid.settings")}</span>
+            <StepperRow
+              label={t("jev.playground.grid.size")}
+              value={t("jev.playground.grid.sizeValue", { n: String(gridSize) })}
+              disabled={running}
+              canDecrease={gridSize > GRID_SIZE_MIN}
+              canIncrease={gridSize < GRID_SIZE_MAX}
+              onDecrease={() => setGridSize(gridSize - 1)}
+              onIncrease={() => setGridSize(gridSize + 1)}
+            />
+            <StepperRow
+              label={t("jev.playground.grid.walls")}
+              value={String(gridWalls)}
+              disabled={running}
+              canDecrease={gridWalls > 0}
+              canIncrease={gridWalls < maxWallsFor(gridSize)}
+              onDecrease={() => setGridWalls(gridWalls - 1)}
+              onIncrease={() => setGridWalls(gridWalls + 1)}
+            />
+            <p className="text-[10px] leading-4 text-muted-foreground">
+              {t("jev.playground.grid.settingsHint", {
+                max: String(maxWallsFor(gridSize)),
+                steps: String(gridState.maxSteps),
+              })}
+            </p>
+          </div>
+        ) : null}
+
         {error ? (
           <div className="jev-note error">
             <strong>{t("jev.failed", { status: String(error.status) })}</strong>
@@ -321,7 +360,9 @@ export function JevPlayground() {
         <div className="flex flex-none items-center gap-2">
           <span className="text-xs font-semibold text-muted-foreground">{t(scenario.nameKey)}</span>
           {scenario.id === "grid-runner" ? (
-            <span className="jev-pill">{t("jev.playground.grid.steps", { n: String(gridState.steps), max: String(GRID_MAX_STEPS) })}</span>
+            <span className="jev-pill">
+              {t("jev.playground.grid.steps", { n: String(gridState.steps), max: String(gridState.maxSteps) })}
+            </span>
           ) : (
             <span className="jev-pill">
               {t("jev.playground.triage.progress", { done: String(answered), total: String(TICKETS.length) })}
@@ -329,15 +370,79 @@ export function JevPlayground() {
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {scenario.id === "grid-runner" ? <GridView state={gridState} trail={trail} /> : <TriageView rows={triageRows} />}
+        {/*
+          可视化区**不滚动**：棋盘按可用空间缩放（见 GridView），工单列表自己滚。
+          这里以前是 overflow-y-auto + 下面的日志没有高度上限，日志一长就把棋盘挤没了 ——
+          看着像"日志盖住了棋盘"。现在日志的高度被钉在下面那一截里，棋盘永远占着剩下的空间。
+        */}
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {scenario.id === "grid-runner" ? (
+            <GridView state={gridState} trail={trail} />
+          ) : (
+            <div className="h-full overflow-y-auto">
+              <TriageView rows={triageRows} />
+            </div>
+          )}
         </div>
 
-        <div className="flex min-h-0 flex-col">
+        <div className="flex max-h-[38%] min-h-0 flex-none flex-col">
           <span className="flex-none text-xs font-semibold text-muted-foreground">{t("jev.playground.log.title")}</span>
           <RunLog entries={log} />
         </div>
       </section>
+    </div>
+  );
+}
+
+/**
+ * 一行「标签 − 值 ＋」的小步进器。
+ *
+ * 用两个按钮而不是滑块：可选值就六七档，按一下加一格比拖着找刻度准；跑的过程中
+ * 整行禁用 —— 半局改盘面只会让轨迹和障碍对不上。
+ */
+function StepperRow({
+  label,
+  value,
+  disabled,
+  canDecrease,
+  canIncrease,
+  onDecrease,
+  onIncrease,
+}: {
+  label: string;
+  value: string;
+  disabled: boolean;
+  canDecrease: boolean;
+  canIncrease: boolean;
+  onDecrease: () => void;
+  onIncrease: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-[11px] text-muted-foreground">{label}</span>
+      <div className="flex items-center gap-1">
+        <Button
+          size="sm"
+          variant="outline"
+          className="size-6 p-0"
+          aria-label={`${label} −`}
+          disabled={disabled || !canDecrease}
+          onClick={onDecrease}
+        >
+          <MinusIcon size={12} aria-hidden />
+        </Button>
+        <span className="min-w-12 text-center font-mono text-[11px]">{value}</span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="size-6 p-0"
+          aria-label={`${label} +`}
+          disabled={disabled || !canIncrease}
+          onClick={onIncrease}
+        >
+          <PlusIcon size={12} aria-hidden />
+        </Button>
+      </div>
     </div>
   );
 }

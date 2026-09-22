@@ -46,12 +46,14 @@ export function RunLog({ entries }: { entries: RunLogEntry[] }) {
     return <p className="px-1 text-[11px] text-muted-foreground">{t("jev.playground.log.empty")}</p>;
   }
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pb-2">
+    // 只允许竖向滚：右栏窄的时候，横向滚动条会把本来就矮的日志区又吃掉一条，
+    // 而且要横拖才看得全一行 —— 抬头那一行改成可换行，窄栏里自己折下去。
+    <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto pb-2">
       {entries.map((entry) => {
         const probs = Object.entries(entry.probabilities).sort((a, b) => b[1] - a[1]);
         return (
           <div key={entry.step} className="jev-card flex-none">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span className="flex-none font-mono text-[10px] text-muted-foreground">
                 {t("jev.playground.log.step", { n: String(entry.step) })}
               </span>
