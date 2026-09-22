@@ -5,7 +5,7 @@ import { existsSync, rmSync, copyFileSync, mkdirSync } from "fs";
 
 import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
-import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
+import { getAllSettings, getSetting, isConfigured, updateSettings, type SettingsKey } from "../db/settings";
 import {
   getImagesBaseDir,
   getUploadsBaseDir,
@@ -211,6 +211,13 @@ import {
 } from "../benchmark";
 import { listEvalSuites, type EvalSuiteInfo } from "../eval";
 import { downloadManager, type DownloadTask } from "../download-manager";
+import {
+  buildLaunchPlanKeyFromSettings,
+  refreshLaunchPlan,
+  type LaunchPlan,
+} from "../launch-plan";
+import { effectiveFlashAttnForPlan } from "../runtimes/llama";
+import { readGgufMeta, type GgufReadFailure } from "../gguf-meta";
 import * as Voice from "../voice";
 import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
 import * as Asr from "../asr";
@@ -1832,6 +1839,12 @@ export type AppRPC = {
           size?: number | null;
           /** 用户单独点的文件插队优先（批量下载不传）。 */
           explicit?: boolean;
+          /**
+           * 「下载整个模型」时把仓库文件清单带过来（`listModelFiles` 的同款数据，
+           * `{path, size}`）。下载开跑前写成 manifest，完成后拿它和磁盘比对；
+           * 单文件下载不传（写不出来也没法比，不如只记这一个文件）。
+           */
+          manifestFiles?: Array<{ path?: string; name?: string; size?: number | null }>;
         };
         response: { task: DownloadTask };
       };
@@ -1854,6 +1867,17 @@ export type AppRPC = {
       listInstalledModels: {
         params: undefined;
         response: { models: InstalledModel[] };
+      };
+      /**
+       * 「运行模型」页的自动启动参数预览（SERVER_AUTO_TUNE）：用当前设置 + 硬件画像
+       * 现算一份 llama.cpp 启动计划返回给 UI。算不出来（不是 GGUF / 读不到 / 元数据不足）
+       * 返回 ok:false + 原因，不抛 —— UI 据此显示「将使用手动参数」而不是崩掉页面。
+       * key 的构造与 llama.ts 启动时用的是同一个 `buildLaunchPlanKeyFromSettings`，
+       * 预览到的就是真正会用的那份计划。
+       */
+      getLaunchPlanPreview: {
+        params: { path: string };
+        response: { ok: true; plan: LaunchPlan } | { ok: false; error: string; reason: string };
       };
       toggleFavoriteModel: {
         params: { path: string };
@@ -4849,8 +4873,8 @@ const rpcRequests: NonNullable<
     return { tasks: downloadManager.list() };
   },
 
-  startModelDownload: async ({ repo, fileName, category, source, size, explicit }) => {
-    return { task: downloadManager.start(repo, fileName, category, source, { size, explicit }) };
+  startModelDownload: async ({ repo, fileName, category, source, size, explicit, manifestFiles }) => {
+    return { task: downloadManager.start(repo, fileName, category, source, { size, explicit, manifestFiles }) };
   },
 
   pauseModelDownload: async ({ id }) => {
@@ -4871,6 +4895,36 @@ const rpcRequests: NonNullable<
 
   listInstalledModels: async () => {
     return { models: ModelStore.listInstalledModels() };
+  },
+
+  getLaunchPlanPreview: async ({ path }) => {
+    const modelPath = path.trim();
+    if (modelPath === "") {
+      return { ok: false as const, error: "no model path", reason: "not-found" };
+    }
+    // 与 llama.ts 启动时完全同源的 key：同一函数、同一设置读法、同一个
+    // 「设置 + 上次实测」的 FA 折算（预览端没有 Runtime 实例，实测值读设置里回写的
+    // SERVER_FLASH_ATTN_EFFECTIVE —— 启动过之后两者必然相等）。
+    const key = buildLaunchPlanKeyFromSettings(
+      modelPath,
+      (k) => getSetting(k as SettingsKey),
+      effectiveFlashAttnForPlan(
+        getSetting("SERVER_FLASH_ATTN") as "" | "off" | "on",
+        getSetting("SERVER_FLASH_ATTN_EFFECTIVE") as "" | "off" | "on" | null | undefined,
+      ),
+    );
+    const plan = await refreshLaunchPlan(key);
+    if (plan !== null) return { ok: true as const, plan };
+
+    // refreshLaunchPlan 对「读不到 GGUF」静默返回 null，这里补一次读取只为拿到
+    // 失败原因码（该读取自身有 mtime 缓存，成本可忽略）。
+    const read = await readGgufMeta(modelPath);
+    if (read.ok) {
+      // GGUF 读得到但计划算不出来：元数据不足以估算 KV cache。
+      return { ok: false as const, error: read.data.filePath, reason: "no-metadata" };
+    }
+    const reason: GgufReadFailure = read.reason;
+    return { ok: false as const, error: read.error, reason };
   },
 
   toggleFavoriteModel: async ({ path }) => {

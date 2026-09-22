@@ -18,6 +18,7 @@ import { logEvent } from "./app-log";
 import { getSetting } from "./db/settings";
 import { getDataDir } from "./paths";
 import { proxyChildEnv } from "./proxy";
+import { removeManifest, writeManifest } from "./install-manifest";
 
 export type LayaPhase = "idle" | "installing" | "loading" | "ready" | "error";
 
@@ -592,6 +593,12 @@ export function installLayaRuntime(): Promise<LayaInstallResult> {
     if (!python) {
       return { ok: false, error: "未找到 Python 3.11–3.13，请先安装（macOS: brew install python@3.12）" };
     }
+    // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+    if (!removeManifest(layaEngineDir())) {
+      const error = `无法清除上次的安装记录，请检查 ${layaEngineDir()} 是否被占用或只读`;
+      emitLog(error);
+      return { ok: false, error };
+    }
     emitPhase("installing", "创建虚拟环境…");
     const engineDir = layaEngineDir();
     try {
@@ -657,6 +664,13 @@ export function installLayaRuntime(): Promise<LayaInstallResult> {
     }
     const version = await getLayaVersion();
     emitLog(version ? `安装成功：laya-mlx ${version}` : "安装成功");
+    writeManifest(layaEngineDir(), {
+      engine: "laya-mlx",
+      version: version ?? null,
+      platform: process.platform,
+      arch: process.arch,
+      steps: 2,
+    });
     emitPhase("idle", "");
     return { ok: true, version: version ?? undefined };
   })().finally(() => {
