@@ -17,6 +17,7 @@ import {
   DownloadIcon,
   Loader2Icon,
   PlayIcon,
+  SearchIcon,
   SquareIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -29,7 +30,7 @@ import { useSystemOneInstallStore } from "@stores/systemone-install";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { cn } from "@/mainview/lib/utils";
-import type { SystemOneAvailability } from "../../../bun/systemone";
+import type { SystemOneAvailability, SystemOneDiscovery } from "../../../bun/systemone";
 
 type EngineTab = "local" | "cloud";
 
@@ -348,6 +349,28 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
     },
   });
   const test = useMutation({ mutationFn: () => rpcClient.systemoneTest(undefined) });
+  /**
+   * 自动发现：把正在编辑的地址与 Key 直接送过去（用户很可能刚粘完还没失焦保存）。
+   * 只读不写 —— 填哪个模型、换不换地址，由下面的结果里用户自己点。
+   */
+  const discover = useMutation({
+    mutationFn: (override?: { baseUrl: string }) =>
+      rpcClient.systemoneDiscover({ baseUrl: override?.baseUrl ?? base.trim(), apiKey: key.trim() }),
+  });
+
+  const pickModel = (name: string) => {
+    setTouched(true);
+    setModel(name);
+    save.mutate({ SYSTEMONE_CLOUD_MODEL: name });
+  };
+
+  /** 判定服务在子路径上时，把地址换成那一条，并就着新地址再读一遍。 */
+  const pickBase = (next: string) => {
+    setTouched(true);
+    setBase(next);
+    save.mutate({ SYSTEMONE_CLOUD_BASE_URL: next });
+    discover.mutate({ baseUrl: next });
+  };
 
   const inputClass = "h-8 text-xs";
 
@@ -403,10 +426,28 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           onBlur={() => save.mutate({ SYSTEMONE_CLOUD_MODEL: model.trim() || "jev-latest" })}
         />
       </label>
-      <Button size="sm" variant="outline" className="gap-1 self-start" disabled={test.isPending} onClick={() => test.mutate()}>
-        {test.isPending ? <Loader2Icon className="size-3 animate-spin" aria-hidden /> : null}
-        {t("systemone.test")}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1"
+          disabled={discover.isPending}
+          onClick={() => discover.mutate(undefined)}
+        >
+          {discover.isPending ? (
+            <Loader2Icon className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <SearchIcon className="size-3" aria-hidden />
+          )}
+          {t("systemone.discover")}
+        </Button>
+        <Button size="sm" variant="outline" className="gap-1" disabled={test.isPending} onClick={() => test.mutate()}>
+          {test.isPending ? <Loader2Icon className="size-3 animate-spin" aria-hidden /> : null}
+          {t("systemone.test")}
+        </Button>
+      </div>
+      <p className="text-[10px] leading-4 text-muted-foreground">{t("systemone.discover.hint")}</p>
+      {discover.data ? <DiscoveryResult data={discover.data} onPickModel={pickModel} onPickBase={pickBase} /> : null}
       {test.data && !test.data.ok ? <p className="jev-note error">{t("systemone.test.failed", { message: test.data.message })}</p> : null}
       {test.data?.ok ? (
         <p className="jev-note ok">
@@ -417,6 +458,140 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
             noul: test.data.noul.toFixed(3),
           })}
         </p>
+      ) : null}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 自动发现的结果
+// ---------------------------------------------------------------------------
+
+/** 把 token 数写短（1000000 → 1M）：模型行要在一行里放得下。 */
+function formatTokens(value: number | undefined): string {
+  if (!value) return "—";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (value >= 1000) return `${Math.round(value / 1000)}K`;
+  return String(value);
+}
+
+function DiscoveredModelRow({
+  model,
+  onPick,
+}: {
+  model: SystemOneDiscovery["models"]["jev"][number];
+  onPick: (name: string) => void;
+}) {
+  const t = useT();
+  const hasContext = model.max_input_tokens !== undefined || model.max_output_tokens !== undefined;
+  const detail = [model.description, model.release_date, model.owned_by].filter(Boolean).join(" · ");
+  return (
+    <button
+      type="button"
+      className="flex w-full flex-col gap-0.5 rounded border px-2 py-1 text-left hover:bg-accent"
+      onClick={() => onPick(model.name)}
+    >
+      <span className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[11px]">{model.name}</span>
+        {hasContext ? (
+          <span className="text-[10px] text-muted-foreground">
+            {t("systemone.discover.context", {
+              input: formatTokens(model.max_input_tokens),
+              output: formatTokens(model.max_output_tokens),
+            })}
+          </span>
+        ) : null}
+      </span>
+      {detail ? <span className="text-[10px] leading-4 text-muted-foreground">{detail}</span> : null}
+    </button>
+  );
+}
+
+/**
+ * 发现结果，从"这地址到底能不能判定"往下读：
+ *   1. 判定端点在不在 —— 模型清单再长，没有 `/v1/systemone` 也跑不了判定；
+ *   2. 模型清单：判定模型在前，其它模型（多半是聊天模型）灰一档并写明未必能判定；
+ *   3. 端点不在根路径上时列出候选子路径 —— 网关常把判定服务转发到 `/jev/<名字>`，
+ *      一键换过去比让用户自己猜路径靠谱。
+ * 点模型只填模型框，点候选只换地址，都不会自己改别的设置。
+ */
+function DiscoveryResult({
+  data,
+  onPickModel,
+  onPickBase,
+}: {
+  data: SystemOneDiscovery;
+  onPickModel: (name: string) => void;
+  onPickBase: (base: string) => void;
+}) {
+  const t = useT();
+  const endpointNote =
+    data.systemone === "yes" ? "jev-note ok" : data.systemone === "forbidden" ? "jev-note" : "jev-note error";
+  const endpointText =
+    data.systemone === "unknown"
+      ? t("systemone.discover.endpoint.unknown", { base: data.base, message: data.message || "—" })
+      : t(`systemone.discover.endpoint.${data.systemone}`, { base: data.base });
+  const jev = data.models.jev;
+  const others = data.models.others;
+  const nothing = jev.length === 0 && others.length === 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className={endpointNote}>{endpointText}</p>
+
+      {jev.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">
+            {t("systemone.discover.models", { n: String(jev.length) })}
+          </span>
+          {jev.map((model) => (
+            <DiscoveredModelRow key={model.name} model={model} onPick={onPickModel} />
+          ))}
+        </div>
+      ) : null}
+
+      {others.length > 0 ? (
+        <div className="flex flex-col gap-1 opacity-80">
+          <span className="text-[10px] text-muted-foreground">
+            {t("systemone.discover.others", { n: String(others.length) })}
+          </span>
+          {others.map((model) => (
+            <DiscoveredModelRow key={model.name} model={model} onPick={onPickModel} />
+          ))}
+        </div>
+      ) : null}
+
+      {nothing ? (
+        <p className="text-[10px] text-muted-foreground">
+          {t("systemone.discover.empty", {
+            note: data.message ? t("systemone.discover.note", { note: data.message }) : "",
+          })}
+        </p>
+      ) : null}
+
+      {data.candidates.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">{t("systemone.discover.candidates")}</span>
+          {data.candidates.map((candidate) => (
+            <div key={candidate.base} className="flex items-center justify-between gap-2 rounded border px-2 py-1">
+              <span className="flex min-w-0 flex-col">
+                {/* 地址长，列里放不下就截断 —— 悬停看全的那一份放 title 里。 */}
+                <span className="truncate font-mono text-[11px]" title={candidate.base}>
+                  {candidate.base}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {t(`systemone.discover.endpoint.${candidate.systemone}`, {
+                    base: candidate.base,
+                    message: candidate.note || "—",
+                  })}
+                </span>
+              </span>
+              <Button size="sm" variant="outline" className="h-6 shrink-0 text-[10px]" onClick={() => onPickBase(candidate.base)}>
+                {t("systemone.discover.use")}
+              </Button>
+            </div>
+          ))}
+        </div>
       ) : null}
     </div>
   );

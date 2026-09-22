@@ -213,6 +213,154 @@ export function systemOneModelCards(): SystemOneModelCard[] {
 }
 
 // ---------------------------------------------------------------------------
+// 自动发现：从一个地址上把"有哪些模型、挂在哪"读出来
+// ---------------------------------------------------------------------------
+
+/**
+ * 发现到的一条模型。字段按**读到什么就带什么**：
+ * - 官方 TypeSafe 的 `/v1/models` 返回 `{ models: [{ name, description, release_date }] }`；
+ * - OpenAI 形状（LiteLLM / vLLM 这类代理）返回 `{ data: [{ id, owned_by, max_*_tokens }] }`。
+ * 两种形状归一到这里，界面直接显示读到的那几项。
+ */
+export type SystemOneDiscoveredModel = {
+  name: string;
+  description?: string;
+  release_date?: string;
+  owned_by?: string;
+  /** 上下文配置（OpenAI 形状的代理会给），界面上就是"能吃多长的 state"。 */
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+};
+
+/**
+ * 一次 `/v1/models` 的读数。两组分开放，因为它们的含金量不同：
+ * `jev` 来自官方 `models[]`，是判定模型的卡片；`others` 来自 OpenAI 的 `data[]`，
+ * 多半是聊天模型 —— 填进 JEV 的模型框不一定能跑，界面要说清楚。
+ */
+export type SystemOneModelListing = {
+  jev: SystemOneDiscoveredModel[];
+  others: SystemOneDiscoveredModel[];
+};
+
+function positiveInt(value: unknown): number | undefined {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+}
+
+function optionalText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/** 一条原始记录 → 一张卡片；没有可用名字（`name` / `id`）就返回 null。 */
+function toDiscoveredModel(raw: unknown): SystemOneDiscoveredModel | null {
+  if (typeof raw === "string") return raw.trim() ? { name: raw.trim() } : null;
+  if (typeof raw !== "object" || raw === null) return null;
+  const obj = raw as Record<string, unknown>;
+  const name = optionalText(obj.name) ?? optionalText(obj.id);
+  if (!name) return null;
+  const card: SystemOneDiscoveredModel = { name };
+  const description = optionalText(obj.description);
+  if (description) card.description = description;
+  const releaseDate = optionalText(obj.release_date);
+  if (releaseDate) card.release_date = releaseDate;
+  const ownedBy = optionalText(obj.owned_by);
+  if (ownedBy) card.owned_by = ownedBy;
+  const maxIn = positiveInt(obj.max_input_tokens);
+  if (maxIn !== undefined) card.max_input_tokens = maxIn;
+  const maxOut = positiveInt(obj.max_output_tokens);
+  if (maxOut !== undefined) card.max_output_tokens = maxOut;
+  return card;
+}
+
+function toCards(raw: unknown): SystemOneDiscoveredModel[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: SystemOneDiscoveredModel[] = [];
+  for (const entry of raw) {
+    const card = toDiscoveredModel(entry);
+    if (!card || seen.has(card.name)) continue;
+    seen.add(card.name);
+    out.push(card);
+  }
+  return out;
+}
+
+/**
+ * 解析 `GET /v1/models` 的 body。两种形状都吃，裸数组按元素形状归类
+ * （有 `id` 的是 OpenAI 记录，只有 `name` 的当成官方卡片）。
+ *
+ * 同名条目**合并而不是列两遍**：一个地址两种形状一起给是常态（实测某网关的
+ * `models[]` 与 `data[]` 装的是同一批模型，前者有 description，后者有 owned_by），
+ * 分开显示会让同一个模型在界面上出现两次，用户以为有两个。
+ */
+export function parseSystemOneModelListing(raw: unknown): SystemOneModelListing {
+  if (Array.isArray(raw)) {
+    const cards = toCards(raw);
+    const openAiShaped = raw.some((entry) => typeof entry === "object" && entry !== null && "id" in entry);
+    return openAiShaped ? { jev: [], others: cards } : { jev: cards, others: [] };
+  }
+  if (typeof raw !== "object" || raw === null) return { jev: [], others: [] };
+  const obj = raw as Record<string, unknown>;
+  const jev = toCards(obj.models);
+  const byName = new Map(jev.map((card) => [card.name, card]));
+  const others: SystemOneDiscoveredModel[] = [];
+  for (const card of toCards(obj.data)) {
+    const known = byName.get(card.name);
+    // 判定卡片已经有这个名字：把 OpenAI 那侧多出来的字段补上去，不新增一行。
+    if (known) {
+      if (known.owned_by === undefined && card.owned_by !== undefined) known.owned_by = card.owned_by;
+      if (known.max_input_tokens === undefined && card.max_input_tokens !== undefined) {
+        known.max_input_tokens = card.max_input_tokens;
+      }
+      if (known.max_output_tokens === undefined && card.max_output_tokens !== undefined) {
+        known.max_output_tokens = card.max_output_tokens;
+      }
+      continue;
+    }
+    others.push(card);
+  }
+  return { jev, others };
+}
+
+/** 名字里带这些词的路由，值得当作判定服务的候选。 */
+const JEV_ROUTE_HINTS = ["jev", "laya", "typesafe", "systemone"];
+
+/**
+ * 从 OpenAPI 文档里找出**可能承载 JEV 的子路径**。
+ *
+ * 为什么需要这一步：把 JEV 挂在网关后面时，判定服务往往不在根路径上 —— LiteLLM 这类
+ * 代理用 pass-through 路由转发，`/v1/models` 只列得出它自己代理的聊天模型，判定服务
+ * 藏在 `/jev/<名字>` 下面（成对出现的 `/jev/x` 与 `/jev/x/{subpath}` 就是转发前缀）。
+ * 只看 `/v1/models` 的人会得出"这台机器没有 JEV"的结论，而其实只是找错了地方。
+ *
+ * 两类都收：直接写明 `…/v1/systemone` 的前缀（最硬的证据），以及名字里带 jev / laya /
+ * typesafe 的 pass-through 前缀。返回的是相对前缀（`/jev/laya`），按证据强弱排序。
+ */
+export function findSystemOnePassthroughBases(openapi: unknown): string[] {
+  if (typeof openapi !== "object" || openapi === null) return [];
+  const paths = (openapi as { paths?: unknown }).paths;
+  if (typeof paths !== "object" || paths === null) return [];
+  const strong: string[] = [];
+  const weak: string[] = [];
+  for (const path of Object.keys(paths as Record<string, unknown>)) {
+    const explicit = /^(.*)\/v1\/systemone$/.exec(path);
+    if (explicit) {
+      const prefix = explicit[1] ?? "";
+      if (prefix && !strong.includes(prefix)) strong.push(prefix);
+      continue;
+    }
+    // pass-through 前缀：`/x/y/{subpath}` 形状，前缀里要带判定服务的字眼。
+    const forwarded = /^(.*?)\/\{[^/]+\}$/.exec(path);
+    const prefix = forwarded?.[1];
+    if (!prefix || prefix.includes("{")) continue;
+    const lower = prefix.toLowerCase();
+    if (!JEV_ROUTE_HINTS.some((hint) => lower.includes(hint))) continue;
+    if (!weak.includes(prefix)) weak.push(prefix);
+  }
+  return [...strong, ...weak.filter((p) => !strong.includes(p))];
+}
+
+// ---------------------------------------------------------------------------
 // 校验（产出 FastAPI 形状的 422 detail）
 // ---------------------------------------------------------------------------
 

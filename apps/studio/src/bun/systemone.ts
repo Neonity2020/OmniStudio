@@ -34,7 +34,11 @@ import {
   SYSTEMONE_MODELS,
   SYSTEMONE_PRICING,
   findSystemOneModel,
+  findSystemOnePassthroughBases,
+  parseSystemOneModelListing,
   systemOneAuthErrorBody,
+  type SystemOneDiscoveredModel,
+  type SystemOneModelListing,
   type SystemOneRequest,
   type SystemOneResponse,
 } from "../shared/systemone";
@@ -260,6 +264,153 @@ export async function systemOneAvailability(): Promise<SystemOneAvailability> {
     pricing: { ...SYSTEMONE_PRICING },
     models: SYSTEMONE_MODELS,
   };
+}
+
+// ---------------------------------------------------------------------------
+// 自动发现（界面上的「自动发现」按钮）
+// ---------------------------------------------------------------------------
+
+/** 一个地址上 `/v1/systemone` 的探测结论。 */
+export type SystemOneProbe =
+  /** 路由在，而且认这套协议（空请求体换回一个 422 校验错误）。 */
+  | "yes"
+  /** 路由在，但这把 Key 不让进（401/403）—— 地址没填错，是权限的事。 */
+  | "forbidden"
+  /** 这个地址上没有判定端点（404/405）。 */
+  | "no"
+  /** 没连上，或者回了个看不懂的状态。 */
+  | "unknown";
+
+/** 一个候选地址：能不能判定 + 它自己的模型清单。 */
+export type SystemOneDiscoveredBase = {
+  /** 完整地址，可以直接填进「云端 Base URL」。 */
+  base: string;
+  systemone: SystemOneProbe;
+  models: SystemOneDiscoveredModel[];
+  /** 读模型清单时发生了什么（HTTP 状态或错误），读到了就是空串。 */
+  note: string;
+};
+
+export type SystemOneDiscovery = {
+  /** 地址本身连得上（`/v1/models` 有响应，哪怕是 4xx）。 */
+  reachable: boolean;
+  base: string;
+  systemone: SystemOneProbe;
+  models: SystemOneModelListing;
+  /** 判定服务挂在子路径上时，这里是找到的候选（按证据强弱排序）。 */
+  candidates: SystemOneDiscoveredBase[];
+  /** 读不到东西时的原因，给界面直接显示。 */
+  message: string;
+};
+
+/** 发现是交互操作：用户在等，超时要短，不跟调用共用那 60 秒。 */
+const DISCOVER_TIMEOUT_MS = 12_000;
+/** 候选地址逐个探测，多了会把一次点击拖成几十秒。 */
+const MAX_CANDIDATES = 6;
+
+async function fetchJson(
+  url: string,
+  apiKey: string,
+  init?: RequestInit,
+): Promise<{ status: number; body: unknown; error: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DISCOVER_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        Accept: "application/json",
+        ...(init?.body ? { "Content-Type": "application/json" } : {}),
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...(init?.headers ?? {}),
+      },
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let body: unknown = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
+    return { status: res.status, body, error: "" };
+  } catch (e) {
+    const aborted = e instanceof Error && e.name === "AbortError";
+    return { status: 0, body: null, error: aborted ? `超时（${DISCOVER_TIMEOUT_MS} ms）` : String(e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 探一个地址认不认 `/v1/systemone`：故意发一个**空请求体**。
+ *
+ * 真的判定服务会拿校验错误（422）回绝 —— 那恰好证明路由在、协议对，而且这一下
+ * 不会产生任何判定（不花额度）。没有这个路由的服务回 404，网关拦住的回 401/403。
+ */
+async function probeSystemOne(base: string, apiKey: string): Promise<SystemOneProbe> {
+  const { status } = await fetchJson(`${base}/v1/systemone`, apiKey, { method: "POST", body: "{}" });
+  if (status === 422 || status === 400) return "yes";
+  if (status >= 200 && status < 300) return "yes";
+  if (status === 401 || status === 403) return "forbidden";
+  if (status === 404 || status === 405) return "no";
+  return "unknown";
+}
+
+async function listModels(
+  base: string,
+  apiKey: string,
+): Promise<{ listing: SystemOneModelListing; note: string }> {
+  const { status, body, error } = await fetchJson(`${base}/v1/models`, apiKey);
+  if (error) return { listing: { jev: [], others: [] }, note: error };
+  const listing = parseSystemOneModelListing(body);
+  if (status < 200 || status >= 300) {
+    return { listing, note: `HTTP ${status}` };
+  }
+  return { listing, note: "" };
+}
+
+/**
+ * 读一个地址上到底有什么：模型清单 + 判定端点在不在；根路径上没有判定端点时，
+ * 再翻一遍 `openapi.json` 找挂在子路径上的判定服务（见
+ * `findSystemOnePassthroughBases` 的注释）。
+ *
+ * 不写任何设置 —— 用户看过发现结果之后自己决定填哪个。
+ */
+export async function discoverSystemOne(input: { baseUrl: string; apiKey: string }): Promise<SystemOneDiscovery> {
+  const base = normalizeBase(input.baseUrl) || DEFAULT_CLOUD_BASE;
+  const apiKey = input.apiKey;
+  const [{ listing, note }, systemone] = await Promise.all([
+    listModels(base, apiKey),
+    probeSystemOne(base, apiKey),
+  ]);
+  const reachable = !note.startsWith("超时") && !note.startsWith("Error") && !note.startsWith("TypeError");
+  const candidates: SystemOneDiscoveredBase[] = [];
+  if (systemone !== "yes") {
+    const { body } = await fetchJson(`${base}/openapi.json`, apiKey);
+    const prefixes = findSystemOnePassthroughBases(body).slice(0, MAX_CANDIDATES);
+    for (const prefix of prefixes) {
+      const candidateBase = `${base}${prefix}`;
+      const [probe, models] = await Promise.all([
+        probeSystemOne(candidateBase, apiKey),
+        listModels(candidateBase, apiKey),
+      ]);
+      candidates.push({
+        base: candidateBase,
+        systemone: probe,
+        models: [...models.listing.jev, ...models.listing.others],
+        note: models.note,
+      });
+    }
+  }
+  logEvent({
+    level: "info",
+    source: "systemone",
+    event: "systemone.discover",
+    message: `发现 ${base}：判定端点 ${systemone}，模型 ${listing.jev.length + listing.others.length} 个，候选 ${candidates.length} 个`,
+    detail: { base, systemone, candidates: candidates.map((c) => ({ base: c.base, systemone: c.systemone })) },
+  });
+  return { reachable, base, systemone, models: listing, candidates, message: note };
 }
 
 // ---------------------------------------------------------------------------

@@ -240,7 +240,7 @@ import type {
 import * as PpOcr from "../ppocr";
 import type { PpOcrModelSize } from "../../shared/ocr";
 import * as SystemOne from "../systemone";
-import type { SystemOneAvailability } from "../systemone";
+import type { SystemOneAvailability, SystemOneDiscovery } from "../systemone";
 import * as Laya from "../systemone-laya";
 import * as SystemOneDraft from "../systemone-draft";
 import {
@@ -699,6 +699,15 @@ export type AppRPC = {
         response:
           | { ok: true; model: string; backend: string; noul: number; latencyMs: number }
           | { ok: false; status: number; message: string; backend: string | null };
+      };
+      /**
+       * 自动发现：把一个地址上有哪些模型、判定端点挂在哪读出来（不写设置）。
+       * 参数留空就用已保存的云端配置 —— 用户刚填完 Base URL 还没失焦时，界面把
+       * 正在输入的那一份直接传进来。
+       */
+      systemoneDiscover: {
+        params: { baseUrl?: string; apiKey?: string } | undefined;
+        response: SystemOneDiscovery;
       };
       clearServerLogs: {
         params: undefined;
@@ -3536,6 +3545,14 @@ const rpcRequests: NonNullable<
     if (weights?.trim()) await Laya.layaUnloadModel(weights.trim());
     SystemOne.invalidateLocalModels();
     return { ok: true };
+  },
+
+  systemoneDiscover: async (params) => {
+    const cfg = SystemOne.systemOneConfig();
+    // 界面会把正在编辑的那一份传进来（还没失焦保存）；没传就用已保存的配置。
+    const baseUrl = params?.baseUrl?.trim() || cfg.cloudBaseUrl;
+    const apiKey = params?.apiKey?.trim() || cfg.cloudApiKey;
+    return SystemOne.discoverSystemOne({ baseUrl, apiKey });
   },
 
   systemoneTest: async () => {
