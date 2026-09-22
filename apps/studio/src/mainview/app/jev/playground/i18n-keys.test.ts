@@ -1,7 +1,7 @@
 /**
- * 演练场的 i18n 守卫：这份清单 = 演练场 UI（`index.tsx` / `grid-view.tsx` /
- * `triage-view.tsx` / `run-log.tsx` / `../sidebar.tsx`）实际用到的**全部** key，
- * 以及 `scenarios.ts` 钉住的两个场景的 name / desc。
+ * 游乐场的 i18n 守卫：这份清单 = 游乐场 UI（`index.tsx` / `grid-view.tsx` /
+ * `market-view.tsx` / `breakout-view.tsx` / `run-log.tsx` / `../sidebar.tsx`）实际
+ * 用到的**全部** key，以及 `scenarios.ts` 钉住的那几个场景的 name / desc。
  *
  * 三条断言：
  *   1. key 无重复，且全部以 `jev.playground.` 开头（防止有人随手用别的前缀）；
@@ -16,7 +16,7 @@ import { expect, test } from "bun:test";
 import { translate } from "../../../../shared/i18n";
 import { PLAYGROUND_SCENARIOS } from "./scenarios";
 
-/** `playground/index.tsx` + `grid-view.tsx` + `triage-view.tsx` + `run-log.tsx` + `../sidebar.tsx` 用到的全部 key。 */
+/** `playground/index.tsx` + 三个场景的 view + `run-log.tsx` + `../sidebar.tsx` 用到的全部 key。 */
 const PLAYGROUND_UI_KEYS = [
   // 侧栏切换
   "jev.playground.view.console",
@@ -38,7 +38,6 @@ const PLAYGROUND_UI_KEYS = [
   "jev.playground.done",
   // 右栏标题 / 进度
   "jev.playground.grid.steps",
-  "jev.playground.triage.progress",
   "jev.playground.log.title",
   // 棋盘
   "jev.playground.grid.aria",
@@ -50,20 +49,6 @@ const PLAYGROUND_UI_KEYS = [
   "jev.playground.grid.legendGoal",
   "jev.playground.grid.legendWall",
   "jev.playground.grid.legendTrail",
-  // 工单
-  "jev.playground.triage.summary",
-  "jev.playground.triage.expected",
-  "jev.playground.triage.pending",
-  "jev.playground.triage.urgent",
-  "jev.playground.triage.urgent.true",
-  "jev.playground.triage.urgent.false",
-  "jev.playground.triage.confidence",
-  "jev.playground.triage.correct",
-  "jev.playground.triage.wrong",
-  "jev.playground.triage.queue.billing",
-  "jev.playground.triage.queue.technical",
-  "jev.playground.triage.queue.account",
-  "jev.playground.triage.queue.abuse",
   // 行情回放
   "jev.playground.market.symbol.shc",
   "jev.playground.market.symbol.hsi",
@@ -110,6 +95,7 @@ const PLAYGROUND_UI_KEYS = [
   "jev.playground.breakout.legendOffset",
   "jev.playground.breakout.legendTrail",
   "jev.playground.breakout.legendLeft",
+  "jev.playground.breakout.noSignal",
   // 运行日志
   "jev.playground.log.empty",
   "jev.playground.log.step",
@@ -123,9 +109,6 @@ const PLAYGROUND_UI_KEYS = [
 const PLACEHOLDERS: Record<string, string[][]> = {
   "jev.playground.progress": [["n", "total"]],
   "jev.playground.grid.steps": [["n", "max"]],
-  "jev.playground.triage.progress": [["done", "total"]],
-  "jev.playground.triage.summary": [["accuracy", "confidence", "total", "correct"]],
-  "jev.playground.triage.expected": [["queue"]],
   "jev.playground.log.step": [["n"]],
   "jev.playground.market.progress": [["done", "total"]],
   "jev.playground.market.rangeHint": [["bars", "steps", "first", "last"]],
@@ -136,6 +119,7 @@ const PLACEHOLDERS: Record<string, string[][]> = {
   "jev.playground.breakout.decisions": [["n", "max"]],
   "jev.playground.breakout.legendOffset": [["value"]],
   "jev.playground.breakout.legendLeft": [["n"]],
+  "jev.playground.breakout.noSignal": [["wasted", "steps", "confidence"]],
   "jev.playground.log.confidence": [["value"]],
 };
 
@@ -144,10 +128,7 @@ const SAMPLE_VALUES: Record<string, string> = {
   total: "8",
   max: "20",
   done: "5",
-  accuracy: "75%",
   confidence: "80%",
-  correct: "6",
-  queue: "billing",
   value: "0.902",
   bars: "60",
   steps: "59",
@@ -155,18 +136,19 @@ const SAMPLE_VALUES: Record<string, string> = {
   last: "2026-09-21",
   available: "300",
   reach: "16.0",
+  wasted: "9",
   score: "120",
   lives: "2",
 };
 
-test("演练场用到的 i18n key 无重复，且全部以 jev.playground. 开头", () => {
+test("游乐场用到的 i18n key 无重复，且全部以 jev.playground. 开头", () => {
   expect(new Set(PLAYGROUND_UI_KEYS).size).toBe(PLAYGROUND_UI_KEYS.length);
   for (const key of PLAYGROUND_UI_KEYS) {
     expect(key.startsWith("jev.playground."), `key 前缀不对: ${key}`).toBe(true);
   }
 });
 
-test("演练场用到的 i18n key 在 zh 与 en 两个字典里都存在且非空", () => {
+test("游乐场用到的 i18n key 在 zh 与 en 两个字典里都存在且非空", () => {
   const missing: string[] = [];
   for (const key of PLAYGROUND_UI_KEYS) {
     for (const lang of ["zh", "en"] as const) {
@@ -179,7 +161,7 @@ test("演练场用到的 i18n key 在 zh 与 en 两个字典里都存在且非�
   expect(missing).toEqual([]);
 });
 
-test("演练场词条的插值占位符与调用处一致（翻译后不残留 {…}）", () => {
+test("游乐场词条的插值占位符与调用处一致（翻译后不残留 {…}）", () => {
   const bad: string[] = [];
   for (const [key, paramSets] of Object.entries(PLACEHOLDERS)) {
     for (const params of paramSets) {

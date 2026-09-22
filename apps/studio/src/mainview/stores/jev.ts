@@ -36,12 +36,12 @@ type JevState = {
   exampleId: string | null;
   applyExample: (id: string) => void;
   /**
-   * 侧栏顶部的两段切换：判定台（现有编辑器）/ 演练场（自动跑一串判定）。
+   * 侧栏顶部的两段切换：判定台（现有编辑器）/ 游乐场（自动跑一串判定）。
    * 放 store 而不是 useState：切换入口在侧栏，主体在另一层组件里。
    */
   view: "console" | "playground";
   setView: (view: "console" | "playground") => void;
-  /** 演练场当前选中的场景 id（侧栏高亮用）；还没点过任何场景时是 null。 */
+  /** 游乐场当前选中的场景 id（侧栏高亮用）；还没点过任何场景时是 null。 */
   scenarioId: string | null;
   setScenarioId: (id: string | null) => void;
   /**

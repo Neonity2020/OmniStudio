@@ -1,5 +1,5 @@
 /**
- * 演练场（Playground）的两个内置场景 —— **纯逻辑层**。
+ * 游乐场（Playground）的内置场景 —— **纯逻辑层**。
  *
  * 与侧栏内置示例（`../examples.ts`）的分工：那边是"给编辑器装一份请求"，这里是
  * "自动跑完一串判定，把每一步摊开看"。所以本文件只有纯函数：局面推进、请求构造、
@@ -7,7 +7,7 @@
  * `rpcClient.systemoneRun` 并拿这里的数据来渲染。
  *
  * **发给模型的文本一律英文**：JEV 官方模型卡写明主训练语言是英语，CJK 准确率明显更低。
- * 演练场要展示模型的"真实表现"，场景数据里掺中文会把展示结果拖下水；界面文案才走 i18n
+ * 游乐场要展示模型的"真实表现"，场景数据里掺中文会把展示结果拖下水；界面文案才走 i18n
  * 双语（`nameKey` / `descKey`，Task 3 补文案）。
  *
  * 注意 RPC 侧 `state` 的参数类型是 `string`：这里的序列化函数返回对象（协议本身允许
@@ -15,7 +15,6 @@
  */
 import type {
   SystemOneChoiceQuestion,
-  SystemOneNoulQuestion,
   SystemOneQuestions,
   SystemOneScoreQuestion,
 } from "../../../../shared/systemone";
@@ -328,178 +327,11 @@ export function applyMove(state: GridRunnerState, direction: GridDirection): Gri
 }
 
 // ---------------------------------------------------------------------------
-// 场景 B：ticket-triage（工单分派 —— 批量分类，可算准确率）
-//
-// 8 条真实风格短句覆盖四个队列（每类 2 条），每条带 `expectedQueue` 标准答案，
-// 跑完可以算准确率与平均置信度 —— 这是 JEV"类型化判定"最典型的卖点。
-// ---------------------------------------------------------------------------
-
-export type TicketQueue = "billing" | "technical" | "account" | "abuse";
-
-export type Ticket = {
-  id: number;
-  subject: string;
-  body: string;
-  /** 标准答案（界面据此标对错）。 */
-  expectedQueue: TicketQueue;
-};
-
-export const TICKET_QUEUES: readonly TicketQueue[] = ["billing", "technical", "account", "abuse"];
-
-export const TICKET_QUEUE_DESCRIPTIONS: Record<TicketQueue, string> = {
-  billing: "Charges, invoices, payments, refunds or subscription plans.",
-  technical: "Bugs, crashes, outages or integration problems.",
-  account: "Sign-in, passwords, profile, email changes or account access.",
-  abuse: "Harassment, threats, spam, or misuse of the platform.",
-};
-
-export const TICKETS: readonly Ticket[] = [
-  {
-    id: 1,
-    subject: "Double charged on my Pro subscription",
-    body:
-      "My card was charged twice for the Pro plan on the 3rd, and I still only have one subscription active. Please refund the duplicate charge.",
-    expectedQueue: "billing",
-  },
-  {
-    id: 2,
-    subject: "API returns 500 errors since this morning",
-    body:
-      "Since 09:40 UTC the /v1/records endpoint returns 500 for every request. Retrying does not help, and the status page looks fine on your side.",
-    expectedQueue: "technical",
-  },
-  {
-    id: 3,
-    subject: "Cannot reset my password",
-    body:
-      "The reset email never arrives, both in my inbox and spam folder. I am completely locked out of my account and I need access back today.",
-    expectedQueue: "account",
-  },
-  {
-    id: 4,
-    subject: "User is spamming all project channels",
-    body:
-      "A user named 'dealz2024' is posting the same spam link in every shared channel and ignoring two moderator warnings. Please suspend the account.",
-    expectedQueue: "abuse",
-  },
-  {
-    id: 5,
-    subject: "Refund not received after 3 weeks",
-    body:
-      "I was promised a refund on the 10th, it was marked complete in your system, but the money never reached my card. Three weeks have already passed.",
-    expectedQueue: "billing",
-  },
-  {
-    id: 6,
-    subject: "Export button crashes the web app",
-    body:
-      "Clicking 'Export CSV' on the reports page freezes the whole app and eventually throws a blank white screen. Chrome, Firefox and Safari are all affected.",
-    expectedQueue: "technical",
-  },
-  {
-    id: 7,
-    subject: "My email was changed without consent",
-    body:
-      "I never requested a change, but the account is now sending notifications to a different email address. I believe my account was compromised.",
-    expectedQueue: "account",
-  },
-  {
-    id: 8,
-    subject: "Threats in the public forum",
-    body:
-      "Someone is posting personal details about a community member and telling them to 'leave town'. This has been going on for two days and the member is scared.",
-    expectedQueue: "abuse",
-  },
-];
-
-/** 单条工单 → JEV 的 `state`（英文对象）。 */
-export function ticketState(ticket: Ticket): Record<string, unknown> {
-  return {
-    task: "Support ticket triage",
-    description:
-      "Classify the customer ticket into the queue that should handle it, and judge how urgent it is. " +
-      "Answer from the ticket text only.",
-    ticket_id: ticket.id,
-    subject: ticket.subject,
-    body: ticket.body,
-  };
-}
-
-/** 单条工单 → `questions`：队列归类（choice）+ 是否紧急（noul）。 */
-export function ticketQuestions(ticket: Ticket): SystemOneQuestions {
-  return {
-    queue: ticketQueueQuestion(ticket),
-    urgent: ticketUrgencyQuestion(ticket),
-  };
-}
-
-export function ticketQueueQuestion(_ticket: Ticket): SystemOneChoiceQuestion {
-  return {
-    type: "choice",
-    instructions:
-      "Which support queue should handle this ticket? Pick exactly one queue; use the descriptions to decide, " +
-      "and choose the queue that owns the main problem, not the most recent sentence.",
-    criteria: {
-      billing: TICKET_QUEUE_DESCRIPTIONS.billing,
-      technical: TICKET_QUEUE_DESCRIPTIONS.technical,
-      account: TICKET_QUEUE_DESCRIPTIONS.account,
-      abuse: TICKET_QUEUE_DESCRIPTIONS.abuse,
-    },
-  };
-}
-
-export function ticketUrgencyQuestion(_ticket: Ticket): SystemOneNoulQuestion {
-  return {
-    type: "noul",
-    instructions:
-      "Is this ticket urgent, meaning it should jump ahead of ordinary tickets in its queue? " +
-      "Base the answer on the ticket text only.",
-    criteria: {
-      true: "Money, legal, security or data loss is already happening, or the customer is fully blocked with no workaround.",
-      false: "A normal request a human or the queue can handle in ordinary order.",
-    },
-  };
-}
-
-/**
- * 批量统计（纯函数）。
- *
- * 给一组 `{ expected, actual, confidence }`（actual 是模型选出的队列名，confidence
- * 是 choice 答案的置信度），返回总数 / 正确数 / 准确率 / 平均置信度。
- * 空列表：accuracy 与 meanConfidence 都给 0 —— 调用方用 `total === 0` 自己判"没有数据"，
- * 这里不返回 NaN（NaN 会把下游的展示和测试一起带崩）。
- */
-export type TriageOutcome = {
-  expected: string;
-  actual: string;
-  /** 0..1（choice 答案的置信度）。 */
-  confidence: number;
-};
-
-export type TriageStats = {
-  total: number;
-  correct: number;
-  /** 0..1；total 为 0 时是 0。 */
-  accuracy: number;
-  /** 0..1；total 为 0 时是 0。 */
-  meanConfidence: number;
-};
-
-export function triageStats(outcomes: readonly TriageOutcome[]): TriageStats {
-  const total = outcomes.length;
-  const correct = outcomes.filter((outcome) => outcome.expected === outcome.actual).length;
-  const accuracy = total > 0 ? correct / total : 0;
-  const meanConfidence =
-    total > 0 ? outcomes.reduce((sum, outcome) => sum + outcome.confidence, 0) / total : 0;
-  return { total, correct, accuracy, meanConfidence };
-}
-
-// ---------------------------------------------------------------------------
 // 场景 C：market-replay（行情回放 —— 连续决策 + 可算成绩 + 用户给的条件）
 //
 // 一根真实日线 = 一次判定：问方向（choice）与风险档位（score）。信号在**收盘时**
 // 给出，收益按**下一根**的收盘算 —— 这样既不偷看未来，也不需要盘中数据。
-// 跑完可以拿策略净值和"买入持有"对照：这是演练场里唯一一个有客观外部基准的场景。
+// 跑完可以拿策略净值和"买入持有"对照：这是游乐场里唯一一个有客观外部基准的场景。
 //
 // 用户可以写一段自己的策略（可留空）。它作为 `state.strategy` 单独一个字段进去，
 // instructions 里点名说"这是交易者写下的偏好"—— 不是把它拼进 instructions 正文：
@@ -518,7 +350,7 @@ export const MARKET_FEE = 0.0005;
 
 /**
  * 风险档位（`score` 问题）。**有序**，档位号就是下标 —— 0 最平静、3 最紧张。
- * 演练场里前两个场景都没用上 `score`，这里补上协议的第三种问题类型。
+ * 游乐场里前两个场景都没用上 `score`，这里补上协议的第三种问题类型。
  */
 export const MARKET_RISK_LEVELS: readonly string[] = [
   "Calm: small range, volume near its average, price sitting close to the 20-day average.",
@@ -836,7 +668,7 @@ export function marketStats(state: MarketReplayState): MarketStats {
 // 场景 D：breakout（打砖块 —— 实时闭环）
 //
 // 与前三个场景的根本区别：**世界自己在动**。球每一帧都在飞，判定只在每隔
-// `decideEvery` 帧发生一次 —— 一次判定要管住接下来的那几帧。这是演练场里第一个
+// `decideEvery` 帧发生一次 —— 一次判定要管住接下来的那几帧。这是游乐场里第一个
 // "模型跟不上就真的会漏球"的场景，也是唯一一个把「判定频率」本身做成可调参数的。
 //
 // 一次 `advance()` = 一次判定 + 按这个动作推进 `decideEvery` 帧。帧推进是纯函数，
@@ -1282,11 +1114,6 @@ export const PLAYGROUND_SCENARIOS: readonly PlaygroundScenario[] = [
     id: "grid-runner",
     nameKey: "jev.playground.gridRunner.name",
     descKey: "jev.playground.gridRunner.desc",
-  },
-  {
-    id: "ticket-triage",
-    nameKey: "jev.playground.ticketTriage.name",
-    descKey: "jev.playground.ticketTriage.desc",
   },
   {
     id: "market-replay",

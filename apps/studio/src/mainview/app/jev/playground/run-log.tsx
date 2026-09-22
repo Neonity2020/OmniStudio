@@ -3,7 +3,7 @@
  *
  * 一行 = 一次 `systemoneRun`：步号、问题名、模型的选择、置信度、概率分布条
  *（画法与 `../answers.tsx` 的 `ProbabilityBar` 一致，但那个文件是判定台的
- * 组件，不能为了演练场动它）、以及这一步的耗时（调用前后各取一次
+ * 组件，不能为了游乐场动它）、以及这一步的耗时（调用前后各取一次
  * `performance.now()`，差值取整）。
  */
 import { useEffect, useRef } from "react";

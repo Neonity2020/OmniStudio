@@ -27,9 +27,9 @@ import { QuestionEditor } from "./questions";
 import { buildCallExample, buildQuestions } from "./drafts";
 
 /**
- * 侧栏顶部的两段切换：判定台（`JevConsole`）/ 演练场（`JevPlayground`）。
+ * 侧栏顶部的两段切换：判定台（`JevConsole`）/ 游乐场（`JevPlayground`）。
  * 分叉必须在这一层：判定台自己有一批 hook，若在它内部按 view 提前 return，
- * 切到演练场的那次渲染就会少跑一批 hook（Rendered fewer hooks than expected）。
+ * 切到游乐场的那次渲染就会少跑一批 hook（Rendered fewer hooks than expected）。
  */
 export function JevScreen() {
   const view = useJevStore((s) => s.view);

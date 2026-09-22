@@ -1,11 +1,11 @@
 /**
- * 演练场的运行回归测试。
+ * 游乐场的运行回归测试。
  *
  * 盯住一件事：**「开始」必须真的一步步往前走**。
  *
  * 第一版里 `advance` 从 React state 读局面，而「开始」是在一个闭包里连着调它的 ——
  * 整轮循环读到的都是点下按钮那一刻的那一份，于是每一步都基于同一个旧局面：棋子
- * 原地不动、工单永远在判第一条，界面上看起来像"模型每次都选一样的方向"，很难
+ * 原地不动、行情永远停在第一根，界面上看起来像"模型每次都选一样的方向"，很难
  * 想到是循环的问题。这种错只有把组件挂起来连跑几步才抓得到。
  */
 import { afterAll, expect, mock, test } from "bun:test";
@@ -39,13 +39,19 @@ mock.module("@lib/rpc", () => ({
     systemoneStatus: async () => ({ resolved: "cloud", backend: "cloud", cloudConfigured: true, localModels: [], models: [], pricing: { inputPerMTok: 0, outputPerMTok: 0 } }),
     /**
      * 一个会走路的假模型。网格：先往下、再往右 —— 8 步到终点（绕开 (1,2) / (2,3)）；
-     * 工单：随手挑 criteria 里的第一个队列。两个场景共用一个 mock，按问题名分流。
+     * 其余场景：随手挑 criteria 里的第一个选项。各场景共用一个 mock，按问题名分流。
      */
     systemoneRun: async ({ state, questions }: { state: string; questions: Record<string, { type: string; criteria?: Record<string, unknown> }> }) => {
       const answers: Record<string, unknown> = {};
       for (const [name, question] of Object.entries(questions)) {
         if (question.type === "noul") {
           answers[name] = { type: "noul", noul: 0.8 };
+          continue;
+        }
+        if (question.type === "score") {
+          // 打分题必须答成 score：答成 choice 的话，`runOnce` 会拿它把同一次调用里
+          // 真正的 choice 答案顶掉（它是按 answer.type 分拣的）。
+          answers[name] = { type: "score", score: 1, confidence: 0.5, legend: {}, probabilities: { "1": 0.5 } };
           continue;
         }
         const options = Object.keys(question.criteria ?? {});
@@ -171,15 +177,18 @@ test("「单步」只走一步，棋子换了格子", async () => {
   }
 });
 
-test("工单分派：连着跑会一条条往下判，而不是反复判第一条", async () => {
-  useJevStore.getState().setScenarioId("ticket-triage");
+test("行情回放：连着跑会一根根往前走，而不是反复判第一根", async () => {
+  useJevStore.getState().setScenarioId("market-replay");
+  // 掐一小段（几根日线）—— 这条测试要的是"会不会往前走"，不是跑满一整段区间。
+  useJevStore.getState().setMarketSymbol("shc");
+  useJevStore.getState().setMarketRange({ from: "2024-01-02", to: "2024-01-10" });
   const { container, unmount } = await mountPlayground();
   try {
     await act(async () => {
       button(container, zh("jev.playground.start")).click();
     });
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS * 10));
+      await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS * 12));
     });
     const text = container.textContent ?? "";
     expect(text).toContain(zh("jev.playground.done"));
@@ -302,7 +311,7 @@ test("图元是图标不是文字（一格几毫米宽时文字糊成一团）",
 
 test("模型一直撞墙时界面直说「这个模型没信号」", async () => {
   // 实测过的场景：某个判定模型在这题上 20 步全撞在同一堵墙上，概率四个方向几乎
-  // 均分。那时候界面只看得到棋子在原地顶，用户会以为是演练场坏了 —— 必须说出来。
+  // 均分。那时候界面只看得到棋子在原地顶，用户会以为是游乐场坏了 —— 必须说出来。
   mood = "always-left";
   seen.length = 0;
   useJevStore.getState().setScenarioId("grid-runner");

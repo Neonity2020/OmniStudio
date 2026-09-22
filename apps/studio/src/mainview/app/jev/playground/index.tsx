@@ -1,12 +1,11 @@
 /**
- * 演练场主体：左侧是场景说明 + 运行控制（开始 / 单步 / 重置）+ 后端状态，
+ * 游乐场主体：左侧是场景说明 + 运行控制（开始 / 单步 / 重置）+ 后端状态，
  * 右侧是场景可视化与逐步运行日志。布局沿用 JEV 页：左栏 380px、右栏产物。
  *
  * 运行逻辑（「单步」与「开始」共用同一个 `advance`，后者就是循环调它）：
  *   - 每步只发一次 `rpcClient.systemoneRun`（state 必须 `JSON.stringify` ——
  *     这条 RPC 的参数类型是 string，`scenarios.ts` 返回的是对象）；
  *   - grid：一个 choice，跑完一步推进局面，直到 `over`（到达终点或 20 步上限）；
- *   - triage：一条工单两个问题（choice + noul），顺序跑完 8 条；
  *   - 任何一步失败就停下并把错误显示出来（后端没配好是最常见的情况）；
  *   - 「开始」连续跑完，「单步」跑一步停住；「重置」或组件卸载时置 cancel 标志，
  *     循环在每步之间的 await 处检查（await 天然让出控制权，不需要别的机制）。
@@ -36,18 +35,13 @@ import {
   gridChoiceQuestion,
   gridRunnerState,
   PLAYGROUND_SCENARIOS,
-  TICKETS,
-  ticketQuestions,
-  ticketState,
   type GridRunnerState,
-  triageStats,
 } from "./scenarios";
 import { GridView, type GridMoveMark } from "./grid-view";
 
 /** 每步之间的停顿：和棋子那段 220ms 过渡对齐，刚好看清它从哪格挪到哪格。 */
 export const STEP_PAUSE_MS = 260;
 import { RunLog, type RunLogEntry } from "./run-log";
-import { TriageView, type TriageRow } from "./triage-view";
 import { MarketView, type MarketMark } from "./market-view";
 import { BreakoutView } from "./breakout-view";
 import {
@@ -65,6 +59,8 @@ import {
   BREAKOUT_EVERY_MAX,
   BREAKOUT_EVERY_MIN,
   BREAKOUT_MAX_DECISIONS,
+  BREAKOUT_PADDLE_W,
+  BREAKOUT_W,
   type BreakoutAction,
   type BreakoutFrame,
   type BreakoutState,
@@ -139,7 +135,6 @@ export function JevPlayground() {
   // ---------- 运行现场（两个场景各一份；重置 / 换场景时整体重建） ----------
   const [gridState, setGridState] = useState<GridRunnerState>(() => newGridRunner({ size: gridSize, walls: gridWalls }));
   const [trail, setTrail] = useState<[number, number][]>([]);
-  const [triageRows, setTriageRows] = useState<TriageRow[]>(() => TICKETS.map((ticket) => ({ ticket })));
   const [marketState, setMarketState] = useState<MarketReplayState>(() =>
     newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }),
   );
@@ -159,7 +154,7 @@ export function JevPlayground() {
    * 这一局里"白走"的步数与置信度之和。
    *
    * 为什么要专门统计：判定模型选错了方向，界面上只看得到棋子在撞墙，看起来像
-   * 演练场坏了。实测过同一套请求在三个判定模型上的差别——有的 8 步走到终点，
+   * 游乐场坏了。实测过同一套请求在三个判定模型上的差别——有的 8 步走到终点，
    * 有的 20 步全撞在同一堵墙上，概率还几乎均分（四个方向各 25% 上下）。
    * 那不是场景的问题，是这个模型对这类题没有信号，得换一个模型，所以这里把
    * "撞了几步、置信度多低"数出来，到了阈值就直说。
@@ -181,7 +176,6 @@ export function JevPlayground() {
    * 下一步才拿得到刚走完的局面。
    */
   const gridRef = useRef(gridState);
-  const rowsRef = useRef(triageRows);
   const marketRef = useRef(marketState);
   const breakoutRef = useRef(breakout);
   const putGrid = (next: GridRunnerState) => {
@@ -196,10 +190,6 @@ export function JevPlayground() {
     breakoutRef.current = next;
     setBreakout(next);
   };
-  const putRows = (next: TriageRow[]) => {
-    rowsRef.current = next;
-    setTriageRows(next);
-  };
 
   // 换场景、改盘面 = 重置运行现场（回到未开始状态）。盘面变了还接着上一局跑，
   // 轨迹与障碍就对不上了 —— 那是比"设置没生效"更难看懂的状态。
@@ -207,7 +197,6 @@ export function JevPlayground() {
     cancelRef.current = false;
     putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
-    putRows(TICKETS.map((ticket) => ({ ticket })));
     putMarket(newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }));
     setMarks([]);
     putBreakout(newBreakout({ decideEvery: breakoutEvery }));
@@ -342,6 +331,17 @@ export function JevPlayground() {
       const move = applyBreakoutAction(game, action);
       putBreakout(move.next);
       setBallFrames(move.frames);
+      // "白推"：板子已经顶在那一侧的墙上，还往那边推 —— 这一整段板子一动不动。
+      // 和网格场景数"撞墙"是同一件事：界面上只看得到板子卡在边上，得有个数说明
+      // 那不是画面坏了，是模型对这类题没信号。
+      const stuck =
+        (action === "left" && game.paddleX <= 2.001) ||
+        (action === "right" && game.paddleX >= BREAKOUT_W - BREAKOUT_PADDLE_W - 2.001);
+      setTally((prev) => ({
+        steps: prev.steps + 1,
+        wasted: prev.wasted + (stuck ? 1 : 0),
+        confidence: prev.confidence + (choice?.confidence ?? 0),
+      }));
       setLog((prev) => [
         ...prev,
         {
@@ -356,64 +356,8 @@ export function JevPlayground() {
       return move.next.over ? "finished" : "continue";
     }
 
-    // ticket-triage：一条工单两个问题（一次调用带回来）。
-    const rows = rowsRef.current;
-    const nextIndex = rows.findIndex((row) => row.choice === undefined);
-    if (nextIndex === -1) return "finished";
-    const ticket = rows[nextIndex]!.ticket;
-    const outcome = await runOnce(ticketState(ticket), ticketQuestions(ticket), ["queue", "urgent"]);
-    if (!outcome.ok) {
-      setError({ status: outcome.status, message: outcome.message });
-      return "error";
-    }
-    if (cancelRef.current) return "cancelled";
-    const choice = outcome.choice;
-    const noul = outcome.noul;
-    // 「到这一步为止」的已完成行（含当前这条）→ 批量统计给当前行；
-    // triageStats 是纯函数，每步重算一次（8 条以内）便宜。
-    const completed = rows.slice(0, nextIndex).flatMap((row) =>
-      row.choice === undefined
-        ? []
-        : [{ expected: row.ticket.expectedQueue, actual: row.choice, confidence: row.confidence ?? 0 }],
-    );
-    completed.push({ expected: ticket.expectedQueue, actual: choice?.choice ?? "", confidence: choice?.confidence ?? 0 });
-    const stats = triageStats(completed);
-    putRows(
-      rows.map((row, index) =>
-        index === nextIndex
-          ? {
-              ...row,
-              choice: choice?.choice,
-              urgent: noul ? noul.noul >= 0.5 : undefined,
-              confidence: choice?.confidence,
-              stats,
-            }
-          : row,
-      ),
-    );
-    setLog((prev) => {
-      // 同上：一条工单两个问题，步号要按"第几条工单"数。
-      const step = nextIndex + 1;
-      return [
-        ...prev,
-        {
-          step,
-          question: "queue",
-          choice: choice?.choice ?? "—",
-          confidence: choice?.confidence,
-          probabilities: choice?.probabilities ?? {},
-          ms: outcome.ms,
-        },
-        {
-          step,
-          question: "urgent",
-          choice: noul ? String(noul.noul >= 0.5) : "—",
-          probabilities: noul ? { true: noul.noul, false: 1 - noul.noul } : {},
-          ms: outcome.ms,
-        },
-      ];
-    });
-    return "continue";
+    // 到这儿说明是个没人认领的场景 id（清单里删掉过的老 id 还留在 store 里时会发生）。
+    return "finished";
   };
 
   /** 「单步」：跑一步停住（失败 / 结束也算停住）。 */
@@ -456,7 +400,6 @@ export function JevPlayground() {
     cancelRef.current = true;
     putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
-    putRows(TICKETS.map((ticket) => ({ ticket })));
     putMarket(newMarketReplay({ symbol: marketSymbol, from: marketFrom, to: marketTo, strategy: marketStrategy }));
     setMarks([]);
     putBreakout(newBreakout({ decideEvery: breakoutEvery }));
@@ -483,25 +426,25 @@ export function JevPlayground() {
    * 是判定模型，不是运气。四步是门槛：前两三步撞一下很正常，模型本来就允许试错。
    */
   const noSignal = tally.steps >= 4 && tally.wasted / tally.steps >= 0.5;
+  /**
+   * 打砖块版的同一件事：一半以上的判定都在把板子往已经顶死的那一侧推。
+   * 门槛放到 8 次 —— 开局球在上面飞，前几次往一边靠是正常的。
+   */
+  const breakoutNoSignal = tally.steps >= 8 && tally.wasted / tally.steps >= 0.5;
 
-  const answered = triageRows.filter((row) => row.choice !== undefined).length;
   const marketTotal = marketSteps(marketState);
   const stepNumber =
     scenario.id === "grid-runner"
       ? gridState.steps + 1
       : scenario.id === "market-replay"
         ? marketState.index + 1
-        : scenario.id === "breakout"
-          ? breakout.decisions + 1
-          : answered + 1;
+        : breakout.decisions + 1;
   const totalSteps =
     scenario.id === "grid-runner"
       ? gridState.maxSteps
       : scenario.id === "market-replay"
         ? marketTotal
-        : scenario.id === "breakout"
-          ? BREAKOUT_MAX_DECISIONS
-          : TICKETS.length;
+        : BREAKOUT_MAX_DECISIONS;
   // 用户选的区间里到底有多少根、是不是被上限截过 —— 下面的提示要如实说清楚。
   const marketWindow = clampMarketWindow(marketSymbol, marketFrom, marketTo);
   const marketSpanDates = marketSpan(marketSymbol);
@@ -578,10 +521,20 @@ export function JevPlayground() {
           </div>
         ) : null}
 
-        {/* 模型对这类题没信号时直说 —— 否则界面上只看得到棋子在撞墙。 */}
-        {noSignal ? (
+        {/* 模型对这类题没信号时直说 —— 否则界面上只看得到棋子在撞墙 / 板子卡在边上。 */}
+        {scenario.id === "grid-runner" && noSignal ? (
           <div className="jev-note warn">
             {t("jev.playground.noSignal", {
+              wasted: String(tally.wasted),
+              steps: String(tally.steps),
+              confidence: (tally.confidence / Math.max(1, tally.steps)).toFixed(3),
+            })}
+          </div>
+        ) : null}
+
+        {scenario.id === "breakout" && breakoutNoSignal ? (
+          <div className="jev-note warn">
+            {t("jev.playground.breakout.noSignal", {
               wasted: String(tally.wasted),
               steps: String(tally.steps),
               confidence: (tally.confidence / Math.max(1, tally.steps)).toFixed(3),
@@ -718,24 +671,21 @@ export function JevPlayground() {
             <span className="jev-pill">
               {t("jev.playground.market.progress", { done: String(marketState.index), total: String(marketTotal) })}
             </span>
-          ) : scenario.id === "breakout" ? (
+          ) : (
             <span className="jev-pill">
               {t("jev.playground.breakout.progress", {
                 score: String(breakout.score),
                 lives: String(breakout.lives),
               })}
             </span>
-          ) : (
-            <span className="jev-pill">
-              {t("jev.playground.triage.progress", { done: String(answered), total: String(TICKETS.length) })}
-            </span>
           )}
         </div>
 
         {/*
-          可视化区**不滚动**：棋盘按可用空间缩放（见 GridView），工单列表自己滚。
-          这里以前是 overflow-y-auto + 下面的日志没有高度上限，日志一长就把棋盘挤没了 ——
-          看着像"日志盖住了棋盘"。现在日志的高度被钉在下面那一截里，棋盘永远占着剩下的空间。
+          可视化区**不滚动**：棋盘与球场按可用空间缩放（见 GridView / BreakoutView），
+          行情那张图自己滚。这里以前是 overflow-y-auto + 下面的日志没有高度上限，日志一长
+          就把棋盘挤没了 —— 看着像"日志盖住了棋盘"。现在日志的高度被钉在下面那一截里，
+          可视化永远占着剩下的空间。
         */}
         <div className="min-h-0 flex-1 overflow-hidden">
           {scenario.id === "grid-runner" ? (
@@ -744,12 +694,8 @@ export function JevPlayground() {
             <div className="h-full overflow-y-auto">
               <MarketView state={marketState} marks={marks} />
             </div>
-          ) : scenario.id === "breakout" ? (
-            <BreakoutView state={breakout} frames={ballFrames} />
           ) : (
-            <div className="h-full overflow-y-auto">
-              <TriageView rows={triageRows} />
-            </div>
+            <BreakoutView state={breakout} frames={ballFrames} />
           )}
         </div>
 

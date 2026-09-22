@@ -279,9 +279,9 @@ test("点侧栏示例：state 与问题一起换掉（这页最主要的使用�
   }
 });
 
-test("判定台 ↔ 演练场来回切都不炸（守住 React #300 那一类钩子数量变化）", async () => {
-  // 真实路径：侧栏点「演练场」只改 store 里的 view，页面原地重渲染 —— 不是重新挂载。
-  // 分叉曾写在判定台组件内部（读完 view 就 return 演练场），于是切过去的那一帧
+test("判定台 ↔ 游乐场来回切都不炸（守住 React #300 那一类钩子数量变化）", async () => {
+  // 真实路径：侧栏点「游乐场」只改 store 里的 view，页面原地重渲染 —— 不是重新挂载。
+  // 分叉曾写在判定台组件内部（读完 view 就 return 游乐场），于是切过去的那一帧
   // 少跑了后面十几个钩子：React #300「Rendered fewer hooks than expected」，
   // 整页被错误边界吃掉，连切回来都不行。所以这里必须在同一次挂载里来回切。
   useJevStore.getState().setView("console");
@@ -291,7 +291,7 @@ test("判定台 ↔ 演练场来回切都不炸（守住 React #300 那一类钩
     await act(async () => {
       useJevStore.getState().setView("playground");
     });
-    // 没选场景时演练场是空态 —— 能看到这行字就说明它真的渲染出来了。
+    // 没选场景时游乐场是空态 —— 能看到这行字就说明它真的渲染出来了。
     expect(container.textContent ?? "").toContain(zh("jev.playground.empty"));
     // 切回去同样是重渲染，判定台的钩子得一个不少地回来。
     await act(async () => {
