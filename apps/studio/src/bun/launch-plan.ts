@@ -15,8 +15,7 @@
  * 校验（文件被换掉但名字不变时 mtime 兜住；stat 失败不丢弃计划——文件可能在网络盘上）。
  * 只保留最近 4 条，Map 的插入顺序天然就是 LRU（命中时移到队尾）。
  */
-import { lstatSync, statSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { getSetting, type SettingsKey } from "./db/settings";
 import { logEvent } from "./app-log";

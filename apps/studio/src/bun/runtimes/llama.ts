@@ -5,8 +5,12 @@ import { EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { parseComputeBufferBytes, parseFlashAttnState, parseKvCacheBytes } from "../../shared/llama-log";
 import { logEvent } from "../app-log";
-import { getSetting, setServerFlashAttnEffective, type SettingsKey } from "../db/settings";
-import { FLASH_ATTN_SETTING_VALUES } from "../db/settings";
+import {
+  EMBEDDING_POOLING_VALUES,
+  getSetting,
+  setServerFlashAttnEffective,
+  type SettingsKey,
+} from "../db/settings";
 import {
   buildLaunchPlanKeyFromSettings,
   cachedLaunchPlan,
@@ -428,41 +432,76 @@ export class LlamaRuntime implements Runtime {
     // llama.cpp 的端口设置键就是 SERVER_PORT（见 shared/engines.ts）。
     // 嵌入实例（purpose=embedding）回落到嵌入端口段（EMBEDDING_PORT，默认 18190），
     // 不碰聊天默认端点；聊天实例保持 SERVER_PORT 不变。
+    const cleanNum = (raw: string, fallback: string): string => {
+      const n = Number(raw);
+      return raw.trim() !== "" && Number.isFinite(n) && n >= 0 && Number.isSafeInteger(n)
+        ? String(n)
+        : fallback;
+    };
+    // 数值型设置（ctx / batch / parallel / port / …）的注入防御：这些值会原样进 argv，而
+    // 设置行可能被手改数据库 / 旧版本写入，所以统一收一遍 —— 解析不出有限非负整数就丢弃
+    // （空串保持空，让 `|| 档案默认` 兜底；非法值同样落回默认而不是把字符串塞给引擎）。
     const embedding = this.overrides.purpose === "embedding";
     const port = this.overrides.port ?? (embedding
-      ? (getSetting("EMBEDDING_PORT") || String(EMBEDDING_PORT_BASE))
-      : (getSetting("SERVER_PORT") || "8080"));
+      ? cleanNum(getSetting("EMBEDDING_PORT") || "", String(EMBEDDING_PORT_BASE))
+      : cleanNum(getSetting("SERVER_PORT") || "", "8080"));
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     // 自动启动参数（SERVER_AUTO_TUNE，默认关）：有计划时 --ctx-size / --batch-size /
     // --ubatch-size（仅聊天实例）用计划值；--parallel 仍用设置值（并发是用户的业务选择），
     // --cache-type-k/-v 保持设置值（它们参与计划 key 的计算，改了自然重算）。
     const autoPlan = this.autoPlan(model);
-    const ctxSize = autoPlan ? String(autoPlan.ctxTokens) : getSetting("SERVER_CTX_SIZE") || String(serverArgs.ctxSize);
-    const imageMaxTokens = getSetting("SERVER_IMAGE_MAX_TOKENS") || String(serverArgs.imageMaxTokens);
-    const batchSize = autoPlan ? String(autoPlan.batch) : getSetting("SERVER_BATCH_SIZE") || String(serverArgs.batchSize);
-    const ubatchSize = autoPlan ? String(autoPlan.ubatch) : getSetting("SERVER_UBATCH_SIZE") || String(serverArgs.ubatchSize);
-    const parallel = getSetting("SERVER_PARALLEL") || String(serverArgs.parallel);
+    const ctxSize = autoPlan
+      ? String(autoPlan.ctxTokens)
+      : cleanNum(getSetting("SERVER_CTX_SIZE") || "", String(serverArgs.ctxSize));
+    const imageMaxTokens = cleanNum(
+      getSetting("SERVER_IMAGE_MAX_TOKENS") || "",
+      String(serverArgs.imageMaxTokens),
+    );
+    const batchSize = autoPlan
+      ? String(autoPlan.batch)
+      : cleanNum(getSetting("SERVER_BATCH_SIZE") || "", String(serverArgs.batchSize));
+    const ubatchSize = autoPlan
+      ? String(autoPlan.ubatch)
+      : cleanNum(getSetting("SERVER_UBATCH_SIZE") || "", String(serverArgs.ubatchSize));
+    const parallel = cleanNum(getSetting("SERVER_PARALLEL") || "", String(serverArgs.parallel));
     const temp = getSetting("SERVER_TEMP") || String(serverArgs.temp);
     const topP = getSetting("SERVER_TOP_P") || String(serverArgs.topP);
     // 采样参数一律「设置优先、模型档案兜底」：设置页显示的就是实际发出去的那份。
     // 用 || 而不是 ?? 是因为空字符串表示「没设过」，要落回档案的默认值。
     const topK = getSetting("SERVER_TOP_K") || String(serverArgs.topK);
     const repeatPenalty = getSetting("SERVER_REPEAT_PENALTY") || String(serverArgs.repeatPenalty);
-    const gpuLayers = getSetting("SERVER_GPU_LAYERS");
     // 「自动（全卸载）」哨兵值：与 llama.cpp 引擎自身的 -1 同值（不传参数 = 引擎自己决定），
     // 这里额外接受 "" / "auto" 作为同义写法 —— 自动推算的 gpuLayers 建议只在用户没
-    // 显式指定时采纳（哨兵 → 计划值；具体数字 → 听用户的）。
-    const gpuAuto = gpuLayers === "-1" || gpuLayers === "" || gpuLayers.toLowerCase() === "auto";
-    const cacheTypeK = getSetting("SERVER_CACHE_TYPE_K") || "q8_0";
-    const cacheTypeV = getSetting("SERVER_CACHE_TYPE_V") || "q8_0";
-    // 池化方式：设置键（set 时枚举校验，见 db/settings.ts）回落 "last"。
-    const pooling = getSetting("EMBEDDING_POOLING") || "last";
+    // 显式指定时采纳（哨兵 → 计划值；具体数字 → 听用户的）。具体数字要能被解析成
+    // 有限整数才进 argv（手改设置行塞进来的垃圾值丢弃，行为等同哨兵 = 引擎自己决定）。
+    const rawGpuLayers = getSetting("SERVER_GPU_LAYERS");
+    const gpuAuto = rawGpuLayers === "-1" || rawGpuLayers === "" || rawGpuLayers.toLowerCase() === "auto";
+    const gpuLayers =
+      !gpuAuto && /^-?\d+$/.test(rawGpuLayers.trim()) && Number.isSafeInteger(Number(rawGpuLayers))
+        ? rawGpuLayers
+        : "";
+    // llama.cpp 的 KV 量化枚举（`--help` 取值列表，与 settings 页下拉同源）：手改设置行
+    // 塞进来的值不能进 argv，白名单之外一律不落参数（引擎用自己的默认）。
+    const KV_CACHE_TYPES = new Set(["f32", "f16", "q8_0", "q4_0", "q4_1"]);
+    const cacheTypeK = KV_CACHE_TYPES.has(getSetting("SERVER_CACHE_TYPE_K"))
+      ? getSetting("SERVER_CACHE_TYPE_K")!
+      : null;
+    const cacheTypeV = KV_CACHE_TYPES.has(getSetting("SERVER_CACHE_TYPE_V"))
+      ? getSetting("SERVER_CACHE_TYPE_V")!
+      : null;
+    // 池化方式同理：设置键在 set 时有枚举校验，这里再收一遍（db 被手改 / 旧值兜底）。
+    const pooling = (EMBEDDING_POOLING_VALUES as readonly string[]).includes(
+      getSetting("EMBEDDING_POOLING"),
+    )
+      ? (getSetting("EMBEDDING_POOLING") as string)
+      : "last";
     // 嵌入模式的物理 batch（n_batch = n_ubatch）：取 ctx-size，即「塞得进上下文的
     // 文本就一定嵌得进去」。**不能沿用聊天调优的 256/64** —— llama.cpp 在
     // `--embeddings` 下会强制 n_batch = n_ubatch（显式传值才不会被压到 512），
     // 而物理 batch 就是单次能喂进模型的 token 上限：超过它的文档在 pooling=last 时
     // 触发 GGML 断言直接崩进程（SIGTRAP / exit 5），pooling=mean 时返回 500。
     // KB 导入的 markdown 轻松超过 512 token，这正是「导入即崩」的根因。
+    // ctxSize 这里已是 cleanNum 收敛过的纯数字串，直接解析即可。
     const embedBatch = String(Number(ctxSize) || 8192);
 
     const args: string[] = [];
@@ -505,6 +544,8 @@ export class LlamaRuntime implements Runtime {
       );
     }
 
+    // KV 缓存类型只有白名单内的值才落参数（嵌入实例也发，两边都需要）；
+    // 手改设置行塞进来的值一律不发，让引擎用自己的默认。
     args.push(
       "--parallel",
       parallel,
@@ -512,11 +553,9 @@ export class LlamaRuntime implements Runtime {
       embedding ? embedBatch : batchSize,
       "--ubatch-size",
       embedding ? embedBatch : ubatchSize,
-      "--cache-type-k",
-      cacheTypeK,
-      "--cache-type-v",
-      cacheTypeV,
     );
+    if (cacheTypeK) args.push("--cache-type-k", cacheTypeK);
+    if (cacheTypeV) args.push("--cache-type-v", cacheTypeV);
 
     if (!embedding) {
       args.push(
@@ -568,18 +607,15 @@ export class LlamaRuntime implements Runtime {
 
     // flash attention（T4d）：三态开关按 --help 探测结果折算 —— 新版发 [--flash-attn, 值]，
     // 老版布尔开关只有 on 才发，没探测到就一个参数都不发（与加这个开关前逐字节一致）。
-    // 设置值先收进白名单，读侧回落 auto。
+    // flashAttnArgs 自己把设置值收进白名单（非法值回落 auto），这里直传原始值。
     const rawFlash = getSetting("SERVER_FLASH_ATTN");
-    const flashSetting: "auto" | "on" | "off" = (FLASH_ATTN_SETTING_VALUES as readonly string[]).includes(rawFlash)
-      ? (rawFlash as "auto" | "on" | "off")
-      : "auto";
     const faSupport =
       this.flashAttnSupport ??
       cachedFlashAttnSupport(
         [llamaCppBinaryPath(), ...COMMON_BINARY_PATHS].find((p) => existsSync(p)) ?? "llama-server",
       ) ??
       "none";
-    args.push(...flashAttnArgs(flashSetting, faSupport));
+    args.push(...flashAttnArgs(rawFlash, faSupport));
 
     if (serverArgs.noMmprojOffload) {
       args.push("--no-mmproj-offload");

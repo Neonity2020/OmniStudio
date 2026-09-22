@@ -57,6 +57,17 @@ export function parseServerHelpSupport(help: string): ServerHelpSupport {
 }
 
 /**
+ * 设置值收进白名单：`updateSettings` 那层有枚举校验，但设置行可能被直接改数据库、
+ * 可能是旧版本留下的值、也可能来自将来某个绕过 `updateSettings` 的写入路径 ——
+ * 拼命令行的地方必须自己再校一遍，不能指望上游。非法值（包括 `--evil` 这种想被当成
+ * 参数名塞进 argv 的）一律回落 `auto`（llama.cpp 自己的默认，行为与加开关前一致）。
+ */
+export function normalizeFlashAttnSetting(setting: string | null | undefined): "auto" | "on" | "off" {
+  if (setting === "on" || setting === "off" || setting === "auto") return setting;
+  return "auto";
+}
+
+/**
  * `--help` 输出 → 启动参数。
  *
  *  - `tristate`：把用户的三态选择原样发出去（`auto` 与不传等价，但显式发出去无害，
@@ -64,10 +75,13 @@ export function parseServerHelpSupport(help: string): ServerHelpSupport {
  *  - `boolean`：老版只认「开」，所以只有 `"on"` 才发（不带值）；`"auto"`/`"off"` 都不发
  *    （老版没有「关」这个选择，auto 听它自己的默认，行为与加开关前一致）；
  *  - `none`：一个参数都不发。
+ *
+ * 取值先过白名单（`normalizeFlashAttnSetting`）：发进 argv 的永远只有 auto/on/off 之一。
  */
 export function flashAttnArgs(setting: string | null | undefined, support: FlashAttnSupport): string[] {
-  if (support === "tristate") return ["--flash-attn", setting ?? "auto"];
-  if (support === "boolean") return setting === "on" ? ["--flash-attn"] : [];
+  const value = normalizeFlashAttnSetting(setting);
+  if (support === "tristate") return ["--flash-attn", value];
+  if (support === "boolean") return value === "on" ? ["--flash-attn"] : [];
   return [];
 }
 

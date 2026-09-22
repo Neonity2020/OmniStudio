@@ -71,8 +71,8 @@ function rawCallFromObject(obj: Record<string, unknown>): RawCall | null {
 
 /* ---------------- Format 1: hermes ------------------------------- */
 
-const HERMES_OPEN = "<tool_call>">;
-const HERMES_CLOSE = "</tool_call>">;
+const HERMES_OPEN = "<tool_call>";
+const HERMES_CLOSE = "</tool_call>";
 
 function parseHermes(text: string): InlineToolCall[] {
   const out: InlineToolCall[] = [];
@@ -107,8 +107,8 @@ function parseHermes(text: string): InlineToolCall[] {
 
 /* ---------------- Format 2: function-tag ------------------------- */
 
-const FUNC_OPEN_RE = /<function=([A-Za-z0-9_.-]+)[\s>]/g;
-const FUNC_CLOSE = "</" + "function>";
+const FUNC_OPEN_RE = /<function=([A-Za-z0-9_.-]+)\s*>?/g;
+const FUNC_CLOSE = "</function>";
 const FUNC_OPEN_MARKER = "<function=";
 
 function parseFunctionTag(text: string): InlineToolCall[] {
@@ -156,7 +156,9 @@ function parseFunctionTag(text: string): InlineToolCall[] {
         argumentsStr = JSON.stringify(obj);
       }
     }
-    if (argumentsStr != undefined) {
+    // tagName 是正则捕获组，类型上可能是 undefined；这里不能用 continue 跳过，
+    // 否则会绕过下面推进 lastIndex 的那一行，在畸形标签上空转。
+    if (argumentsStr !== undefined && tagName !== undefined) {
       out.push({ name: tagName, arguments: argumentsStr, start, end, format: "function-tag" });
     }
     // advance past this tag: on a zero-length match the regex cursor does
@@ -226,14 +228,18 @@ function parseGemma(text: string): InlineToolCall[] {
     if (idx === -1) break;
     const bodyStart = idx + GEMMA_OPEN.length;
     const closeIdx = text.indexOf(GEMMA_CLOSE, bodyStart);
+    // end = 这段调用在原文里的结束（含闭合标签）；bodyEnd = JSON 正文的结束（不含）
     let end: number;
+    let bodyEnd: number;
     if (closeIdx !== -1) {
+      bodyEnd = closeIdx;
       end = closeIdx + GEMMA_CLOSE.length;
     } else {
       const fence = text.indexOf(GEMMA_FENCE_OPEN, bodyStart);
       end = fence !== -1 ? fence : text.length;
+      bodyEnd = end;
     }
-    const raw = text.slice(bodyStart, end).trim();
+    const raw = text.slice(bodyStart, bodyEnd).trim();
     const obj = raw.startsWith("{") ? parseJsonObject(raw) : null;
     if (obj) {
       const call = rawCallFromObject(obj);

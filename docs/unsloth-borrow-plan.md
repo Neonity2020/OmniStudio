@@ -23,8 +23,8 @@
 | 条目 | 状态 | 产物 |
 |---|---|---|
 | B1 安装完整性 manifest | ✅ 已落地 | `bun/install-manifest.ts` + 接进 `engine-install.ts` 两条安装路径；`engine-catalog` 加 `installComplete` / `installIssue`（只对托管安装判定，PATH/brew/系统安装不受影响）。这一版只记录不阻断 |
-| B2 下载 manifest + cancel marker | ✅ 存储层已落地 | `bun/download-manifest.ts`（15 测试）。接进下载流程的那一步在做 |
-| B3 tool-call healing | 🔄 进行中 | `shared/tool-call-healing.ts` 纯解析层 |
+| B2 下载 manifest + cancel marker | ✅ 已落地 | `bun/download-manifest.ts`（存储层，15 测试）+ 接进 `download-manager.ts`：开始下载写 manifest 并清取消标记、完成后 `checkAgainstDisk` 比对（不完整只记 `download.manifest.incomplete`，不改任务状态）、取消打标记。文件清单由 `startModelDownload` 的 `manifestFiles` 从前端带下来 |
+| B3 tool-call healing | ✅ 解析层已落地 | `shared/tool-call-healing.ts`：hermes / function-tag / bracket-tool-calls / gemma 四种格式，15 测试 + 一份病态输入验收脚本。接进 agent 响应处理的那一步待做 |
 | B4 子进程孤儿回收 | ✅ 已落地 | `bun/child-registry.ts` + `bun/index.ts:193` 启动扫尾 + `proc.ts` 三处维护记录 |
 | 其余条目 | 未开始 | 见下文 |
 

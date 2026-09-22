@@ -362,10 +362,6 @@ function asString(v: GgufValue | undefined): string | null {
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
-function asBool(v: GgufValue | undefined): boolean | null {
-  return typeof v === "boolean" ? v : null;
-}
-
 // bigint / number 安全转有限正整数，否则 null
 function asPositiveInt(v: GgufValue | undefined): number | null {
   if (typeof v === "bigint") {

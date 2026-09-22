@@ -123,7 +123,7 @@ describe("tool-call-healing", () => {
 
   test("7. arguments as string form", () => {
     const text =
-      '<tool_call>{"name":"run","arguments":"{\"a\":1}"}</tool_call>';
+      '<tool_call>{"name":"run","arguments":"{\\"a\\":1}"}</tool_call>';
     const calls = parseInlineToolCalls(text);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.arguments).toBe('{"a":1}');
