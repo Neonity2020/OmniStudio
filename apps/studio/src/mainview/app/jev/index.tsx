@@ -21,6 +21,7 @@ import { useQuery } from "@tanstack/react-query";
 import { JevAnswers, type JevRunResult } from "./answers";
 import { EngineSelector } from "./engine-panel";
 import { NaturalLanguageBox } from "./nl-box";
+import { JevPlayground } from "./playground";
 import { QuestionEditor } from "./questions";
 import { buildCallExample, buildQuestions } from "./drafts";
 
@@ -35,6 +36,9 @@ export function JevScreen() {
   const model = useJevStore((s) => s.model);
   const setModel = useJevStore((s) => s.setModel);
   const applyDraft = useJevStore((s) => s.applyDraft);
+  // 侧栏顶部的两段切换：判定台（下面这一整屏）/ 演练场（自动跑场景）。两半互不干扰。
+  const view = useJevStore((s) => s.view);
+  if (view === "playground") return <JevPlayground />;
   const [result, setResult] = useState<JevRunResult | undefined>(undefined);
   const [copied, setCopied] = useState(false);
 

@@ -26,6 +26,15 @@ type JevState = {
   /** 当前装载的示例 id（侧栏高亮用）；手改过就不算示例了。 */
   exampleId: string | null;
   applyExample: (id: string) => void;
+  /**
+   * 侧栏顶部的两段切换：判定台（现有编辑器）/ 演练场（自动跑一串判定）。
+   * 放 store 而不是 useState：切换入口在侧栏，主体在另一层组件里。
+   */
+  view: "console" | "playground";
+  setView: (view: "console" | "playground") => void;
+  /** 演练场当前选中的场景 id（侧栏高亮用）；还没点过任何场景时是 null。 */
+  scenarioId: string | null;
+  setScenarioId: (id: string | null) => void;
   /** AI 生成的草稿填进来（同样是一次性内容，不算某个示例）。 */
   applyDraft: (payload: { state: string; drafts: QuestionDraft[] }) => void;
   reset: () => void;
@@ -70,6 +79,10 @@ export const useJevStore = create<JevState>((set) => ({
   applyDraft: ({ state, drafts }) => set({ exampleId: null, state, drafts }),
   // 重置 = 回到"刚打开这一页"的样子（当前语言的第一个示例），而不是回到空白。
   reset: () => set({ ...initialContent(useUILang.getState().lang), model: "" }),
+  view: "console",
+  setView: (view) => set({ view }),
+  scenarioId: null,
+  setScenarioId: (scenarioId) => set({ scenarioId }),
 }));
 
 
