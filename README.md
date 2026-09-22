@@ -25,6 +25,18 @@
   ⭐ <a href="https://github.com/kunpengtalk/OmniStudio">Star</a> · License: <a href="LICENSE">MIT</a> · 作者：鲲鹏Talk
 </p>
 
+## 💬 进群沟通
+
+有任何疑问、建议，或想与开发者和其他用户交流，欢迎扫码加入我们的交流群：
+
+<p align="center">
+  <img src=".github/assets/group-qr.png" alt="加入交流群" width="200" />
+</p>
+
+<p align="center">
+  <b>扫码进群 · 一起交流本地 AI</b>
+</p>
+
 ---
 
 ## 📸 界面预览
