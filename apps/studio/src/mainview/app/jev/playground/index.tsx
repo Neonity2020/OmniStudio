@@ -102,6 +102,16 @@ export function JevPlayground() {
    * 看起来就跟死机一样（而这恰恰是模型最常见的表现）。
    */
   const [lastMove, setLastMove] = useState<GridMoveMark | null>(null);
+  /**
+   * 这一局里"白走"的步数与置信度之和。
+   *
+   * 为什么要专门统计：判定模型选错了方向，界面上只看得到棋子在撞墙，看起来像
+   * 演练场坏了。实测过同一套请求在三个判定模型上的差别——有的 8 步走到终点，
+   * 有的 20 步全撞在同一堵墙上，概率还几乎均分（四个方向各 25% 上下）。
+   * 那不是场景的问题，是这个模型对这类题没有信号，得换一个模型，所以这里把
+   * "撞了几步、置信度多低"数出来，到了阈值就直说。
+   */
+  const [tally, setTally] = useState({ steps: 0, wasted: 0, confidence: 0 });
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<{ status: number; message: string } | null>(null);
   const [done, setDone] = useState(false);
@@ -136,6 +146,7 @@ export function JevPlayground() {
     setTrail([]);
     putRows(TICKETS.map((ticket) => ({ ticket })));
     setLastMove(null);
+    setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
     setRunning(false);
     setError(null);
@@ -177,6 +188,11 @@ export function JevPlayground() {
         target: move.target,
         moved: move.moved,
         inBounds: move.inBounds,
+      }));
+      setTally((prev) => ({
+        steps: prev.steps + 1,
+        wasted: prev.wasted + (move.moved ? 0 : 1),
+        confidence: prev.confidence + (choice?.confidence ?? 0),
       }));
       setLog((prev) => [
         ...prev,
@@ -293,6 +309,7 @@ export function JevPlayground() {
     setTrail([]);
     putRows(TICKETS.map((ticket) => ({ ticket })));
     setLastMove(null);
+    setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
     setRunning(false);
     setError(null);
@@ -307,6 +324,12 @@ export function JevPlayground() {
       </div>
     );
   }
+
+  /**
+   * 一半以上的步数都白走了（撞墙 / 撞边界），而且已经走了几步 —— 这时候该怀疑的
+   * 是判定模型，不是运气。四步是门槛：前两三步撞一下很正常，模型本来就允许试错。
+   */
+  const noSignal = tally.steps >= 4 && tally.wasted / tally.steps >= 0.5;
 
   const answered = triageRows.filter((row) => row.choice !== undefined).length;
   const stepNumber = scenario.id === "grid-runner" ? gridState.steps + 1 : answered + 1;
@@ -381,6 +404,17 @@ export function JevPlayground() {
                 steps: String(gridState.maxSteps),
               })}
             </p>
+          </div>
+        ) : null}
+
+        {/* 模型对这类题没信号时直说 —— 否则界面上只看得到棋子在撞墙。 */}
+        {noSignal ? (
+          <div className="jev-note warn">
+            {t("jev.playground.noSignal", {
+              wasted: String(tally.wasted),
+              steps: String(tally.steps),
+              confidence: (tally.confidence / Math.max(1, tally.steps)).toFixed(3),
+            })}
           </div>
         ) : null}
 

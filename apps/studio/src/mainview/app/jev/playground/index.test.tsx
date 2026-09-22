@@ -31,6 +31,8 @@ for (const key of DOM_GLOBALS) {
 
 /** 收到的每一份 state：用来断言"每一步问的是新局面"。 */
 const seen: { row: number; col: number }[] = [];
+/** 假模型的脾气：会走路，还是像实测里那个弱模型一样一直撞同一堵墙。 */
+let mood: "smart" | "always-left" = "smart";
 
 mock.module("@lib/rpc", () => ({
   rpcClient: {
@@ -51,7 +53,7 @@ mock.module("@lib/rpc", () => ({
         if (name === "next_move") {
           const parsed = JSON.parse(state) as { current: { row: number; col: number }; goal: { row: number; col: number } };
           seen.push(parsed.current);
-          pick = parsed.current.row < parsed.goal.row ? "down" : "right";
+          pick = mood === "always-left" ? "left" : parsed.current.row < parsed.goal.row ? "down" : "right";
         }
         answers[name] = { type: "choice", choice: pick, confidence: 0.9, probabilities: { [pick]: 0.9 } };
       }
@@ -295,5 +297,33 @@ test("图元是图标不是文字（一格几毫米宽时文字糊成一团）",
     expect(titles).toContain(zh("jev.playground.grid.markerHere"));
   } finally {
     unmount();
+  }
+});
+
+test("模型一直撞墙时界面直说「这个模型没信号」", async () => {
+  // 实测过的场景：某个判定模型在这题上 20 步全撞在同一堵墙上，概率四个方向几乎
+  // 均分。那时候界面只看得到棋子在原地顶，用户会以为是演练场坏了 —— 必须说出来。
+  mood = "always-left";
+  seen.length = 0;
+  useJevStore.getState().setScenarioId("grid-runner");
+  const { container, unmount } = await mountPlayground();
+  try {
+    // 断言挑的是那块提示本身，不是文案 —— 测试跑在哪种界面语言下都成立。
+    expect(container.querySelector(".jev-note.warn")).toBeNull();
+    await act(async () => {
+      button(container, zh("jev.playground.start")).click();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, STEP_PAUSE_MS * 8));
+    });
+    // 走了几步全白走 → 提示出现，并把"白走几步 / 共几步"数出来。
+    expect(seen.length).toBeGreaterThanOrEqual(4);
+    const note = container.querySelector(".jev-note.warn");
+    expect(note).not.toBeNull();
+    expect(note?.textContent ?? "").toMatch(/\b(\d+)\b/);
+  } finally {
+    unmount();
+    mood = "smart";
+    useJevStore.getState().setScenarioId(null);
   }
 });

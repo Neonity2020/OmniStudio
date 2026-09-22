@@ -3469,6 +3469,7 @@ const zh: Record<string, string> = {
   "jev.playground.empty": "还没选场景",
   "jev.playground.empty.hint": "从左侧的「场景」里选一个，然后点「开始」或「单步」。",
   "jev.playground.backend.notReady": "后端还没就绪：先在左栏「判定引擎」选一侧并配好（本地装引擎 / 下权重，云端填 Key）。",
+  "jev.playground.noSignal": "这个判定模型在这一局里有 {wasted}/{steps} 步撞在墙上，平均置信度只有 {confidence} —— 它对这类空间题几乎没有信号。换一个判定模型（左栏「判定引擎」里改 Base URL 或模型名）再跑一次。",
   "jev.playground.start": "开始",
   "jev.playground.step": "单步",
   "jev.playground.reset": "重置",
@@ -7069,6 +7070,8 @@ const en: Record<string, string> = {
   "jev.playground.empty.hint": "Pick one from Scenarios on the left, then hit Run or Step.",
   "jev.playground.backend.notReady":
     "The backend isn't ready yet: pick a side in the Judge engine panel and configure it (install the engine / download weights for local, enter a key for cloud).",
+  "jev.playground.noSignal":
+    "This decision model wasted {wasted} of {steps} steps against walls, at an average confidence of {confidence} — it has almost no signal on spatial problems like this one. Try another model (change the base URL or model name under the Judge engine panel).",
   "jev.playground.start": "Run",
   "jev.playground.step": "Step",
   "jev.playground.reset": "Reset",
