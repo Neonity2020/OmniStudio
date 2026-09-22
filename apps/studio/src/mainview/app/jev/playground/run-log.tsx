@@ -52,7 +52,8 @@ export function RunLog({ entries }: { entries: RunLogEntry[] }) {
       {entries.map((entry) => {
         const probs = Object.entries(entry.probabilities).sort((a, b) => b[1] - a[1]);
         return (
-          <div key={entry.step} className="jev-card flex-none">
+          // 一步可能产生两条（工单那一步 queue + urgent 同号），key 要带上问题名。
+          <div key={`${entry.step}-${entry.question}`} className="jev-card flex-none">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span className="flex-none font-mono text-[10px] text-muted-foreground">
                 {t("jev.playground.log.step", { n: String(entry.step) })}

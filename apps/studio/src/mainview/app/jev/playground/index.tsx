@@ -100,13 +100,32 @@ export function JevPlayground() {
   // 卸载或重置时中止正在跑的循环（只置标志，循环每步之间检查一次）。
   const cancelRef = useRef(false);
 
+  /**
+   * 运行中的**权威局面**放 ref，React state 只是它的镜像。
+   *
+   * 「开始」是在一个闭包里连着调 `advance` 的：从 state 读局面的话，整轮循环读到的
+   * 都是点下按钮那一刻的那一份 —— 每一步都基于同一个旧局面，棋子原地不动、工单
+   * 永远在判第一条，看起来就像"模型每次都选一样的方向"。ref 在这一步就更新，
+   * 下一步才拿得到刚走完的局面。
+   */
+  const gridRef = useRef(gridState);
+  const rowsRef = useRef(triageRows);
+  const putGrid = (next: GridRunnerState) => {
+    gridRef.current = next;
+    setGridState(next);
+  };
+  const putRows = (next: TriageRow[]) => {
+    rowsRef.current = next;
+    setTriageRows(next);
+  };
+
   // 换场景、改盘面 = 重置运行现场（回到未开始状态）。盘面变了还接着上一局跑，
   // 轨迹与障碍就对不上了 —— 那是比"设置没生效"更难看懂的状态。
   useEffect(() => {
     cancelRef.current = false;
-    setGridState(newGridRunner({ size: gridSize, walls: gridWalls }));
+    putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
-    setTriageRows(TICKETS.map((ticket) => ({ ticket })));
+    putRows(TICKETS.map((ticket) => ({ ticket })));
     setLog([]);
     setRunning(false);
     setError(null);
@@ -129,8 +148,10 @@ export function JevPlayground() {
   const advance = async () => {
     if (!scenario) return "finished";
     if (scenario.id === "grid-runner") {
-      if (gridState.over) return "finished";
-      const outcome = await runOnce(gridRunnerState(gridState), { next_move: gridChoiceQuestion(gridState) }, ["next_move"]);
+      // 局面从 ref 读：循环里的上一步刚写进去（见 gridRef 的注释）。
+      const grid = gridRef.current;
+      if (grid.over) return "finished";
+      const outcome = await runOnce(gridRunnerState(grid), { next_move: gridChoiceQuestion(grid) }, ["next_move"]);
       if (!outcome.ok) {
         setError({ status: outcome.status, message: outcome.message });
         return "error";
@@ -138,8 +159,8 @@ export function JevPlayground() {
       if (cancelRef.current) return "cancelled";
       const choice = outcome.choice;
       const direction = (choice?.choice ?? "down") as GridDirection;
-      const move = applyMove(gridState, direction);
-      setGridState(move.next);
+      const move = applyMove(grid, direction);
+      putGrid(move.next);
       setTrail((prev) => [...prev, move.next.pos]);
       setLog((prev) => [
         ...prev,
@@ -156,9 +177,10 @@ export function JevPlayground() {
     }
 
     // ticket-triage：一条工单两个问题（一次调用带回来）。
-    const nextIndex = triageRows.findIndex((row) => row.choice === undefined);
+    const rows = rowsRef.current;
+    const nextIndex = rows.findIndex((row) => row.choice === undefined);
     if (nextIndex === -1) return "finished";
-    const ticket = triageRows[nextIndex]!.ticket;
+    const ticket = rows[nextIndex]!.ticket;
     const outcome = await runOnce(ticketState(ticket), ticketQuestions(ticket), ["queue", "urgent"]);
     if (!outcome.ok) {
       setError({ status: outcome.status, message: outcome.message });
@@ -169,15 +191,15 @@ export function JevPlayground() {
     const noul = outcome.noul;
     // 「到这一步为止」的已完成行（含当前这条）→ 批量统计给当前行；
     // triageStats 是纯函数，每步重算一次（8 条以内）便宜。
-    const completed = triageRows.slice(0, nextIndex).flatMap((row) =>
+    const completed = rows.slice(0, nextIndex).flatMap((row) =>
       row.choice === undefined
         ? []
         : [{ expected: row.ticket.expectedQueue, actual: row.choice, confidence: row.confidence ?? 0 }],
     );
     completed.push({ expected: ticket.expectedQueue, actual: choice?.choice ?? "", confidence: choice?.confidence ?? 0 });
     const stats = triageStats(completed);
-    setTriageRows((prev) =>
-      prev.map((row, index) =>
+    putRows(
+      rows.map((row, index) =>
         index === nextIndex
           ? {
               ...row,
@@ -250,9 +272,9 @@ export function JevPlayground() {
 
   const reset = () => {
     cancelRef.current = true;
-    setGridState(newGridRunner({ size: gridSize, walls: gridWalls }));
+    putGrid(newGridRunner({ size: gridSize, walls: gridWalls }));
     setTrail([]);
-    setTriageRows(TICKETS.map((ticket) => ({ ticket })));
+    putRows(TICKETS.map((ticket) => ({ ticket })));
     setLog([]);
     setRunning(false);
     setError(null);
