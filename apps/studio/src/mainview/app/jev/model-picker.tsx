@@ -50,6 +50,8 @@ export function JevModelPicker() {
   const status = useQuery({ queryKey: ["systemone", "status"], queryFn: () => rpcClient.systemoneStatus(undefined) });
   const settings = useQuery({ queryKey: ["settings"], queryFn: () => rpcClient.getSettings(undefined) });
 
+  const cloudBaseSetting = settings.data?.settings.SYSTEMONE_CLOUD_BASE_URL ?? "";
+
   const save = useMutation({
     mutationFn: (patch: Record<string, string>) => rpcClient.updateSettings({ settings: patch }),
     onSuccess: () => {
@@ -57,11 +59,25 @@ export function JevModelPicker() {
       void queryClient.invalidateQueries({ queryKey: ["systemone", "status"] });
     },
   });
-  const discover = useMutation({ mutationFn: () => rpcClient.systemoneDiscover(undefined) });
+  /*
+   * 发现改成**进这一页就自动跑**（以前要手动点按钮）。
+   *
+   * 不自动跑的时候，清单里只剩内置的那三个官方模型名，小字一律是「内置清单」——
+   * 三条长得一模一样，等于没写；而真正能分辨的路径（/jev/openjev、/jev/laya…）
+   * 要点一下按钮才出现。地址变了就重新发现（地址在 queryKey 里），结果缓存五分钟，
+   * 按钮留着做手动刷新。
+   */
+  const discover = useQuery({
+    queryKey: ["systemone", "discover", cloudBaseSetting],
+    queryFn: () => rpcClient.systemoneDiscover(undefined),
+    enabled: tab === "cloud" && !!cloudBaseSetting,
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
 
-  const cloudBase = settings.data?.settings.SYSTEMONE_CLOUD_BASE_URL ?? "";
   const cloudModel = settings.data?.settings.SYSTEMONE_CLOUD_MODEL ?? "";
   const localModel = settings.data?.settings.SYSTEMONE_LOCAL_MODEL ?? "";
+  const cloudBase = cloudBaseSetting;
   const current = tab === "cloud" ? cloudModel : localModel;
 
   /**
@@ -90,8 +106,15 @@ export function JevModelPicker() {
       for (const candidate of discover.data?.candidates ?? []) {
         for (const model of candidate.models) add(model.name, pathHint(candidate.base), candidate.base);
       }
-      for (const model of status.data?.models ?? []) {
-        if (model.backend === "cloud") add(model.name, t("jev.picker.builtin"));
+      /*
+       * 内置的官方模型名只在**发现不出东西**时兜底（地址没配、Key 没放行、这台
+       * 机器不认这套协议）。发现成功还混进来的话，清单里会多出三条小字一律写着
+       * 「内置清单」的同名条目 —— 那正是分不清模型的由来。
+       */
+      if (out.length === 0) {
+        for (const model of status.data?.models ?? []) {
+          if (model.backend === "cloud") add(model.name, t("jev.picker.builtin"));
+        }
       }
       if (current) add(current, here);
     } else {
@@ -118,8 +141,7 @@ export function JevModelPicker() {
       // 选的是别的子路径上的模型：地址也得跟着换，否则等于没换。
       ...(option.base ? { SYSTEMONE_CLOUD_BASE_URL: option.base } : {}),
     });
-    // 换了地址就重新发现一遍：否则清单里的出处还写着上一台的路径，刚选完就对不上了。
-    if (option.base) discover.mutate();
+    // 地址在 queryKey 里，换了地址会自己重新发现，这里不用手动触发。
   };
 
   const pickTab = (next: JevEngineTab) => {
@@ -174,10 +196,10 @@ export function JevModelPicker() {
             className="size-7 flex-none p-0"
             title={t("systemone.discover")}
             aria-label={t("systemone.discover")}
-            disabled={discover.isPending}
-            onClick={() => discover.mutate()}
+            disabled={discover.isFetching}
+            onClick={() => void discover.refetch()}
           >
-            {discover.isPending ? (
+            {discover.isFetching ? (
               <Loader2Icon className="size-3 animate-spin" aria-hidden />
             ) : (
               <SearchIcon className="size-3" aria-hidden />
