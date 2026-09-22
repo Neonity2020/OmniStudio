@@ -185,6 +185,21 @@ if (getSetting("AUTO_UPDATE") !== "0") {
   checkForUpdate();
 }
 
+// 受管子进程扫尾：上次进程被强杀（SIGKILL / 崩溃 / 任务管理器）时会把
+// llama.cpp / vLLM / SGLang / MLX / whisper / OCR 等推理进程留成带显存的孤儿，
+// 占端口、吃显存。这里在数据目录与日志就绪之后、启动推理服务之前，把上次
+// 遗留的受管子进程清掉（先核对身份再杀，核对不上宁可漏杀）。失败不挡启动。
+void import("./child-registry")
+  .then((m) => m.reapRecordedChildren())
+  .catch((e) => {
+    log.warn({
+      source: "app",
+      event: "child_reap.failed",
+      message: `启动扫尾失败（不影响启动）：${e instanceof Error ? e.message : String(e)}`,
+      detail: { error: e instanceof Error ? e.message : String(e) },
+    });
+  });
+
 // 自愈被老版本写脏的聊天活动状态（老版本启动嵌入模型曾把 LOCAL_MODEL_PATH /
 // CHAT_MODEL 写成嵌入模型）：三把键是 auto-start 找目标的依据，不清理的话会只
 // 拉起嵌入实例、聊天没有模型可用。必须在 auto-start 之前跑。

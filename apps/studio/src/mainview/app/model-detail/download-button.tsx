@@ -108,6 +108,9 @@ export function ModelDownloadCard({
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] });
   const start = useMutation({
     mutationFn: async () => {
+      // 整仓库下载带全量清单（含已下完的文件）：manifest 是仓库级完整清单，
+      // 完成比对才拿得出「缺哪些」。
+      const manifestFiles = targets.map((f) => ({ path: f.path, name: f.name, size: f.size }));
       for (const f of sortBySizeAsc(targets)) {
         await rpcClient.startModelDownload({
           repo,
@@ -115,6 +118,7 @@ export function ModelDownloadCard({
           category: category ?? undefined,
           source,
           size: f.size,
+          manifestFiles,
         });
       }
     },
@@ -152,6 +156,7 @@ export function ModelDownloadCard({
           category: category ?? undefined,
           source,
           size: f.size,
+          manifestFiles: targets.map((f) => ({ path: f.path, name: f.name, size: f.size })),
         });
       }
     },

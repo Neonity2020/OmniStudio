@@ -11,6 +11,7 @@
  */
 
 import { ENGINE_IDS, type InferenceEngine } from "./engines";
+import type { VerifyReason } from "../bun/install-manifest";
 
 export type LocalEngineId =
   | InferenceEngine
@@ -297,4 +298,14 @@ export type LocalEngineStatus = {
   canUninstall: boolean;
   /** 升级按钮的语义。 */
   upgradeKind: LocalEngineUpgradeKind;
+  /**
+   * 「这次安装到底完成了没有」（安装完整性 manifest，见 `bun/install-manifest.ts`）。
+   * 只对**托管安装**的引擎做判断；PATH / brew / conda 上那份不是我们装的，
+   * 没有也不该有 manifest，恒为 true —— 绝不能因为缺 manifest 就把它们标成「装坏了」。
+   * 老用户的已装引擎同样没有 manifest：这一版只把结果记进日志与返回值，
+   * **不拿它阻断任何操作**（「启动」按钮不禁用），先让数据跑起来，阻断逻辑以后再说。
+   */
+  installComplete: boolean;
+  /** `installComplete === false` 时的原因（`VerifyReason`，如 missing / corrupt / platform-changed）。 */
+  installIssue?: VerifyReason;
 };
