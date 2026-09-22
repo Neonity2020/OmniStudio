@@ -17,6 +17,8 @@ import { useT, useUILang } from "@stores/ui-lang";
 import { Button } from "@ui/button";
 import { cn } from "@/mainview/lib/utils";
 import { jevExamples } from "./examples";
+import { JevMetricsPanel } from "./metrics-panel";
+import { JevModelPicker } from "./model-picker";
 import { PLAYGROUND_SCENARIOS } from "./playground/scenarios";
 
 export function JevSidebar() {
@@ -32,7 +34,10 @@ export function JevSidebar() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {/* 顶部两段切换：两个 view 的入口都摆在这里，而不是藏在主区。 */}
+      {/* 最上面先回答"现在用的是哪个模型" —— 两个 view 看的都是它跑出来的结果。 */}
+      <JevModelPicker />
+
+      {/* 两段切换：两个 view 的入口都摆在这里，而不是藏在主区。 */}
       <div className="flex flex-none gap-1 px-2 pt-2">
         {(
           [
@@ -115,6 +120,9 @@ export function JevSidebar() {
           </div>
         </>
       )}
+
+      {/* 最下面是刚刚跑出来的延迟：换模型之后快了还是慢了，一眼看得到。 */}
+      <JevMetricsPanel />
     </div>
   );
 }

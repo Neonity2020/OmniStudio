@@ -26,6 +26,7 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { useT } from "@stores/ui-lang";
 import { useJevStore } from "@stores/jev";
+import { useJevMetrics } from "@stores/jev-metrics";
 import { useSystemOneInstallStore } from "@stores/systemone-install";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -348,7 +349,20 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
       void queryClient.invalidateQueries({ queryKey: ["systemone", "status"] });
     },
   });
-  const test = useMutation({ mutationFn: () => rpcClient.systemoneTest(undefined) });
+  const test = useMutation({
+    mutationFn: async () => {
+      const result = await rpcClient.systemoneTest(undefined);
+      // 「测试连接」跑的是一次真判定，延迟同样算数。
+      useJevMetrics.getState().record({
+        at: Date.now(),
+        ms: result.ok ? result.latencyMs : 0,
+        ok: result.ok,
+        backend: result.ok ? result.backend : null,
+        source: "test",
+      });
+      return result;
+    },
+  });
   /**
    * 自动发现：把正在编辑的地址与 Key 直接送过去（用户很可能刚粘完还没失焦保存）。
    * 只读不写 —— 填哪个模型、换不换地址，由下面的结果里用户自己点。

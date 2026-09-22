@@ -21,6 +21,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { rpcClient } from "@lib/rpc";
 import { useJevStore } from "@stores/jev";
+import { useJevMetrics } from "@stores/jev-metrics";
 import { useT } from "@stores/ui-lang";
 import { Button } from "@ui/button";
 import {
@@ -63,6 +64,8 @@ async function runOnce(
     questions,
   });
   const ms = Math.round(performance.now() - started);
+  // 侧栏的驾驶舱要的就是这个数（端到端，含网络）。
+  useJevMetrics.getState().record({ at: Date.now(), ms, ok: result.ok, backend: result.ok ? result.backend : null, source: "playground" });
   if (!result.ok) return { ok: false, status: result.status, message: result.message };
   let choice: SystemOneChoiceAnswer | undefined;
   let noul: SystemOneNoulAnswer | undefined;

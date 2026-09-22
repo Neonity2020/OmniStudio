@@ -92,6 +92,14 @@ mock.module("@lib/rpc", () => ({
       return { ok: true };
     },
     systemoneTest: async () => ({ ok: true, model: "laya-1", backend: "local-runtime", noul: 1, latencyMs: 3 }),
+    systemoneDiscover: async () => ({
+      reachable: true,
+      base: "http://gw.test",
+      systemone: "yes" as const,
+      models: { jev: [{ name: "jev-latest" }, { name: "openjev-27b" }], others: [] },
+      candidates: [],
+      message: "",
+    }),
   },
 }));
 
@@ -293,5 +301,72 @@ test("判定台 ↔ 演练场来回切都不炸（守住 React #300 那一类钩
   } finally {
     unmount();
     useJevStore.getState().setView("console");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 侧栏：判定模型选择 + 数据驾驶舱
+// ---------------------------------------------------------------------------
+
+const { useJevMetrics } = await import("@stores/jev-metrics");
+
+test("侧栏能选本地 / 云端，选择写进设置（两处改的是同一份配置）", async () => {
+  settingsPatches.length = 0;
+  settingsWriteError = null;
+  useJevStore.getState().setEngineTab("local");
+  const { container, unmount } = await mount(<JevSidebar />);
+  try {
+    const text = container.textContent ?? "";
+    expect(text).toContain(zh("jev.picker.title"));
+    expect(text).toContain(zh("jev.picker.local"));
+    expect(text).toContain(zh("jev.picker.cloud"));
+
+    const cloud = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(zh("jev.picker.cloud")));
+    expect(cloud).toBeTruthy();
+    await act(async () => {
+      cloud!.click();
+    });
+    // 选云端 = 把后端写成 cloud，和主区面板改的是同一个设置项。
+    expect(settingsPatches.some((patch) => patch.SYSTEMONE_BACKEND === "cloud")).toBe(true);
+    expect(useJevStore.getState().engineTab).toBe("cloud");
+  } finally {
+    unmount();
+    useJevStore.getState().setEngineTab("local");
+  }
+});
+
+test("驾驶舱：没跑过是空态，跑过之后给出延迟与趋势", async () => {
+  useJevMetrics.getState().clear();
+  const empty = await mount(<JevSidebar />);
+  try {
+    expect(empty.container.textContent ?? "").toContain(zh("jev.metrics.empty"));
+    // 空态不画趋势图。
+    expect(empty.container.querySelector("svg[role='img']")).toBeNull();
+  } finally {
+    empty.unmount();
+  }
+
+  await act(async () => {
+    for (const ms of [120, 240, 360]) {
+      useJevMetrics.getState().record({ at: Date.now(), ms, ok: true, backend: "cloud", source: "playground" });
+    }
+    useJevMetrics.getState().record({ at: Date.now(), ms: 0, ok: false, backend: null, source: "playground" });
+  });
+
+  const filled = await mount(<JevSidebar />);
+  try {
+    const text = filled.container.textContent ?? "";
+    // 头条是最近一次成功的耗时；平均只算成功的三次。
+    expect(text).toContain("360");
+    expect(text).toContain("240 ms");
+    expect(text).toContain(zh("jev.metrics.p95"));
+    // 四次调用里有一次失败，数字要如实写出来。
+    expect(text).toContain("4 次 · 1 次失败");
+    // 趋势：一次一根，失败那次也占一根（画成警示色）。
+    const bars = filled.container.querySelectorAll("svg[role='img'] rect");
+    expect(bars).toHaveLength(4);
+  } finally {
+    filled.unmount();
+    useJevMetrics.getState().clear();
   }
 });
