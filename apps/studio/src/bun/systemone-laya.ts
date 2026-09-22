@@ -452,7 +452,21 @@ async function sendToWorker(
 ): Promise<LayaPredictResult> {
   const w = await ensureWorker();
   if (!w) {
-    return { ok: false, error: "laya 本地运行时不可用（未安装或平台不支持）", kind: "worker" };
+    /*
+     * 分清三种"起不来"，别拿一句"未安装或平台不支持"打发所有情况。
+     *
+     * 实测踩到的就是第三种：引擎装着、平台也对，worker 因为 import 失败启动不了，
+     * 真实原因（`fatal` 带回来的那句）只进了安装日志，界面上却说"未安装" ——
+     * 照着这句去查，方向从一开始就是错的。
+     */
+    if (!platformSupported()) {
+      return { ok: false, error: "本地 JEV 运行时需要 Apple Silicon 的 macOS（MLX）", kind: "worker" };
+    }
+    if (!existsSync(venvBinary("python3"))) {
+      return { ok: false, error: "laya 本地运行时还没安装：先点「安装引擎」", kind: "worker" };
+    }
+    const detail = currentPhase === "error" && currentPhaseMessage ? `：${currentPhaseMessage}` : "";
+    return { ok: false, error: `laya 本地运行时启动失败${detail}`, kind: "worker" };
   }
   const id = `r${++w.nextId}`;
   const result = new Promise<LayaPredictResult>((resolve) => {
