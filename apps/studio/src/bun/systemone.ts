@@ -303,6 +303,15 @@ export type SystemOneDiscovery = {
   message: string;
 };
 
+/** 站点根（`http://host:38003/jev/laya` → `http://host:38003`）；解析不了就返回空串。 */
+function originOf(base: string): string {
+  try {
+    return new URL(base).origin;
+  } catch {
+    return "";
+  }
+}
+
 /** 发现是交互操作：用户在等，超时要短，不跟调用共用那 60 秒。 */
 const DISCOVER_TIMEOUT_MS = 12_000;
 /** 候选地址逐个探测，多了会把一次点击拖成几十秒。 */
@@ -385,12 +394,25 @@ export async function discoverSystemOne(input: { baseUrl: string; apiKey: string
     probeSystemOne(base, apiKey),
   ]);
   const reachable = !note.startsWith("超时") && !note.startsWith("Error") && !note.startsWith("TypeError");
+  /*
+   * 候选总是找一遍，**哪怕当前地址自己就能判定**。
+   *
+   * 一台网关上常常挂着好几个判定服务（`/jev/laya`、`/jev/openjev`、`/jev/openjev-27b`），
+   * 它们全都自称 `jev-latest` —— 光看模型名分不出现在打的是哪一个，更不知道还有
+   * 别的可选。所以把同机的都列出来，界面才有得挑。
+   *
+   * 翻的是**站点根**的 openapi.json：用户填的地址可能已经是某个子路径，在它下面
+   * 是找不到网关自己那份文档的。
+   */
+  const origin = originOf(base);
   const candidates: SystemOneDiscoveredBase[] = [];
-  if (systemone !== "yes") {
-    const { body } = await fetchJson(`${base}/openapi.json`, apiKey);
+  if (origin) {
+    const { body } = await fetchJson(`${origin}/openapi.json`, apiKey);
     const prefixes = findSystemOnePassthroughBases(body).slice(0, MAX_CANDIDATES);
     for (const prefix of prefixes) {
-      const candidateBase = `${base}${prefix}`;
+      const candidateBase = `${origin}${prefix}`;
+      // 当前用的那一条不用再列一遍（它的模型已经在 models 里）。
+      if (candidateBase === base) continue;
       const [probe, models] = await Promise.all([
         probeSystemOne(candidateBase, apiKey),
         listModels(candidateBase, apiKey),

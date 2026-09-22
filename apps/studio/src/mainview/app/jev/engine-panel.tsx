@@ -331,16 +331,23 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
   const [base, setBase] = useState("");
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
-  const [touched, setTouched] = useState(false);
+  /** 此刻光标在哪个框里（那个框不跟随外部设置）。 */
+  const [editing, setEditing] = useState<"base" | "model" | null>(null);
 
   const savedBase = settings.data?.settings.SYSTEMONE_CLOUD_BASE_URL ?? "";
   const savedModel = settings.data?.settings.SYSTEMONE_CLOUD_MODEL ?? "";
-  // 首次读到设置回填一次；之后以用户输入为准（否则每次刷新设置都会覆盖正在输入的框）。
+  /*
+   * 跟随已保存的设置 —— 但**正在输入的那个框不动**。
+   *
+   * 侧栏的模型选择改的是同一份设置（选另一条路径上的模型会连 Base URL 一起换），
+   * 如果这里只在首次回填，用户在侧栏选完之后，这两个框还停在上一台的地址和模型，
+   * 看起来就像"选了没生效"。`editing` 记的是此刻光标在哪个框里，只让那一个保持
+   * 用户正在敲的内容。
+   */
   useEffect(() => {
-    if (touched) return;
-    if (savedBase) setBase((prev) => prev || savedBase);
-    if (savedModel) setModel((prev) => prev || savedModel);
-  }, [savedBase, savedModel, touched]);
+    if (savedBase && editing !== "base") setBase(savedBase);
+    if (savedModel && editing !== "model") setModel(savedModel);
+  }, [savedBase, savedModel, editing]);
 
   const save = useMutation({
     mutationFn: (patch: Record<string, string>) => rpcClient.updateSettings({ settings: patch }),
@@ -373,14 +380,12 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
   });
 
   const pickModel = (name: string) => {
-    setTouched(true);
     setModel(name);
     save.mutate({ SYSTEMONE_CLOUD_MODEL: name });
   };
 
   /** 判定服务在子路径上时，把地址换成那一条，并就着新地址再读一遍。 */
   const pickBase = (next: string) => {
-    setTouched(true);
     setBase(next);
     save.mutate({ SYSTEMONE_CLOUD_BASE_URL: next });
     discover.mutate({ baseUrl: next });
@@ -397,11 +402,14 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           value={base}
           placeholder="https://api.typesafe.ai"
           spellCheck={false}
+          onFocus={() => setEditing("base")}
           onChange={(event) => {
-            setTouched(true);
             setBase(event.target.value);
           }}
-          onBlur={() => save.mutate({ SYSTEMONE_CLOUD_BASE_URL: base.trim() })}
+          onBlur={() => {
+            setEditing(null);
+            save.mutate({ SYSTEMONE_CLOUD_BASE_URL: base.trim() });
+          }}
         />
       </label>
       <label className="flex flex-col gap-1">
@@ -413,7 +421,6 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           placeholder={status?.cloudConfigured ? "••••••••" : "sk-…"}
           spellCheck={false}
           onChange={(event) => {
-            setTouched(true);
             setKey(event.target.value);
           }}
           onBlur={() => {
@@ -433,11 +440,14 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           value={model}
           placeholder="jev-latest"
           spellCheck={false}
+          onFocus={() => setEditing("model")}
           onChange={(event) => {
-            setTouched(true);
             setModel(event.target.value);
           }}
-          onBlur={() => save.mutate({ SYSTEMONE_CLOUD_MODEL: model.trim() || "jev-latest" })}
+          onBlur={() => {
+            setEditing(null);
+            save.mutate({ SYSTEMONE_CLOUD_MODEL: model.trim() || "jev-latest" });
+          }}
         />
       </label>
       <div className="flex items-center gap-2">

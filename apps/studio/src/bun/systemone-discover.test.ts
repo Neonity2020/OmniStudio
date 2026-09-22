@@ -77,21 +77,28 @@ test("判定端点在子路径上：根路径说没有，候选里把它找出�
   expect(calls).toContain("POST http://gw.test/jev/laya/v1/systemone");
 });
 
-test("根路径就是判定服务：直接说可用，不再去翻 openapi", async () => {
-  const { calls } = stubFetch({
-    "GET http://jev.test/v1/models": {
+test("当前地址已经能判定，同机别的判定服务照样列出来（它们重名）", async () => {
+  // 一台网关上挂着三个判定服务，全都自称 jev-latest —— 只列当前这一个的话，
+  // 用户既分不出现在打的是哪个，也不知道还有别的可选。
+  stubFetch({
+    "GET http://jev.test/jev/a/v1/models": { status: 200, body: { models: [{ name: "jev-latest" }] } },
+    "POST http://jev.test/jev/a/v1/systemone": { status: 422, body: VALIDATION_422 },
+    "GET http://jev.test/openapi.json": {
       status: 200,
-      body: { models: [{ name: "jev-1.13.0", description: "flagship", release_date: "2026-09-15" }] },
+      body: { paths: { "/jev/a": {}, "/jev/a/{subpath}": {}, "/jev/b": {}, "/jev/b/{subpath}": {} } },
     },
-    "POST http://jev.test/v1/systemone": { status: 422, body: VALIDATION_422 },
+    "GET http://jev.test/jev/b/v1/models": { status: 200, body: { models: [{ name: "jev-latest" }] } },
+    "POST http://jev.test/jev/b/v1/systemone": { status: 422, body: VALIDATION_422 },
   });
 
-  const found = await discoverSystemOne({ baseUrl: "http://jev.test", apiKey: "sk-test" });
+  const found = await discoverSystemOne({ baseUrl: "http://jev.test/jev/a", apiKey: "sk-test" });
 
   expect(found.systemone).toBe("yes");
-  expect(found.models.jev.map((m) => m.name)).toEqual(["jev-1.13.0"]);
-  expect(found.candidates).toHaveLength(0);
-  expect(calls).not.toContain("GET http://jev.test/openapi.json");
+  expect(found.models.jev.map((m) => m.name)).toEqual(["jev-latest"]);
+  // 自己那条不重复列，另一条带着它自己的清单出现。
+  expect(found.candidates.map((c) => c.base)).toEqual(["http://jev.test/jev/b"]);
+  expect(found.candidates[0]?.systemone).toBe("yes");
+  expect(found.candidates[0]?.models.map((m) => m.name)).toEqual(["jev-latest"]);
 });
 
 test("路由在但 Key 没放行：说成「权限」而不是「地址错了」", async () => {

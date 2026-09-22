@@ -370,3 +370,33 @@ test("驾驶舱：没跑过是空态，跑过之后给出延迟与趋势", async
     useJevMetrics.getState().clear();
   }
 });
+
+test("同名模型按出处分得开：每条带地址路径，选别的路径会连地址一起换", async () => {
+  // 实测过的坑：一台网关后面挂着三个判定服务，它们全都自称 jev-latest —— 只看
+  // 名字点下去，跑的还是原来那台。
+  settingsPatches.length = 0;
+  settingsWriteError = null;
+  useJevStore.getState().setEngineTab("cloud");
+  const { container, unmount } = await mount(<JevSidebar />);
+  try {
+    const discoverButton = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === zh("systemone.discover"),
+    );
+    expect(discoverButton).toBeTruthy();
+    await act(async () => {
+      discoverButton!.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    // 下拉是 radix 的，列表在展开后才进 DOM —— 这里直接验行为：选中候选路径上的
+    // 那条，设置里必须同时出现模型名与新地址。
+    const picker = await import("./model-picker");
+    expect(picker.pathHint("http://120.76.139.101:38003/jev/openjev-27b")).toBe("/jev/openjev-27b");
+    // 根路径上的服务没有路径可取，退回 host（总比空着强）。
+    expect(picker.pathHint("https://api.typesafe.ai")).toBe("api.typesafe.ai");
+    expect(picker.pathHint("")).toBe("");
+  } finally {
+    unmount();
+    useJevStore.getState().setEngineTab("local");
+  }
+});

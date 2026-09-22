@@ -20,6 +20,25 @@ import { Button } from "@ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { cn } from "@/mainview/lib/utils";
 
+/**
+ * 地址 → 一句能分辨的出处。
+ *
+ * 取路径（`http://host:38003/jev/openjev-27b` → `/jev/openjev-27b`）：同一台网关
+ * 上的几个判定服务只有路径不同，而 host 每条都一样，写出来反而把真正的差别挤掉。
+ * 根路径上的服务没有路径可取，那就退回 host。
+ */
+export function pathHint(raw: string): string {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return "";
+  try {
+    const url = new URL(trimmed);
+    const path = url.pathname.replace(/\/+$/, "");
+    return path && path !== "/" ? path : url.host;
+  } catch {
+    return trimmed;
+  }
+}
+
 /** tab → 后端设置值（和主区面板同一套映射）。 */
 const BACKEND_FOR_TAB: Record<JevEngineTab, string> = { local: "local", cloud: "cloud" };
 
@@ -40,26 +59,68 @@ export function JevModelPicker() {
   });
   const discover = useMutation({ mutationFn: () => rpcClient.systemoneDiscover(undefined) });
 
+  const cloudBase = settings.data?.settings.SYSTEMONE_CLOUD_BASE_URL ?? "";
   const cloudModel = settings.data?.settings.SYSTEMONE_CLOUD_MODEL ?? "";
   const localModel = settings.data?.settings.SYSTEMONE_LOCAL_MODEL ?? "";
   const current = tab === "cloud" ? cloudModel : localModel;
 
-  /** 候选模型：发现到的 > 内置清单 > 当前这一个（手填的名字不能从清单里消失）。 */
+  /**
+   * 候选清单。每条都带一句**出处**，因为模型名撞车是常态：同一台网关后面挂着
+   * 三个判定服务，它们全都自称 `jev-latest` —— 只看名字根本分不出点的是哪一个。
+   * 出处取地址里的路径（`/jev/openjev-27b`），它正好是这几个服务之间唯一的差别。
+   *
+   * 选了别的地址下的模型，就连地址一起切过去：不然点了个"看起来对"的名字，
+   * 跑的还是原来那台服务。
+   */
   const options = (() => {
-    const names =
-      tab === "cloud"
-        ? [
-            ...(discover.data?.models.jev ?? []).map((m) => m.name),
-            ...(discover.data?.models.others ?? []).map((m) => m.name),
-            ...(status.data?.models ?? []).filter((m) => m.backend === "cloud").map((m) => m.name),
-          ]
-        : [
-            ...(status.data?.localModels ?? []).map((m) => m.name),
-            ...(status.data?.models ?? []).filter((m) => m.backend === "local").map((m) => m.name),
-          ];
-    if (current) names.unshift(current);
-    return [...new Set(names.filter(Boolean))];
+    const out: { key: string; name: string; hint: string; base?: string }[] = [];
+    const seen = new Set<string>();
+    const add = (name: string, hint: string, base?: string) => {
+      const key = `${base ?? ""}|${name}`;
+      if (!name || seen.has(key)) return;
+      seen.add(key);
+      out.push({ key, name, hint, base });
+    };
+    if (tab === "cloud") {
+      // 当前地址上发现到的（不带 base：就是现在这台，不用切）。
+      const here = pathHint(discover.data?.base ?? cloudBase);
+      for (const model of discover.data?.models.jev ?? []) add(model.name, here);
+      for (const model of discover.data?.models.others ?? []) add(model.name, here);
+      // 同一台网关上别的子路径：带 base，选中就一起切过去。
+      for (const candidate of discover.data?.candidates ?? []) {
+        for (const model of candidate.models) add(model.name, pathHint(candidate.base), candidate.base);
+      }
+      for (const model of status.data?.models ?? []) {
+        if (model.backend === "cloud") add(model.name, t("jev.picker.builtin"));
+      }
+      if (current) add(current, here);
+    } else {
+      for (const model of status.data?.localModels ?? []) add(model.name, model.weights);
+      for (const model of status.data?.models ?? []) {
+        if (model.backend === "local") add(model.name, model.weights ?? t("jev.picker.builtin"));
+      }
+      if (current) add(current, t("jev.picker.builtin"));
+    }
+    return out;
   })();
+
+  const currentKey = options.find((option) => option.name === current && !option.base)?.key ?? `|${current}`;
+
+  const pickModel = async (key: string) => {
+    const option = options.find((item) => item.key === key);
+    if (!option) return;
+    if (tab !== "cloud") {
+      save.mutate({ SYSTEMONE_LOCAL_MODEL: option.name });
+      return;
+    }
+    await save.mutateAsync({
+      SYSTEMONE_CLOUD_MODEL: option.name,
+      // 选的是别的子路径上的模型：地址也得跟着换，否则等于没换。
+      ...(option.base ? { SYSTEMONE_CLOUD_BASE_URL: option.base } : {}),
+    });
+    // 换了地址就重新发现一遍：否则清单里的出处还写着上一台的路径，刚选完就对不上了。
+    if (option.base) discover.mutate();
+  };
 
   const pickTab = (next: JevEngineTab) => {
     setTab(next);
@@ -90,14 +151,18 @@ export function JevModelPicker() {
       </div>
 
       <div className="flex items-center gap-1">
-        <Select value={current || undefined} onValueChange={(value) => save.mutate(tab === "cloud" ? { SYSTEMONE_CLOUD_MODEL: value } : { SYSTEMONE_LOCAL_MODEL: value })}>
+        <Select value={current ? currentKey : undefined} onValueChange={(key) => void pickModel(key)}>
           <SelectTrigger className="h-7 min-w-0 flex-1 text-[11px]">
             <SelectValue placeholder={t("jev.picker.placeholder")} />
           </SelectTrigger>
-          <SelectContent className="max-w-72">
-            {options.map((name) => (
-              <SelectItem key={name} value={name}>
-                <span className="truncate font-mono text-[11px]">{name}</span>
+          <SelectContent className="max-w-80">
+            {options.map((option) => (
+              <SelectItem key={option.key} value={option.key}>
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="truncate font-mono text-[11px]">{option.name}</span>
+                  {/* 出处：同名模型之间唯一分得开的东西。 */}
+                  <span className="truncate font-mono text-[10px] text-muted-foreground">{option.hint}</span>
+                </span>
               </SelectItem>
             ))}
           </SelectContent>
@@ -120,6 +185,13 @@ export function JevModelPicker() {
           </Button>
         ) : null}
       </div>
+
+      {/* 当前打的是哪台：模型名分不出来，地址分得出来。 */}
+      {tab === "cloud" && cloudBase ? (
+        <span className="truncate px-0.5 font-mono text-[10px] text-muted-foreground" title={cloudBase}>
+          {pathHint(cloudBase)}
+        </span>
+      ) : null}
 
       {/* 选了云端却还没配 Key，这里先说一声 —— 否则要等到跑出 403 才知道。 */}
       {tab === "cloud" && status.data && !status.data.cloudConfigured ? (
