@@ -1,0 +1,343 @@
+/**
+ * 演练场主体：左侧是场景说明 + 运行控制（开始 / 单步 / 重置）+ 后端状态，
+ * 右侧是场景可视化与逐步运行日志。布局沿用 JEV 页：左栏 380px、右栏产物。
+ *
+ * 运行逻辑（「单步」与「开始」共用同一个 `advance`，后者就是循环调它）：
+ *   - 每步只发一次 `rpcClient.systemoneRun`（state 必须 `JSON.stringify` ——
+ *     这条 RPC 的参数类型是 string，`scenarios.ts` 返回的是对象）；
+ *   - grid：一个 choice，跑完一步推进局面，直到 `over`（到达终点或 20 步上限）；
+ *   - triage：一条工单两个问题（choice + noul），顺序跑完 8 条；
+ *   - 任何一步失败就停下并把错误显示出来（后端没配好是最常见的情况）；
+ *   - 「开始」连续跑完，「单步」跑一步停住；「重置」或组件卸载时置 cancel 标志，
+ *     循环在每步之间的 await 处检查（await 天然让出控制权，不需要别的机制）。
+ *     中止后不清空现场 —— 重置按钮负责归零，卸载本来就没人看了。
+ *
+ * 发给模型的 state / criteria 全部来自 `scenarios.ts`（英文）；这里的界面
+ * 文案走 i18n，不拼进请求体。
+ */
+import { PlayIcon, PlusCircleIcon, RotateCcwIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+
+import { rpcClient } from "@lib/rpc";
+import { useJevStore } from "@stores/jev";
+import { useT } from "@stores/ui-lang";
+import { Button } from "@ui/button";
+import {
+  applyMove,
+  GRID_MAX_STEPS,
+  newGridRunner,
+  type GridDirection,
+  gridChoiceQuestion,
+  gridRunnerState,
+  PLAYGROUND_SCENARIOS,
+  TICKETS,
+  ticketQuestions,
+  ticketState,
+  type GridRunnerState,
+  triageStats,
+} from "./scenarios";
+import { GridView } from "./grid-view";
+import { RunLog, type RunLogEntry } from "./run-log";
+import { TriageView, type TriageRow } from "./triage-view";
+import type { SystemOneChoiceAnswer, SystemOneNoulAnswer } from "../../../../shared/systemone";
+
+/** 一次判定调用：计时，并把响应里的问题答案按名字摘出来。 */
+async function runOnce(
+  state: Record<string, unknown>,
+  questions: Record<string, unknown>,
+  names: string[],
+): Promise<
+  | { ok: true; choice?: SystemOneChoiceAnswer; noul?: SystemOneNoulAnswer; ms: number }
+  | { ok: false; status: number; message: string }
+> {
+  const started = performance.now();
+  const result = await rpcClient.systemoneRun({
+    // RPC 契约：state 是 string（协议本身允许对象，这条接口不接）。
+    state: JSON.stringify(state),
+    questions,
+  });
+  const ms = Math.round(performance.now() - started);
+  if (!result.ok) return { ok: false, status: result.status, message: result.message };
+  let choice: SystemOneChoiceAnswer | undefined;
+  let noul: SystemOneNoulAnswer | undefined;
+  for (const name of names) {
+    const answer = result.response.answers[name];
+    if (!answer) continue;
+    if (answer.type === "choice") choice = answer;
+    if (answer.type === "noul") noul = answer;
+  }
+  return { ok: true, choice, noul, ms };
+}
+
+export function JevPlayground() {
+  const t = useT();
+  const scenarioId = useJevStore((s) => s.scenarioId);
+  const scenario = PLAYGROUND_SCENARIOS.find((s) => s.id === scenarioId) ?? null;
+
+  // 后端状态（与判定台同一查询：跑之前先看一眼"能不能跑"）。
+  const status = useQuery({
+    queryKey: ["systemone", "status"],
+    queryFn: () => rpcClient.systemoneStatus(undefined),
+  });
+
+  // ---------- 运行现场（两个场景各一份；重置 / 换场景时整体重建） ----------
+  const [gridState, setGridState] = useState<GridRunnerState>(() => newGridRunner());
+  const [trail, setTrail] = useState<[number, number][]>([]);
+  const [triageRows, setTriageRows] = useState<TriageRow[]>(() => TICKETS.map((ticket) => ({ ticket })));
+  const [log, setLog] = useState<RunLogEntry[]>([]);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<{ status: number; message: string } | null>(null);
+  const [done, setDone] = useState(false);
+
+  // 卸载或重置时中止正在跑的循环（只置标志，循环每步之间检查一次）。
+  const cancelRef = useRef(false);
+
+  // 换场景 = 重置运行现场（回到未开始状态）。
+  useEffect(() => {
+    cancelRef.current = false;
+    setGridState(newGridRunner());
+    setTrail([]);
+    setTriageRows(TICKETS.map((ticket) => ({ ticket })));
+    setLog([]);
+    setRunning(false);
+    setError(null);
+    setDone(false);
+  }, [scenarioId]);
+
+  // 卸载时中止正在跑的循环。
+  useEffect(
+    () => () => {
+      cancelRef.current = true;
+    },
+    [],
+  );
+
+  /**
+   * 推进一步：一次 `systemoneRun`，然后更新全部可见状态。
+   * 返回 "continue" / "finished" / "error" / "cancelled"（cancelled 只在「开始」
+   * 的循环里出现：await 之后发现已经该停）。
+   */
+  const advance = async () => {
+    if (!scenario) return "finished";
+    if (scenario.id === "grid-runner") {
+      if (gridState.over) return "finished";
+      const outcome = await runOnce(gridRunnerState(gridState), { next_move: gridChoiceQuestion(gridState) }, ["next_move"]);
+      if (!outcome.ok) {
+        setError({ status: outcome.status, message: outcome.message });
+        return "error";
+      }
+      if (cancelRef.current) return "cancelled";
+      const choice = outcome.choice;
+      const direction = (choice?.choice ?? "down") as GridDirection;
+      const move = applyMove(gridState, direction);
+      setGridState(move.next);
+      setTrail((prev) => [...prev, move.next.pos]);
+      setLog((prev) => [
+        ...prev,
+        {
+          step: prev.length + 1,
+          question: "next_move",
+          choice: choice?.choice ?? "—",
+          confidence: choice?.confidence,
+          probabilities: choice?.probabilities ?? {},
+          ms: outcome.ms,
+        },
+      ]);
+      return move.next.over ? "finished" : "continue";
+    }
+
+    // ticket-triage：一条工单两个问题（一次调用带回来）。
+    const nextIndex = triageRows.findIndex((row) => row.choice === undefined);
+    if (nextIndex === -1) return "finished";
+    const ticket = triageRows[nextIndex]!.ticket;
+    const outcome = await runOnce(ticketState(ticket), ticketQuestions(ticket), ["queue", "urgent"]);
+    if (!outcome.ok) {
+      setError({ status: outcome.status, message: outcome.message });
+      return "error";
+    }
+    if (cancelRef.current) return "cancelled";
+    const choice = outcome.choice;
+    const noul = outcome.noul;
+    // 「到这一步为止」的已完成行（含当前这条）→ 批量统计给当前行；
+    // triageStats 是纯函数，每步重算一次（8 条以内）便宜。
+    const completed = triageRows.slice(0, nextIndex).flatMap((row) =>
+      row.choice === undefined
+        ? []
+        : [{ expected: row.ticket.expectedQueue, actual: row.choice, confidence: row.confidence ?? 0 }],
+    );
+    completed.push({ expected: ticket.expectedQueue, actual: choice?.choice ?? "", confidence: choice?.confidence ?? 0 });
+    const stats = triageStats(completed);
+    setTriageRows((prev) =>
+      prev.map((row, index) =>
+        index === nextIndex
+          ? {
+              ...row,
+              choice: choice?.choice,
+              urgent: noul ? noul.noul >= 0.5 : undefined,
+              confidence: choice?.confidence,
+              stats,
+            }
+          : row,
+      ),
+    );
+    setLog((prev) => {
+      const step = prev.length + 1;
+      return [
+        ...prev,
+        {
+          step,
+          question: "queue",
+          choice: choice?.choice ?? "—",
+          confidence: choice?.confidence,
+          probabilities: choice?.probabilities ?? {},
+          ms: outcome.ms,
+        },
+        {
+          step,
+          question: "urgent",
+          choice: noul ? String(noul.noul >= 0.5) : "—",
+          probabilities: noul ? { true: noul.noul, false: 1 - noul.noul } : {},
+          ms: outcome.ms,
+        },
+      ];
+    });
+    return "continue";
+  };
+
+  /** 「单步」：跑一步停住（失败 / 结束也算停住）。 */
+  const stepOnce = async () => {
+    if (!scenario || running) return;
+    cancelRef.current = false;
+    setError(null);
+    setRunning(true);
+    try {
+      const result = await advance();
+      if (result === "finished") setDone(true);
+      // error 时 advance 已把错误写进 state。
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  /** 「开始」：循环 advance 直到结束 / 出错 / 被中止。 */
+  const start = async () => {
+    if (!scenario || running || done || error) return;
+    cancelRef.current = false;
+    setError(null);
+    setRunning(true);
+    try {
+      for (;;) {
+        const result = await advance();
+        if (result === "cancelled") return; // 重置 / 卸载：不清现场，只停。
+        if (result !== "continue") break;
+        // 让出一帧，把棋盘 / 工单行 / 日志画出来再跑下一步。
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      setDone(true);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const reset = () => {
+    cancelRef.current = true;
+    setGridState(newGridRunner());
+    setTrail([]);
+    setTriageRows(TICKETS.map((ticket) => ({ ticket })));
+    setLog([]);
+    setRunning(false);
+    setError(null);
+    setDone(false);
+  };
+
+  if (!scenario) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+        <p className="text-sm font-medium">{t("jev.playground.empty")}</p>
+        <p className="max-w-sm text-[11px] leading-5 text-muted-foreground">{t("jev.playground.empty.hint")}</p>
+      </div>
+    );
+  }
+
+  const answered = triageRows.filter((row) => row.choice !== undefined).length;
+  const stepNumber = scenario.id === "grid-runner" ? gridState.steps + 1 : answered + 1;
+  const totalSteps = scenario.id === "grid-runner" ? GRID_MAX_STEPS : TICKETS.length;
+
+  return (
+    <div className="flex h-full min-h-0 flex-1">
+      {/* 左：场景 + 控制 */}
+      <section className="flex w-[380px] min-w-[340px] flex-none flex-col gap-4 overflow-y-auto border-r p-4">
+        <div>
+          <h1 className="text-sm font-semibold">{t(scenario.nameKey)}</h1>
+          <p className="mt-1 text-[11px] leading-4 text-muted-foreground">{t(scenario.descKey)}</p>
+        </div>
+
+        {/* 后端状态：没配好就提前给原因，别等跑到第一步才静默卡住。 */}
+        <div className="flex flex-col gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {status.data?.resolved ? (
+              <span className="jev-pill ok">{t(`systemone.backend.${status.data.resolved}`)}</span>
+            ) : (
+              <span className="jev-pill warn">{t("systemone.backend.none")}</span>
+            )}
+            <span className="jev-pill free">{t("systemone.free")}</span>
+          </div>
+          {!status.data?.resolved ? (
+            <span className="jev-note error">{t("jev.playground.backend.notReady")}</span>
+          ) : null}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" disabled={running || done} onClick={() => void start()}>
+            <PlayIcon size={12} aria-hidden /> {t("jev.playground.start")}
+          </Button>
+          <Button size="sm" variant="outline" disabled={running || done || error !== null} onClick={() => void stepOnce()}>
+            <PlusCircleIcon size={12} aria-hidden /> {t("jev.playground.step")}
+          </Button>
+          <Button size="sm" variant="ghost" onClick={reset}>
+            <RotateCcwIcon size={12} aria-hidden /> {t("jev.playground.reset")}
+          </Button>
+          {running ? (
+            <span className="text-[11px] text-muted-foreground">
+              {t("jev.playground.progress", { n: String(Math.min(stepNumber, totalSteps)), total: String(totalSteps) })}
+            </span>
+          ) : null}
+        </div>
+
+        {error ? (
+          <div className="jev-note error">
+            <strong>{t("jev.failed", { status: String(error.status) })}</strong>
+            <div>{error.message}</div>
+            {!status.data?.resolved ? <div>{t("jev.playground.backend.notReady")}</div> : null}
+          </div>
+        ) : null}
+
+        {done && !error ? <div className="jev-note ok">{t("jev.playground.done")}</div> : null}
+      </section>
+
+      {/* 右：场景可视化 + 运行日志 */}
+      <section className="flex min-w-0 flex-1 flex-col gap-4 overflow-hidden p-5">
+        <div className="flex flex-none items-center gap-2">
+          <span className="text-xs font-semibold text-muted-foreground">{t(scenario.nameKey)}</span>
+          {scenario.id === "grid-runner" ? (
+            <span className="jev-pill">{t("jev.playground.grid.steps", { n: String(gridState.steps), max: String(GRID_MAX_STEPS) })}</span>
+          ) : (
+            <span className="jev-pill">
+              {t("jev.playground.triage.progress", { done: String(answered), total: String(TICKETS.length) })}
+            </span>
+          )}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {scenario.id === "grid-runner" ? <GridView state={gridState} trail={trail} /> : <TriageView rows={triageRows} />}
+        </div>
+
+        <div className="flex min-h-0 flex-col">
+          <span className="flex-none text-xs font-semibold text-muted-foreground">{t("jev.playground.log.title")}</span>
+          <RunLog entries={log} />
+        </div>
+      </section>
+    </div>
+  );
+}
