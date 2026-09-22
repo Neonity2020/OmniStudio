@@ -652,6 +652,11 @@ export type AppRPC = {
         response: SystemOneAvailability;
       };
       /** 一键安装本地运行时（venv + laya-mlx；Apple Silicon / macOS）。 */
+      /** 依赖缺失时一键补齐（装 uv，它再按需取解释器）。 */
+      systemoneInstallDeps: {
+        params: undefined;
+        response: { ok: boolean; error?: string; tool?: string };
+      };
       systemoneInstallRuntime: {
         params: undefined;
         response: { ok: boolean; error?: string; version?: string };
@@ -3507,6 +3512,12 @@ const rpcRequests: NonNullable<
 
   systemoneDraft: async ({ instruction, text }) => {
     return SystemOneDraft.draftSystemOneRequest({ instruction, text: text ?? "" });
+  },
+
+  systemoneInstallDeps: async () => {
+    const result = await Laya.installLayaDeps();
+    SystemOne.invalidateLocalModels();
+    return result;
   },
 
   systemoneInstallRuntime: async () => {

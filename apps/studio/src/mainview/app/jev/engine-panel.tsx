@@ -13,6 +13,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2Icon,
   CpuIcon,
+  BotIcon,
   CloudIcon,
   DownloadIcon,
   Loader2Icon,
@@ -24,6 +25,8 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { useAppStore } from "@stores/app";
+import { useChatStore } from "@stores/chat";
 import { useT } from "@stores/ui-lang";
 import { useJevStore } from "@stores/jev";
 import { useJevMetrics } from "@stores/jev-metrics";
@@ -31,6 +34,7 @@ import { useSystemOneInstallStore } from "@stores/systemone-install";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { cn } from "@/mainview/lib/utils";
+import { activateNewSession } from "../agent/new-session";
 import type { SystemOneAvailability, SystemOneDiscovery } from "../../../bun/systemone";
 
 type EngineTab = "local" | "cloud";
@@ -175,6 +179,22 @@ function LocalPanel({ status }: { status: SystemOneAvailability | undefined }) {
     mutationFn: (weights: string) => rpcClient.systemoneStopModel({ weights }),
     onSuccess: refresh,
   });
+  /**
+   * 一键补依赖：装 uv（它再按需取合规的解释器）。
+   *
+   * 这条路是踩出来的：这台机器只有 macOS 自带的 Python 3.9，引擎装不了，而报错只说
+   * "请先安装 Python 3.11–3.13" —— 用户还得自己去查怎么装。装完直接接着装引擎。
+   *
+   * 和这个组件里其它钩子一样，**必须在下面那两个提前 return 之前** —— 顺序一变
+   * 就是 React #310（"渲染的钩子比上次多"），这一页已经栽过一次。
+   */
+  const installDeps = useMutation({
+    mutationFn: () => rpcClient.systemoneInstallDeps(undefined),
+    onSuccess: (result) => {
+      refresh();
+      if (result.ok) install.mutate();
+    },
+  });
 
   if (!status) {
     return (
@@ -228,7 +248,26 @@ function LocalPanel({ status }: { status: SystemOneAvailability | undefined }) {
           {status.localRuntimePhaseMessage}
         </p>
       ) : null}
-      {install.data && !install.data.ok ? <p className="jev-note error">{install.data.error}</p> : null}
+      {installDeps.data && !installDeps.data.ok ? <p className="jev-note error">{installDeps.data.error}</p> : null}
+      {install.data && !install.data.ok ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="jev-note error">{install.data.error}</p>
+          <div className="flex flex-wrap gap-2">
+            {/* 缺解释器是最常见的那种失败，直接给一键补齐，不让用户去查怎么装 Python。 */}
+            {!status.localRuntimeInstalled ? (
+              <Button size="sm" variant="outline" className="gap-1" disabled={installDeps.isPending} onClick={() => installDeps.mutate()}>
+                {installDeps.isPending ? (
+                  <Loader2Icon className="size-3 animate-spin" aria-hidden />
+                ) : (
+                  <DownloadIcon className="size-3" aria-hidden />
+                )}
+                {t("jev.local.installDeps")}
+              </Button>
+            ) : null}
+            <DiagnoseButton status={status} error={install.data.error ?? ""} logs={installLog} />
+          </div>
+        </div>
+      ) : null}
 
       {/* 权重 */}
       {status.localRuntimeInstalled ? (
@@ -306,7 +345,12 @@ function LocalPanel({ status }: { status: SystemOneAvailability | undefined }) {
         </div>
       ) : null}
 
-      {failure ? <p className="jev-note error">{failure}</p> : null}
+      {failure ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="jev-note error">{failure}</p>
+          <DiagnoseButton status={status} error={failure} logs={installLog} />
+        </div>
+      ) : null}
       {installLog.length > 0 && !status.localRuntimeInstalled ? (
         <pre className="jev-log max-h-28">{installLog.slice(-8).join("\n")}</pre>
       ) : null}
@@ -618,5 +662,63 @@ function DiscoveryResult({
         </div>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * 「让 Agent 诊断」：把这次报错连同环境一起，开一个新的 Agent 会话填进输入框。
+ *
+ * 为什么是**填而不是发**：诊断要动这台机器上的环境（装解释器、改 venv、看日志），
+ * 该由用户看一眼再决定发不发，顺手还能补一句自己的情况。带过去的东西都是排查真正
+ * 要用的：报错原文、平台与引擎目录、解释器来源、laya-mlx 版本，以及安装日志的末尾
+ * —— 这些正是本会话排查同一个问题时一条条去查的。
+ */
+function DiagnoseButton({
+  status,
+  error,
+  logs,
+}: {
+  status: SystemOneAvailability;
+  error: string;
+  logs: string[];
+}) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  // 和 Agent 页用同一个 queryKey：那边已经取过的话这里直接命中缓存。
+  const defaultWorkspace = useQuery({
+    queryKey: ["agent-workspace"],
+    queryFn: () => rpcClient.getAgentWorkspace(undefined),
+  });
+
+  const diagnose = useMutation({
+    mutationFn: async () => {
+      const prompt = [
+        t("jev.local.diagnosePrompt"),
+        "",
+        `报错：${error}`,
+        `平台：${navigator.platform || "macOS"}`,
+        `本地运行时：${status.localRuntimeInstalled ? `已安装 ${status.localRuntimeVersion}` : "未安装"}`,
+        `平台支持：${status.localRuntimeSupported ? "是" : "否"}`,
+        `当前阶段：${status.localRuntimePhase}${status.localRuntimePhaseMessage ? ` (${status.localRuntimePhaseMessage})` : ""}`,
+        logs.length > 0 ? `\n安装日志（末尾 ${Math.min(logs.length, 40)} 行）：\n${logs.slice(-40).join("\n")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const { session } = await rpcClient.createAgentSession({});
+      return { session, prompt };
+    },
+    onSuccess: ({ session, prompt }) => {
+      activateNewSession(queryClient, session, defaultWorkspace.data?.workspace ?? "");
+      // 输入框由 Agent 的编辑器消费这份草稿（与"回到这条提问"同一套机制）。
+      useChatStore.getState().setPendingPrompt(prompt);
+      useAppStore.getState().setActiveApp("agent");
+    },
+  });
+
+  return (
+    <Button size="sm" variant="outline" className="gap-1" disabled={diagnose.isPending} onClick={() => diagnose.mutate()}>
+      {diagnose.isPending ? <Loader2Icon className="size-3 animate-spin" aria-hidden /> : <BotIcon className="size-3" aria-hidden />}
+      {t("jev.local.diagnose")}
+    </Button>
   );
 }

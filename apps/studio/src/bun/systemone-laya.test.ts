@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   getLayaStatus,
+  workerFrame,
   layaDownloadModel,
   layaLoadModel,
   layaModelStates,
@@ -86,5 +87,24 @@ describe("本地运行时：状态与保护", () => {
     off();
     // 只是确认订阅接口的形状：真正的阶段推送由安装/加载过程触发。
     expect(seen).toEqual([]);
+  });
+});
+
+describe("请求帧的 id", () => {
+  test("payload 里的 id 不能覆盖生成的请求 id", () => {
+    // 这条守的是一个真出现过、而且很难看出来的 bug：`layaDownloadModel` 自带
+    // `id: "dl-<weights>"`，拼帧时写的是 `{ id, ...payload }`，展开把生成的 id 盖掉，
+    // 于是 pending 表登记 `r1`、回包带 `dl-…`，两边永远对不上 —— 权重明明下完了
+    // （进度都报到 done），调用方却一直等到 60 分钟超时，界面上就是"下载卡住"。
+    const frame = JSON.parse(workerFrame("r1", { msg: "download", weights: "acme/x", id: "dl-acme/x" }));
+    expect(frame.id).toBe("r1");
+    expect(frame.msg).toBe("download");
+    expect(frame.weights).toBe("acme/x");
+  });
+
+  test("帧是一整行（协议按行切分，中间不能有换行）", () => {
+    const line = workerFrame("r2", { msg: "predict", state: "a\nb" });
+    expect(line.endsWith("\n")).toBe(true);
+    expect(line.trimEnd().includes("\n")).toBe(false);
   });
 });
