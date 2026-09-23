@@ -44,6 +44,7 @@ export const STEP_PAUSE_MS = 260;
 import { RunLog, type RunLogEntry } from "./run-log";
 import { MarketView, type MarketMark } from "./market-view";
 import { BreakoutView } from "./breakout-view";
+import { renderBreakoutFrame } from "./breakout-frame";
 import {
   applyMarketDecision,
   marketReplayQuestions,
@@ -55,6 +56,8 @@ import {
   applyBreakoutAction,
   breakoutQuestions,
   breakoutState,
+  breakoutVisionQuestions,
+  breakoutVisionState,
   newBreakout,
   BREAKOUT_EVERY_MAX,
   BREAKOUT_EVERY_MIN,
@@ -72,7 +75,12 @@ import {
   MARKET_SYMBOLS,
   marketSpan,
 } from "./market-data";
-import type { SystemOneChoiceAnswer, SystemOneNoulAnswer, SystemOneScoreAnswer } from "../../../../shared/systemone";
+import type {
+  SystemOneChoiceAnswer,
+  SystemOneNoulAnswer,
+  SystemOneQuestions,
+  SystemOneScoreAnswer,
+} from "../../../../shared/systemone";
 
 /** 一次判定调用：计时，并把响应里的问题答案按名字摘出来。 */
 async function runOnce(
@@ -143,6 +151,8 @@ export function JevPlayground() {
   const [breakout, setBreakout] = useState<BreakoutState>(() => newBreakout({ decideEvery: breakoutEvery }));
   /** 最近一次判定里的每一帧（球 + 板子）；界面拿它把这一段播出来。 */
   const [ballFrames, setBallFrames] = useState<BreakoutFrame[]>([]);
+  /** 视觉版：这一步真正发给模型的那张图，界面直接放大显示它。 */
+  const [visionFrame, setVisionFrame] = useState<string | null>(null);
   const [log, setLog] = useState<RunLogEntry[]>([]);
   /**
    * 最近一步的落点，棋盘拿它做动画：走通了是滑过去，撞墙 / 撞边界是"顶一下"再弹回。
@@ -201,6 +211,7 @@ export function JevPlayground() {
     setMarks([]);
     putBreakout(newBreakout({ decideEvery: breakoutEvery }));
     setBallFrames([]);
+    setVisionFrame(null);
     setLastMove(null);
     setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
@@ -316,10 +327,24 @@ export function JevPlayground() {
       return decision.next.over ? "finished" : "continue";
     }
 
-    if (scenario.id === "breakout") {
+    if (scenario.id === "breakout" || scenario.id === "breakout-vision") {
       const game = breakoutRef.current;
       if (game.over) return "finished";
-      const outcome = await runOnce(breakoutState(game), breakoutQuestions(game), ["paddle_move"]);
+      // 两个场景共用同一局游戏,只有"怎么问"不同:一个给算好的数字,一个给一张图。
+      const vision = scenario.id === "breakout-vision";
+      let request: { state: Record<string, unknown>; questions: SystemOneQuestions };
+      if (vision) {
+        const frame = renderBreakoutFrame(game);
+        if (frame === null) {
+          setError({ status: 0, message: t("jev.playground.breakoutVision.noCanvas") });
+          return "error";
+        }
+        setVisionFrame(frame);
+        request = { state: breakoutVisionState(game, frame), questions: breakoutVisionQuestions() };
+      } else {
+        request = { state: breakoutState(game), questions: breakoutQuestions(game) };
+      }
+      const outcome = await runOnce(request.state, request.questions, ["paddle_move"]);
       if (!outcome.ok) {
         setError({ status: outcome.status, message: outcome.message });
         return "error";
@@ -404,6 +429,7 @@ export function JevPlayground() {
     setMarks([]);
     putBreakout(newBreakout({ decideEvery: breakoutEvery }));
     setBallFrames([]);
+    setVisionFrame(null);
     setLastMove(null);
     setTally({ steps: 0, wasted: 0, confidence: 0 });
     setLog([]);
@@ -447,6 +473,8 @@ export function JevPlayground() {
         : BREAKOUT_MAX_DECISIONS;
   // 用户选的区间里到底有多少根、是不是被上限截过 —— 下面的提示要如实说清楚。
   const marketWindow = clampMarketWindow(marketSymbol, marketFrom, marketTo);
+  // 数字版与视觉版是同一局游戏的两种问法：设置、进度、球场全都共用。
+  const isBreakout = scenario.id === "breakout" || scenario.id === "breakout-vision";
   const marketSpanDates = marketSpan(marketSymbol);
 
   return (
@@ -532,7 +560,7 @@ export function JevPlayground() {
           </div>
         ) : null}
 
-        {scenario.id === "breakout" && breakoutNoSignal ? (
+        {isBreakout && breakoutNoSignal ? (
           <div className="jev-note warn">
             {t("jev.playground.breakout.noSignal", {
               wasted: String(tally.wasted),
@@ -627,7 +655,7 @@ export function JevPlayground() {
         ) : null}
 
         {/* 打砖块设置：只有一个旋钮 —— 判定间隔。跑的过程中锁住。 */}
-        {scenario.id === "breakout" ? (
+        {isBreakout ? (
           <div className="flex flex-col gap-2">
             <span className="text-[11px] font-medium">{t("jev.playground.breakout.settings")}</span>
             <StepperRow
@@ -645,6 +673,11 @@ export function JevPlayground() {
                 max: String(BREAKOUT_MAX_DECISIONS),
               })}
             </p>
+            {scenario.id === "breakout-vision" ? (
+              <p className="text-[10px] leading-4 text-muted-foreground">
+                {t("jev.playground.breakoutVision.hint")}
+              </p>
+            ) : null}
           </div>
         ) : null}
 
@@ -695,7 +728,11 @@ export function JevPlayground() {
               <MarketView state={marketState} marks={marks} />
             </div>
           ) : (
-            <BreakoutView state={breakout} frames={ballFrames} />
+            <BreakoutView
+              state={breakout}
+              frames={ballFrames}
+              picture={scenario.id === "breakout-vision" ? visionFrame : null}
+            />
           )}
         </div>
 

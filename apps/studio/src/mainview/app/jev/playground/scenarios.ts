@@ -1022,6 +1022,62 @@ export type BreakoutFrame = {
   served: boolean;
 };
 
+/**
+ * 视觉版的请求:**不给数字,给一张图**。
+ *
+ * 和上面那份 `breakoutState` 是同一局面的两种问法 —— 那边把球速、落点、离板心多远
+ * 全替它算好;这边只给一张当前球场的 PNG,让它自己看。两个场景并排跑,差出来的就是
+ * "这个判定模型有没有视觉"。
+ *
+ * `state` 用的是 chat transcript 形状(`{ messages: [...] }`):协议里 `state` 允许
+ * 对象,而这个形状是唯一能带 `image_url` content part 的写法。**图片只以引用形式出现**
+ * (data URL 放在 `image_url` 里),不会被拼进任何文本字段 —— 拼进去就退化成几万个
+ * base64 文本 token 了,那正是这个场景要避免的事。
+ *
+ * 纯文本的部署收到它会直接 422(拒绝而不是瞎判),这是后端该有的行为,不是这里的 bug。
+ */
+export function breakoutVisionState(state: BreakoutState, image: string): Record<string, unknown> {
+  return {
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              "This is the current frame of a Breakout game. The bricks are at the top, the ball " +
+              "is the small white dot, and the paddle is the wide bar at the bottom. The paddle " +
+              "must be under the ball when it comes down, or a life is lost. " +
+              `This decision is held for the next ${state.decideEvery} frames.`,
+          },
+          { type: "image_url", image_url: { url: image } },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * 视觉版的问题。criteria 里**一个数字字段都不许提** —— 提了就等于把答案用文字喂回去,
+ * 那就不是在考视觉了。三条说明各自描述一种"看上去是什么样"。
+ */
+export function breakoutVisionQuestions(): SystemOneQuestions {
+  return {
+    paddle_move: {
+      type: "choice",
+      instructions:
+        "Look at the picture. Which way should the paddle move so that it ends up under the ball " +
+        "when the ball reaches the bottom?",
+      criteria: {
+        left: "In the picture the ball is to the LEFT of the paddle, so the paddle has to move left.",
+        stay: "In the picture the ball is already above the paddle, so the paddle should hold still.",
+        right:
+          "In the picture the ball is to the RIGHT of the paddle, so the paddle has to move right.",
+      },
+    },
+  };
+}
+
 export type BreakoutMove = {
   next: BreakoutState;
   action: BreakoutAction;
@@ -1124,5 +1180,10 @@ export const PLAYGROUND_SCENARIOS: readonly PlaygroundScenario[] = [
     id: "breakout",
     nameKey: "jev.playground.breakout.name",
     descKey: "jev.playground.breakout.desc",
+  },
+  {
+    id: "breakout-vision",
+    nameKey: "jev.playground.breakoutVision.name",
+    descKey: "jev.playground.breakoutVision.desc",
   },
 ];

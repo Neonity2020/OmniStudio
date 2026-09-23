@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useT } from "@stores/ui-lang";
+import { FRAME_H, FRAME_W } from "./breakout-frame";
 import {
   breakoutStats,
   bricksLeft,
@@ -91,7 +92,16 @@ function trailPaths(frames: readonly BreakoutFrame[], play: number): string[] {
   return paths;
 }
 
-export function BreakoutView({ state, frames }: { state: BreakoutState; frames: BreakoutFrame[] }) {
+export function BreakoutView({
+  state,
+  frames,
+  picture,
+}: {
+  state: BreakoutState;
+  frames: BreakoutFrame[];
+  /** 视觉版:模型这一步真正看到的那张图。给了就直接放大显示它,不再画 SVG。 */
+  picture?: string | null;
+}) {
   const t = useT();
   const stats = breakoutStats(state);
   const landing = predictLanding(state.ball);
@@ -147,6 +157,21 @@ export function BreakoutView({ state, frames }: { state: BreakoutState; frames: 
         </span>
       </div>
 
+      {picture ? (
+        /*
+          视觉版:**把发给模型的那张 PNG 原样放大**,而不是另画一张好看的。
+          人看到的和模型看到的必须是同一份像素 —— 另画一张,演示就成了障眼法。
+          `pixelated` 关掉插值:150×110 的图放大几倍,糊成一片就看不出是像素风了。
+        */
+        <div className="flex min-h-0 w-full flex-1 items-start justify-center">
+          <img
+            src={picture}
+            alt={t("jev.playground.breakout.aria")}
+            className="block h-auto w-full max-w-full rounded"
+            style={{ imageRendering: "pixelated", aspectRatio: `${BREAKOUT_W} / ${BREAKOUT_H}` }}
+          />
+        </div>
+      ) : (
       <div className="flex min-h-0 w-full flex-1 items-start justify-center" style={{ containerType: "size" }}>
         <svg
           viewBox={`0 0 ${BREAKOUT_W} ${BREAKOUT_H}`}
@@ -199,7 +224,15 @@ export function BreakoutView({ state, frames }: { state: BreakoutState; frames: 
             />
           ))}
 
-          <circle cx={shown.x} cy={shown.y} r={BREAKOUT_BALL_R} fill={BALL_COLOR} />
+          {/* 方块而不是圆:与视觉版那张像素图一个观感(那边 3.2 个单位缩完只有 1.6 像素,
+              画圆会糊成一团灰)。两个场景看起来得是同一台街机。 */}
+          <rect
+            x={shown.x - BREAKOUT_BALL_R}
+            y={shown.y - BREAKOUT_BALL_R}
+            width={BREAKOUT_BALL_R * 2}
+            height={BREAKOUT_BALL_R * 2}
+            fill={BALL_COLOR}
+          />
 
           <g>
             <rect x={shown.paddleX} y={BREAKOUT_PADDLE_Y} width={BREAKOUT_PADDLE_W} height={BREAKOUT_PADDLE_H} rx={3} fill={PADDLE_COLOR} />
@@ -222,7 +255,13 @@ export function BreakoutView({ state, frames }: { state: BreakoutState; frames: 
           ) : null}
         </svg>
       </div>
+      )}
 
+      {picture ? (
+        <p className="flex-none text-[10px] leading-4 text-muted-foreground">
+          {t("jev.playground.breakoutVision.legend", { w: String(FRAME_W), h: String(FRAME_H) })}
+        </p>
+      ) : (
       <div className="flex flex-none flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
         <span className="flex items-center gap-1">
           <svg className="size-3" viewBox="0 0 12 12" aria-hidden>
@@ -240,6 +279,7 @@ export function BreakoutView({ state, frames }: { state: BreakoutState; frames: 
           {t("jev.playground.breakout.legendLeft", { n: String(bricksLeft(state)) })}
         </span>
       </div>
+      )}
     </div>
   );
 }

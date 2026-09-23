@@ -48,6 +48,8 @@ import {
   newBreakout,
   paddleCenter,
   predictLanding,
+  breakoutVisionQuestions,
+  breakoutVisionState,
   BREAKOUT_ACTIONS,
   BREAKOUT_BALL_R,
   BREAKOUT_COLS,
@@ -229,12 +231,13 @@ describe("grid-runner：序列化（state / questions）", () => {
 // ---------------------------------------------------------------------------
 
 describe("PLAYGROUND_SCENARIOS", () => {
-  test("三个场景的 id 与 i18n key 都齐", () => {
-    expect(PLAYGROUND_SCENARIOS).toHaveLength(3);
+  test("四个场景的 id 与 i18n key 都齐", () => {
+    expect(PLAYGROUND_SCENARIOS).toHaveLength(4);
     expect(PLAYGROUND_SCENARIOS.map((scenario) => scenario.id)).toEqual([
       "grid-runner",
       "market-replay",
       "breakout",
+      "breakout-vision",
     ]);
     for (const scenario of PLAYGROUND_SCENARIOS) {
       expect(scenario.nameKey).toBeTypeOf("string");
@@ -764,5 +767,51 @@ describe("breakout：落点预测与请求", () => {
     expect(left).toContain("paddle_at_left_edge");
     expect(right).toContain("paddle_at_right_edge");
     expect(stay).toContain("landing_minus_paddle_center");
+  });
+});
+
+describe("breakout-vision：只给图，不给数字", () => {
+  const IMAGE = "data:image/png;base64,AAAB";
+
+  test("state 是 chat 形状，图片只以引用出现，一个数字字段都不带", () => {
+    const game = newBreakout({ decideEvery: 5 });
+    const state = breakoutVisionState(game, IMAGE);
+    const result = validateSystemOneRequest({
+      state,
+      model: "jev-latest",
+      questions: breakoutVisionQuestions(),
+    });
+    expect(result.ok).toBe(true);
+    const messages = state.messages as { role: string; content: Record<string, unknown>[] }[];
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.role).toBe("user");
+    const parts = messages[0]!.content;
+    expect(parts.map((part) => part.type)).toEqual(["text", "image_url"]);
+    expect(parts[1]?.image_url).toEqual({ url: IMAGE });
+    // 图**不能**出现在任何文本里：拼进去就退化成几万个 base64 文本 token，
+    // 那正是这个场景要证伪的东西。
+    expect(String(parts[0]?.text)).not.toContain("base64");
+    // 数字版里那些算好的信号（落点、速度、离板心多远）一个都不许漏进来。
+    const text = JSON.stringify(parts[0]);
+    for (const leak of ["predicted", "landing", "paddle_x", "velocity", "ball_"]) {
+      expect(text).not.toContain(leak);
+    }
+  });
+
+  test("三个选项说的都是「图上看起来怎样」，不提任何 state 字段名", () => {
+    const criteria = (breakoutVisionQuestions().paddle_move as SystemOneChoiceQuestion).criteria;
+    expect(Object.keys(criteria)).toEqual([...BREAKOUT_ACTIONS]);
+    for (const [, description] of Object.entries(criteria)) {
+      expect(String(description)).toContain("picture");
+      // 提到字段名就等于把数字版的答案用文字喂回去了。
+      expect(String(description)).not.toContain("landing_minus_paddle_center");
+    }
+    expect(String(criteria.left)).toContain("LEFT");
+    expect(String(criteria.right)).toContain("RIGHT");
+  });
+
+  test("同一局面下，视觉版与数字版问的是同一件事、用的是同一套动作", () => {
+    const game = newBreakout({ decideEvery: 5 });
+    expect(Object.keys(breakoutVisionQuestions())).toEqual(Object.keys(breakoutQuestions(game)));
   });
 });

@@ -96,6 +96,9 @@ const PLAYGROUND_UI_KEYS = [
   "jev.playground.breakout.legendTrail",
   "jev.playground.breakout.legendLeft",
   "jev.playground.breakout.noSignal",
+  "jev.playground.breakoutVision.noCanvas",
+  "jev.playground.breakoutVision.hint",
+  "jev.playground.breakoutVision.legend",
   // 运行日志
   "jev.playground.log.empty",
   "jev.playground.log.step",
@@ -119,6 +122,7 @@ const PLACEHOLDERS: Record<string, string[][]> = {
   "jev.playground.breakout.decisions": [["n", "max"]],
   "jev.playground.breakout.legendOffset": [["value"]],
   "jev.playground.breakout.legendLeft": [["n"]],
+  "jev.playground.breakoutVision.legend": [["w", "h"]],
   "jev.playground.breakout.noSignal": [["wasted", "steps", "confidence"]],
   "jev.playground.log.confidence": [["value"]],
 };
@@ -136,6 +140,8 @@ const SAMPLE_VALUES: Record<string, string> = {
   last: "2026-09-21",
   available: "300",
   reach: "16.0",
+  w: "150",
+  h: "110",
   wasted: "9",
   score: "120",
   lives: "2",
