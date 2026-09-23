@@ -8,6 +8,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  findSystemOnePassthroughBases,
+  parseSystemOneModelListing,
   SYSTEMONE_AUTH_MESSAGES,
   SYSTEMONE_DEFAULT_MODEL,
   SYSTEMONE_LOCAL_MODEL_NAMES,
@@ -238,5 +240,94 @@ describe("鉴权错误体与请求 id", () => {
     const b = newSystemOneRequestId();
     expect(a).toMatch(/^req_[0-9a-f]{32}$/);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("自动发现：模型清单的两种形状", () => {
+  test("官方形状（models[]）读成判定模型", () => {
+    // 实测 /jev/laya 的响应：官方 TypeSafe 那套卡片。
+    const listing = parseSystemOneModelListing({
+      models: [
+        { name: "jev-1.13.0", description: "Jev 1.13, TypeSafe's flagship System One model.", release_date: "2026-09-15" },
+        { name: "jev-latest", description: "Alias for the most recent stable Jev release.", release_date: "2026-09-15" },
+      ],
+    });
+    expect(listing.jev.map((m) => m.name)).toEqual(["jev-1.13.0", "jev-latest"]);
+    expect(listing.jev[0]?.release_date).toBe("2026-09-15");
+    expect(listing.others).toHaveLength(0);
+  });
+
+  test("OpenAI 形状（data[]）读成其它模型，并带上上下文配置", () => {
+    // 实测某 LiteLLM 代理的响应：只有聊天模型，没有判定模型。
+    const listing = parseSystemOneModelListing({
+      object: "list",
+      data: [
+        { id: "deepseek-v4.1-flash", object: "model", owned_by: "openai" },
+        { id: "qwen3.8-27b", object: "model", owned_by: "openai", max_input_tokens: 262144, max_output_tokens: 32768 },
+      ],
+    });
+    expect(listing.jev).toHaveLength(0);
+    expect(listing.others.map((m) => m.name)).toEqual(["deepseek-v4.1-flash", "qwen3.8-27b"]);
+    expect(listing.others[1]?.max_input_tokens).toBe(262144);
+    expect(listing.others[1]?.owned_by).toBe("openai");
+  });
+
+  test("两种形状同时给：同名模型合并成一行，字段互补", () => {
+    // 实测 /jev/openjev 就是这样回的 —— 分开列会让同一个模型出现两次。
+    const listing = parseSystemOneModelListing({
+      models: [
+        { name: "jev-latest", description: "OpenJev classification using Qwen/Qwen3.6-35B-A3B-AWQ", release_date: "2026-09-17" },
+      ],
+      object: "list",
+      data: [
+        { id: "jev-latest", object: "model", owned_by: "openjev" },
+        { id: "some-chat-model", object: "model", owned_by: "openai" },
+      ],
+    });
+    expect(listing.jev.map((m) => m.name)).toEqual(["jev-latest"]);
+    // description 来自卡片，owned_by 来自 OpenAI 那侧。
+    expect(listing.jev[0]?.description).toContain("OpenJev");
+    expect(listing.jev[0]?.owned_by).toBe("openjev");
+    expect(listing.others.map((m) => m.name)).toEqual(["some-chat-model"]);
+  });
+
+  test("读不懂的 body 返回空清单，不抛", () => {
+    for (const raw of [null, "nope", 42, {}, { models: "x" }]) {
+      expect(parseSystemOneModelListing(raw)).toEqual({ jev: [], others: [] });
+    }
+    // 裸数组：有 id 的当 OpenAI 记录，只有 name 的当官方卡片。
+    expect(parseSystemOneModelListing([{ id: "a" }]).others.map((m) => m.name)).toEqual(["a"]);
+    expect(parseSystemOneModelListing(["a", "b"]).jev.map((m) => m.name)).toEqual(["a", "b"]);
+  });
+});
+
+describe("自动发现：判定服务挂在子路径上", () => {
+  test("认出网关的 pass-through 前缀（名字里带 jev / laya）", () => {
+    // 实测某 LiteLLM 代理的 openapi.json：判定服务转发在 /jev/<名字> 下，
+    // 而 /v1/models 只列得出它自己代理的聊天模型。
+    const bases = findSystemOnePassthroughBases({
+      paths: {
+        "/v1/models": {},
+        "/v1/chat/completions": {},
+        "/jev/openjev": {},
+        "/jev/openjev/{subpath}": {},
+        "/jev/laya": {},
+        "/jev/laya/{subpath}": {},
+        "/anthropic/{subpath}": {},
+      },
+    });
+    expect(bases).toEqual(["/jev/openjev", "/jev/laya"]);
+  });
+
+  test("写明了 /v1/systemone 的前缀排在最前（那是最硬的证据）", () => {
+    const bases = findSystemOnePassthroughBases({
+      paths: { "/jev/laya/{subpath}": {}, "/judge/v1/systemone": {}, "/v1/systemone": {} },
+    });
+    // 根路径自己的 /v1/systemone 前缀是空串，不算候选。
+    expect(bases).toEqual(["/judge", "/jev/laya"]);
+  });
+
+  test("不是 OpenAPI 文档就返回空", () => {
+    for (const raw of [null, "x", {}, { paths: 1 }]) expect(findSystemOnePassthroughBases(raw)).toEqual([]);
   });
 });

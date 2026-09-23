@@ -17,6 +17,7 @@ import {
   DownloadIcon,
   Loader2Icon,
   PlayIcon,
+  SearchIcon,
   SquareIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -25,11 +26,13 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { useT } from "@stores/ui-lang";
 import { useJevStore } from "@stores/jev";
+import { useJevMetrics } from "@stores/jev-metrics";
 import { useSystemOneInstallStore } from "@stores/systemone-install";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { cn } from "@/mainview/lib/utils";
-import type { SystemOneAvailability } from "../../../bun/systemone";
+import { AgentDiagnoseButton } from "@/mainview/components/agent-diagnose-button";
+import type { SystemOneAvailability, SystemOneDiscovery } from "../../../bun/systemone";
 
 type EngineTab = "local" | "cloud";
 
@@ -173,6 +176,22 @@ function LocalPanel({ status }: { status: SystemOneAvailability | undefined }) {
     mutationFn: (weights: string) => rpcClient.systemoneStopModel({ weights }),
     onSuccess: refresh,
   });
+  /**
+   * 一键补依赖：装 uv（它再按需取合规的解释器）。
+   *
+   * 这条路是踩出来的：这台机器只有 macOS 自带的 Python 3.9，引擎装不了，而报错只说
+   * "请先安装 Python 3.11–3.13" —— 用户还得自己去查怎么装。装完直接接着装引擎。
+   *
+   * 和这个组件里其它钩子一样，**必须在下面那两个提前 return 之前** —— 顺序一变
+   * 就是 React #310（"渲染的钩子比上次多"），这一页已经栽过一次。
+   */
+  const installDeps = useMutation({
+    mutationFn: () => rpcClient.systemoneInstallDeps(undefined),
+    onSuccess: (result) => {
+      refresh();
+      if (result.ok) install.mutate();
+    },
+  });
 
   if (!status) {
     return (
@@ -226,7 +245,26 @@ function LocalPanel({ status }: { status: SystemOneAvailability | undefined }) {
           {status.localRuntimePhaseMessage}
         </p>
       ) : null}
-      {install.data && !install.data.ok ? <p className="jev-note error">{install.data.error}</p> : null}
+      {installDeps.data && !installDeps.data.ok ? <p className="jev-note error">{installDeps.data.error}</p> : null}
+      {install.data && !install.data.ok ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="jev-note error">{install.data.error}</p>
+          <div className="flex flex-wrap gap-2">
+            {/* 缺解释器是最常见的那种失败，直接给一键补齐，不让用户去查怎么装 Python。 */}
+            {!status.localRuntimeInstalled ? (
+              <Button size="sm" variant="outline" className="gap-1" disabled={installDeps.isPending} onClick={() => installDeps.mutate()}>
+                {installDeps.isPending ? (
+                  <Loader2Icon className="size-3 animate-spin" aria-hidden />
+                ) : (
+                  <DownloadIcon className="size-3" aria-hidden />
+                )}
+                {t("jev.local.installDeps")}
+              </Button>
+            ) : null}
+            <DiagnoseButton status={status} error={install.data.error ?? ""} logs={installLog} />
+          </div>
+        </div>
+      ) : null}
 
       {/* 权重 */}
       {status.localRuntimeInstalled ? (
@@ -304,7 +342,12 @@ function LocalPanel({ status }: { status: SystemOneAvailability | undefined }) {
         </div>
       ) : null}
 
-      {failure ? <p className="jev-note error">{failure}</p> : null}
+      {failure ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="jev-note error">{failure}</p>
+          <DiagnoseButton status={status} error={failure} logs={installLog} />
+        </div>
+      ) : null}
       {installLog.length > 0 && !status.localRuntimeInstalled ? (
         <pre className="jev-log max-h-28">{installLog.slice(-8).join("\n")}</pre>
       ) : null}
@@ -329,16 +372,23 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
   const [base, setBase] = useState("");
   const [key, setKey] = useState("");
   const [model, setModel] = useState("");
-  const [touched, setTouched] = useState(false);
+  /** 此刻光标在哪个框里（那个框不跟随外部设置）。 */
+  const [editing, setEditing] = useState<"base" | "model" | null>(null);
 
   const savedBase = settings.data?.settings.SYSTEMONE_CLOUD_BASE_URL ?? "";
   const savedModel = settings.data?.settings.SYSTEMONE_CLOUD_MODEL ?? "";
-  // 首次读到设置回填一次；之后以用户输入为准（否则每次刷新设置都会覆盖正在输入的框）。
+  /*
+   * 跟随已保存的设置 —— 但**正在输入的那个框不动**。
+   *
+   * 侧栏的模型选择改的是同一份设置（选另一条路径上的模型会连 Base URL 一起换），
+   * 如果这里只在首次回填，用户在侧栏选完之后，这两个框还停在上一台的地址和模型，
+   * 看起来就像"选了没生效"。`editing` 记的是此刻光标在哪个框里，只让那一个保持
+   * 用户正在敲的内容。
+   */
   useEffect(() => {
-    if (touched) return;
-    if (savedBase) setBase((prev) => prev || savedBase);
-    if (savedModel) setModel((prev) => prev || savedModel);
-  }, [savedBase, savedModel, touched]);
+    if (savedBase && editing !== "base") setBase(savedBase);
+    if (savedModel && editing !== "model") setModel(savedModel);
+  }, [savedBase, savedModel, editing]);
 
   const save = useMutation({
     mutationFn: (patch: Record<string, string>) => rpcClient.updateSettings({ settings: patch }),
@@ -347,7 +397,40 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
       void queryClient.invalidateQueries({ queryKey: ["systemone", "status"] });
     },
   });
-  const test = useMutation({ mutationFn: () => rpcClient.systemoneTest(undefined) });
+  const test = useMutation({
+    mutationFn: async () => {
+      const result = await rpcClient.systemoneTest(undefined);
+      // 「测试连接」跑的是一次真判定，延迟同样算数。
+      useJevMetrics.getState().record({
+        at: Date.now(),
+        ms: result.ok ? result.latencyMs : 0,
+        ok: result.ok,
+        backend: result.ok ? result.backend : null,
+        source: "test",
+      });
+      return result;
+    },
+  });
+  /**
+   * 自动发现：把正在编辑的地址与 Key 直接送过去（用户很可能刚粘完还没失焦保存）。
+   * 只读不写 —— 填哪个模型、换不换地址，由下面的结果里用户自己点。
+   */
+  const discover = useMutation({
+    mutationFn: (override?: { baseUrl: string }) =>
+      rpcClient.systemoneDiscover({ baseUrl: override?.baseUrl ?? base.trim(), apiKey: key.trim() }),
+  });
+
+  const pickModel = (name: string) => {
+    setModel(name);
+    save.mutate({ SYSTEMONE_CLOUD_MODEL: name });
+  };
+
+  /** 判定服务在子路径上时，把地址换成那一条，并就着新地址再读一遍。 */
+  const pickBase = (next: string) => {
+    setBase(next);
+    save.mutate({ SYSTEMONE_CLOUD_BASE_URL: next });
+    discover.mutate({ baseUrl: next });
+  };
 
   const inputClass = "h-8 text-xs";
 
@@ -360,11 +443,14 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           value={base}
           placeholder="https://api.typesafe.ai"
           spellCheck={false}
+          onFocus={() => setEditing("base")}
           onChange={(event) => {
-            setTouched(true);
             setBase(event.target.value);
           }}
-          onBlur={() => save.mutate({ SYSTEMONE_CLOUD_BASE_URL: base.trim() })}
+          onBlur={() => {
+            setEditing(null);
+            save.mutate({ SYSTEMONE_CLOUD_BASE_URL: base.trim() });
+          }}
         />
       </label>
       <label className="flex flex-col gap-1">
@@ -376,7 +462,6 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           placeholder={status?.cloudConfigured ? "••••••••" : "sk-…"}
           spellCheck={false}
           onChange={(event) => {
-            setTouched(true);
             setKey(event.target.value);
           }}
           onBlur={() => {
@@ -396,17 +481,38 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
           value={model}
           placeholder="jev-latest"
           spellCheck={false}
+          onFocus={() => setEditing("model")}
           onChange={(event) => {
-            setTouched(true);
             setModel(event.target.value);
           }}
-          onBlur={() => save.mutate({ SYSTEMONE_CLOUD_MODEL: model.trim() || "jev-latest" })}
+          onBlur={() => {
+            setEditing(null);
+            save.mutate({ SYSTEMONE_CLOUD_MODEL: model.trim() || "jev-latest" });
+          }}
         />
       </label>
-      <Button size="sm" variant="outline" className="gap-1 self-start" disabled={test.isPending} onClick={() => test.mutate()}>
-        {test.isPending ? <Loader2Icon className="size-3 animate-spin" aria-hidden /> : null}
-        {t("systemone.test")}
-      </Button>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1"
+          disabled={discover.isPending}
+          onClick={() => discover.mutate(undefined)}
+        >
+          {discover.isPending ? (
+            <Loader2Icon className="size-3 animate-spin" aria-hidden />
+          ) : (
+            <SearchIcon className="size-3" aria-hidden />
+          )}
+          {t("systemone.discover")}
+        </Button>
+        <Button size="sm" variant="outline" className="gap-1" disabled={test.isPending} onClick={() => test.mutate()}>
+          {test.isPending ? <Loader2Icon className="size-3 animate-spin" aria-hidden /> : null}
+          {t("systemone.test")}
+        </Button>
+      </div>
+      <p className="text-[10px] leading-4 text-muted-foreground">{t("systemone.discover.hint")}</p>
+      {discover.data ? <DiscoveryResult data={discover.data} onPickModel={pickModel} onPickBase={pickBase} /> : null}
       {test.data && !test.data.ok ? <p className="jev-note error">{t("systemone.test.failed", { message: test.data.message })}</p> : null}
       {test.data?.ok ? (
         <p className="jev-note ok">
@@ -419,5 +525,166 @@ function CloudPanel({ status }: { status: SystemOneAvailability | undefined }) {
         </p>
       ) : null}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 自动发现的结果
+// ---------------------------------------------------------------------------
+
+/** 把 token 数写短（1000000 → 1M）：模型行要在一行里放得下。 */
+function formatTokens(value: number | undefined): string {
+  if (!value) return "—";
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (value >= 1000) return `${Math.round(value / 1000)}K`;
+  return String(value);
+}
+
+function DiscoveredModelRow({
+  model,
+  onPick,
+}: {
+  model: SystemOneDiscovery["models"]["jev"][number];
+  onPick: (name: string) => void;
+}) {
+  const t = useT();
+  const hasContext = model.max_input_tokens !== undefined || model.max_output_tokens !== undefined;
+  const detail = [model.description, model.release_date, model.owned_by].filter(Boolean).join(" · ");
+  return (
+    <button
+      type="button"
+      className="flex w-full flex-col gap-0.5 rounded border px-2 py-1 text-left hover:bg-accent"
+      onClick={() => onPick(model.name)}
+    >
+      <span className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[11px]">{model.name}</span>
+        {hasContext ? (
+          <span className="text-[10px] text-muted-foreground">
+            {t("systemone.discover.context", {
+              input: formatTokens(model.max_input_tokens),
+              output: formatTokens(model.max_output_tokens),
+            })}
+          </span>
+        ) : null}
+      </span>
+      {detail ? <span className="text-[10px] leading-4 text-muted-foreground">{detail}</span> : null}
+    </button>
+  );
+}
+
+/**
+ * 发现结果，从"这地址到底能不能判定"往下读：
+ *   1. 判定端点在不在 —— 模型清单再长，没有 `/v1/systemone` 也跑不了判定；
+ *   2. 模型清单：判定模型在前，其它模型（多半是聊天模型）灰一档并写明未必能判定；
+ *   3. 端点不在根路径上时列出候选子路径 —— 网关常把判定服务转发到 `/jev/<名字>`，
+ *      一键换过去比让用户自己猜路径靠谱。
+ * 点模型只填模型框，点候选只换地址，都不会自己改别的设置。
+ */
+function DiscoveryResult({
+  data,
+  onPickModel,
+  onPickBase,
+}: {
+  data: SystemOneDiscovery;
+  onPickModel: (name: string) => void;
+  onPickBase: (base: string) => void;
+}) {
+  const t = useT();
+  const endpointNote =
+    data.systemone === "yes" ? "jev-note ok" : data.systemone === "forbidden" ? "jev-note" : "jev-note error";
+  const endpointText =
+    data.systemone === "unknown"
+      ? t("systemone.discover.endpoint.unknown", { base: data.base, message: data.message || "—" })
+      : t(`systemone.discover.endpoint.${data.systemone}`, { base: data.base });
+  const jev = data.models.jev;
+  const others = data.models.others;
+  const nothing = jev.length === 0 && others.length === 0;
+
+  return (
+    <div className="flex flex-col gap-2">
+      <p className={endpointNote}>{endpointText}</p>
+
+      {jev.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">
+            {t("systemone.discover.models", { n: String(jev.length) })}
+          </span>
+          {jev.map((model) => (
+            <DiscoveredModelRow key={model.name} model={model} onPick={onPickModel} />
+          ))}
+        </div>
+      ) : null}
+
+      {others.length > 0 ? (
+        <div className="flex flex-col gap-1 opacity-80">
+          <span className="text-[10px] text-muted-foreground">
+            {t("systemone.discover.others", { n: String(others.length) })}
+          </span>
+          {others.map((model) => (
+            <DiscoveredModelRow key={model.name} model={model} onPick={onPickModel} />
+          ))}
+        </div>
+      ) : null}
+
+      {nothing ? (
+        <p className="text-[10px] text-muted-foreground">
+          {t("systemone.discover.empty", {
+            note: data.message ? t("systemone.discover.note", { note: data.message }) : "",
+          })}
+        </p>
+      ) : null}
+
+      {data.candidates.length > 0 ? (
+        <div className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">{t("systemone.discover.candidates")}</span>
+          {data.candidates.map((candidate) => (
+            <div key={candidate.base} className="flex items-center justify-between gap-2 rounded border px-2 py-1">
+              <span className="flex min-w-0 flex-col">
+                {/* 地址长，列里放不下就截断 —— 悬停看全的那一份放 title 里。 */}
+                <span className="truncate font-mono text-[11px]" title={candidate.base}>
+                  {candidate.base}
+                </span>
+                <span className="text-[10px] text-muted-foreground">
+                  {t(`systemone.discover.endpoint.${candidate.systemone}`, {
+                    base: candidate.base,
+                    message: candidate.note || "—",
+                  })}
+                </span>
+              </span>
+              <Button size="sm" variant="outline" className="h-6 shrink-0 text-[10px]" onClick={() => onPickBase(candidate.base)}>
+                {t("systemone.discover.use")}
+              </Button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** JEV 本地运行时的现场：运行时状态 + 安装日志（按钮本身是共用的 `AgentDiagnoseButton`）。 */
+function DiagnoseButton({
+  status,
+  error,
+  logs,
+}: {
+  status: SystemOneAvailability;
+  error: string;
+  logs: string[];
+}) {
+  const t = useT();
+  return (
+    <AgentDiagnoseButton
+      intro={t("jev.local.diagnosePrompt")}
+      label={t("jev.local.diagnose")}
+      error={error}
+      context={[
+        `平台：${navigator.platform || "macOS"}`,
+        `本地运行时：${status.localRuntimeInstalled ? `已安装 ${status.localRuntimeVersion}` : "未安装"}`,
+        `平台支持：${status.localRuntimeSupported ? "是" : "否"}`,
+        `当前阶段：${status.localRuntimePhase}${status.localRuntimePhaseMessage ? ` (${status.localRuntimePhaseMessage})` : ""}`,
+      ]}
+      logs={logs}
+    />
   );
 }

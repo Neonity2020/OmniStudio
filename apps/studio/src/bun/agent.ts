@@ -91,6 +91,7 @@ import { createTurnSnapshot, revertToSnapshot } from "./agent-snapshots";
 import { getWorkspaceChanges, getWorkspaceDiff, isGitRepo } from "./workspace-changes";
 import {
   contextUsage,
+  contextWindowTokens,
   forgetPromptTokens,
   rememberPromptTokens,
   type ContextUsage,
@@ -108,9 +109,9 @@ import {
   retryNoticeText,
 } from "./agent-retry";
 import {
-  MAX_TOOL_OUTPUT_CHARS,
   clearConversationSpills,
   spillToolOutput,
+  toolOutputCharLimit,
   truncateForModel,
 } from "./agent-spill";
 import { computeTokenStats, type MessageStats } from "./chat-stats";
@@ -645,7 +646,8 @@ function makeToolOutputHook(conversationId: number) {
     result: unknown;
   }): Promise<AfterToolCallResult | undefined> => {
     const text = resultText(context.result);
-    if (text.length <= MAX_TOOL_OUTPUT_CHARS) return undefined;
+    const limit = toolOutputCharLimit(contextWindowTokens());
+    if (text.length <= limit) return undefined;
     const spill = spillToolOutput({ conversationId, toolName: context.toolCall.name, text });
     logEvent({
       level: "info",
@@ -655,7 +657,7 @@ function makeToolOutputHook(conversationId: number) {
       detail: { conversationId, tool: context.toolCall.name, chars: text.length, spill: spill?.path ?? null },
     });
     return {
-      content: [{ type: "text" as const, text: truncateForModel(text, { spillPath: spill?.path ?? null }).text }],
+      content: [{ type: "text" as const, text: truncateForModel(text, { maxChars: limit, spillPath: spill?.path ?? null }).text }],
     };
   };
 }
@@ -1123,8 +1125,14 @@ type Session = {
    * `coveredCount` 表示前 N 条消息已经被这段摘要取代（换会话 / 重新生成时整块丢掉）。
    */
   summary: { text: string; coveredCount: number; tokensBefore: number } | null;
-  /** 正在进行的摘要调用：同一会话同时只允许一次，避免并发重复计费。 */
-  summarizing: Promise<void> | null;
+  /**
+   * 摘要熔断：上次摘要失败的时刻。
+   *
+   * `transformContext` 每次模型调用前都会跑，而摘要超时是 90 秒；一直失败的话
+   * 一个十几步的回合会凭空多花十几分钟，用户只看到「处理中」在涨。失败后冷却
+   * 一段时间，期间直接走确定性裁剪（那本来就是失败时的退路）。
+   */
+  summaryFailedAt: number | null;
   /**
    * 本轮的回合快照 id（`createTurnSnapshot` 的产物）。
    * `checkpoint` 会记下它，`rewind` 时如果要连文件一起还原就用这个 id。
@@ -1158,8 +1166,17 @@ const sessions = new Map<number, Session>();
 /** 会话是否正在运行（UI 用来禁用输入框 / 显示停止按钮）。 */
 const running = new Set<number>();
 
+/**
+ * 已进入 `runAgentTurn`、但还没走到 `setAgentRunning(true)` 的会话。
+ *
+ * 启动段有两处 await（拉起推理服务、建会话），本地模式下能长达几十秒。
+ * 不把这段算进「在跑」，用户再发一条就会并发起第二轮 —— 两轮共用同一个
+ * Agent 实例与同一批模块级状态。
+ */
+const starting = new Set<number>();
+
 export function isAgentRunning(conversationId: number): boolean {
-  return running.has(conversationId);
+  return running.has(conversationId) || starting.has(conversationId);
 }
 
 /**
@@ -1508,6 +1525,7 @@ async function runSubagent(opts: {
   description: string;
   prompt: string;
   subagentType: string;
+  signal?: AbortSignal;
 }): Promise<string> {
   const subagentId = randomUUID().slice(0, 8);
   const isReview = opts.subagentType === "review";
@@ -1583,7 +1601,7 @@ async function runSubagent(opts: {
      * 记账放在这个局部对象上：子智能体跑完即散，不需要跨回合保留。
      */
     transformContext: makeContextTransform(
-      { workspace: opts.workspace, summary: null, compactedDropped: 0 },
+      { workspace: opts.workspace, summary: null, compactedDropped: 0, summaryFailedAt: null },
       opts.conversationId,
       { model, models, streamFn },
     ),
@@ -1606,6 +1624,13 @@ async function runSubagent(opts: {
     // 也能看到"原文在哪"（子会话的过程不入主上下文，但工具结果本身要能读回）。
     afterToolCall: makeToolOutputHook(opts.conversationId),
   });
+
+  // 父回合被中止时连子智能体一起停：否则用户按了停止，子智能体正在跑的
+  // bash / write_file 还会执行到自然结束。
+  if (opts.signal) {
+    if (opts.signal.aborted) agent.abort();
+    else opts.signal.addEventListener("abort", () => agent.abort(), { once: true });
+  }
 
   let text = "";
   let subagentSteps = 0;
@@ -1934,6 +1959,8 @@ export type CompactionHost = {
   workspace: string;
   summary: { text: string; coveredCount: number; tokensBefore: number } | null;
   compactedDropped: number;
+  /** 摘要熔断：上次摘要失败的时刻（冷却期内跳过摘要，直接走确定性裁剪）。 */
+  summaryFailedAt?: number | null;
   /** 探索打点 / 收网的状态（子智能体不参与，传 null）。 */
   checkpoint?: { goal: string; atMessageCount: number; atSnapshotId: string | null; startedAt: number } | null;
   rewind?: RewindState | null;
@@ -1950,6 +1977,10 @@ export function makeContextTransform(
   bundle: ModelBundle,
 ): (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]> {
   return async (messages, signal) => {
+    // 启动期（或两轮之间）按下的停止：这里是「run 已开始、请求还没发出」的唯一插入点。
+    // 内核的 abort() 在 prompt() 之前是 no-op（activeRun 还没建），所以只能从这里抛。
+    // 错误文案带 abort：runAgentTurn 的 catch 按 /abort/i 判定，走已有的「已停止」收尾。
+    if (stopRequests.has(conversationId)) throw new Error("aborted: stop requested before request");
     // 云端模式下窗口来自模型本身（chat-context.ts），不再拿本地引擎的 8k 默认值
     // 当云端窗口 —— 那会让压缩在 60% × 8k 处过早触发，白丢历史。
     const contextWindow = chatContextWindow();
@@ -1959,6 +1990,9 @@ export function makeContextTransform(
     // 摘要要保留的"最近上下文"：窗口的 1/4。本地 8k 窗口下约 2k tokens，
     // 够放下最近一两轮的来龙去脉，又不至于让摘要区域小到没意义。
     const keepRecent = Math.max(128, Math.floor(contextWindow * 0.25));
+
+    /** 摘要失败后的冷却：期间只走确定性裁剪。90 秒超时 × 十几步足够把一个回合拖垮。 */
+    const summaryCooldownMs = 5 * 60_000;
 
     const record = (toolName: string, output: string) => {
       recordEvent({ conversationId, messageId: currentMessageId(conversationId), kind: "status", toolName, output });
@@ -2002,7 +2036,9 @@ export function makeContextTransform(
       if (estimateMessagesTokens(effective as never) > budget) {
         const covered = host.summary?.coveredCount ?? 0;
         const cut = findSummaryCut(current, keepRecent, (slice) => estimateMessagesTokens(slice as never), 2);
-        if (cut !== null && cut > covered) {
+        const summaryCooling =
+          host.summaryFailedAt != null && Date.now() - host.summaryFailedAt < summaryCooldownMs;
+        if (cut !== null && cut > covered && !summaryCooling) {
           // 摘要输入里带上"这段历史里提到的事"召回的记忆：压缩后上下文才不会断片
           // （摘要是模型写的，它没看过记忆库；不喂给它，记忆就只存在于压缩之前）。
           const query = lastUserText(current.slice(covered, cut)) ?? "";
@@ -2020,6 +2056,7 @@ export function makeContextTransform(
           });
           if (outcome.ok) {
             host.summary = { text: outcome.summary, coveredCount: outcome.coveredCount, tokensBefore: outcome.tokensBefore };
+            host.summaryFailedAt = null;
             record(
               "compact",
               `上下文摘要：前 ${outcome.coveredCount} 条历史（约 ${outcome.tokensBefore} tokens）已压缩成摘要` +
@@ -2035,6 +2072,7 @@ export function makeContextTransform(
               detail: { conversationId },
             });
             record("compact", `摘要式压缩失败（${outcome.reason}），本轮改用确定性裁剪。`);
+            host.summaryFailedAt = Date.now();
           }
         }
       }
@@ -2175,7 +2213,7 @@ async function getOrCreateSession(
     startupContext,
     modelKey,
     summary: null,
-    summarizing: null,
+    summaryFailedAt: null,
     turnSnapshotId: null,
     checkpoint: null,
     rewind: null,
@@ -2439,6 +2477,15 @@ export async function runAgentTurn(opts: {
     return { ok: false, error: "No inference server configured" };
   }
 
+  // 在这里（同步段、任何 await 之前）清上一轮残留的停止标记。
+  // 不能放在后面的 await 之后：启动窗口里新按的停止也会被一起清掉，
+  // 回合就把「这一轮被要求停止」当成「上一轮的残留」忽略了。
+  stopRequests.delete(conversationId);
+
+  // 从这里开始有 await（拉起推理服务 / 建会话），必须先占位：
+  // 启动段里 `running` 还没置上，不占位的话用户再发一条会并发起第二轮。
+  starting.add(conversationId);
+
   // 本地模式下自动拉起推理服务器（与对话一致）。
   if (getSetting("SERVER_MODE") === "local") {
     const ready = await ensureServerReady();
@@ -2452,6 +2499,7 @@ export async function runAgentTurn(opts: {
         detail: { conversationId },
       });
       emitDone({ conversationId, messageId: Date.now(), content: "", error });
+      starting.delete(conversationId);
       return { ok: false, error };
     }
   }
@@ -2526,11 +2574,12 @@ export async function runAgentTurn(opts: {
    * 把后面那半截收回去，不能连成功回合说过的话一起撤掉。
    */
   const retryLimit = retryAttempts();
+  /** 这一轮的失败原因（outcome 为 error 时填）：收尾时要如实返回给调用方。 */
+  let turnError: string | null = null;
   let committedText = "";
   let committedReasoning = "";
   let stopRequested = false;
   let emptyNudges = 0;
-  stopRequests.delete(conversationId);
   /** user_prompt_submit hook 拦下这一轮时的原因（收尾时如实返回给调用方）。 */
   let hookBlockedReason: string | null = null;
   let promptTokens = 0;
@@ -2556,6 +2605,7 @@ export async function runAgentTurn(opts: {
 
   const startedAt = performance.now();
   setAgentRunning(conversationId, true);
+  starting.delete(conversationId);
 
   /**
    * 增量按帧批量下发（与对话同一份实现与同一个 40ms 常量，见 chunk-flusher.ts）。
@@ -2859,6 +2909,7 @@ export async function runAgentTurn(opts: {
         kind: "error",
         output: outcome.detail,
       });
+      turnError = outcome.detail;
       // 这一轮是"失败被编码成一条空助手消息"的形态（见 agent-outcome.ts），
       // 界面只有 ⚠️ 一行；把完整原因与模型信息落到统一日志，便于定位到具体后端。
       logEvent({
@@ -2917,6 +2968,7 @@ export async function runAgentTurn(opts: {
     if (!aborted) {
       recordEvent({ conversationId, messageId: assistantId, kind: "error", output: msg });
       fullText = fullText ? `${fullText}\n\n⚠️ ${msg}` : `⚠️ ${msg}`;
+      turnError = msg;
     } else {
       fullText = fullText ? `${fullText}\n\n_（已停止）_` : "_（已停止）_";
     }
@@ -2927,6 +2979,7 @@ export async function runAgentTurn(opts: {
     flushChunks();
     flusher.dispose();
     setAgentRunning(conversationId, false);
+    starting.delete(conversationId);
     activeMessageIds.delete(conversationId);
     stopRequests.delete(conversationId);
   }
@@ -3031,6 +3084,7 @@ export async function runAgentTurn(opts: {
   }
 
   if (hookBlockedReason) return { ok: false, error: hookBlockedReason };
+  if (turnError) return { ok: false, error: turnError };
   return { ok: true };
 }
 
@@ -3182,7 +3236,13 @@ async function drainQueuedMessages(conversationId: number, workspace: string): P
     const [next, ...rest] = queue;
     if (rest.length === 0) pendingMessages.delete(conversationId);
     else pendingMessages.set(conversationId, rest);
-    const result = await runAgentTurn({ conversationId, content: next!, workspace });
+    // `insertUserMessage: false`：这条消息入队时（`followUpAgentMessage`）已经落库，出队时再插一条就会双写。
+    const result = await runAgentTurn({
+      conversationId,
+      content: next!,
+      workspace,
+      insertUserMessage: false,
+    });
     if (!result.ok) return;
   }
 }
@@ -3224,6 +3284,30 @@ export function stopAgentRun(conversationId: number): { ok: boolean } {
   } catch {
     return { ok: false };
   }
+}
+
+/**
+ * 应用退出时收尾所有在跑的 agent 回合。
+ *
+ * 只做「请求停止」这一件事：具体的中止、正文落库、进程组回收都由各自回合的
+ * 收尾路径完成（`stopAgentRun` → abort → finally）。这里不重复实现，也不等它们跑完
+ * —— 退出路径上不能被某个卡住的回合拖住。
+ *
+ * 返回被请求停止的会话数，给日志用。
+ */
+export function stopAllAgentRuns(): number {
+  // 启动中的也要停：那段窗口里 `bash` 还没起，但授权弹窗和会话可能已经建了。
+  const ids = new Set<number>([...running, ...starting]);
+  let stopped = 0;
+  for (const id of ids) {
+    try {
+      stopAgentRun(id);
+      stopped++;
+    } catch {
+      // 收尾阶段最怕「一个失败把其余都跳过」（shutdown.ts 同一原则）。
+    }
+  }
+  return stopped;
 }
 
 export function getAgentRunState(conversationId: number): AgentRunState {

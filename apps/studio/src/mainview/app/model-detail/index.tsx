@@ -148,6 +148,12 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     mutationFn: async () => {
       // 小文件优先：config / tokenizer / index 这些几 KB 的先下完，模型目录立刻
       // 具备可读性，几个 GB 的权重分片排在最后（后端队列也会按体积重排兜底）。
+      // 仓库清单（path + size）随任务带下去：下载开跑前写成 manifest，完成后拿它比对磁盘。
+      const manifestFiles = [...visibleFiles, ...supportFiles].map((f) => ({
+        path: f.path,
+        name: f.name,
+        size: f.size,
+      }));
       for (const f of sortBySizeAsc(pendingFiles)) {
         await rpcClient.startModelDownload({
           repo: repo!,
@@ -155,6 +161,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
           category: category ?? undefined,
           source: modelSource,
           size: f.size,
+          manifestFiles,
         });
       }
     },

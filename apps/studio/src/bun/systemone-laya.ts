@@ -18,6 +18,7 @@ import { logEvent } from "./app-log";
 import { getSetting } from "./db/settings";
 import { getDataDir } from "./paths";
 import { proxyChildEnv } from "./proxy";
+import { removeManifest, writeManifest } from "./install-manifest";
 
 export type LayaPhase = "idle" | "installing" | "loading" | "ready" | "error";
 
@@ -168,8 +169,16 @@ async function findPython(): Promise<string | null> {
   return null;
 }
 
+/** 没有合规的系统解释器时，交给 uv 去取这个版本（它会下载并缓存一份）。 */
+const UV_PYTHON_VERSION = "3.12";
+
 /** `undefined` = 还没探过；`null` = 探过了但没有可用的 Python。 */
 let pythonCache: string | null | undefined;
+
+/** 装完依赖要重探一次 —— 否则刚装好的解释器会被上一次的"没有"挡住。 */
+function resetPythonCache(): void {
+  pythonCache = undefined;
+}
 
 /** 读取 venv 里已安装的 laya-mlx 版本（未安装返回 null）。 */
 async function getLayaVersion(): Promise<string | null> {
@@ -431,13 +440,39 @@ async function ensureWorker(): Promise<Worker | null> {
  * 超时不是"拿不到结果就丢"—— worker 仍在跑，这里只是不再等（下载尤其如此：
  * 断开界面不该把已经下了一半的权重丢掉）。
  */
+/**
+ * 拼一行请求帧。
+ *
+ * `id` **由这里统一生成，payload 不得覆盖**：`layaDownloadModel` 曾经自带一个
+ * `id: "dl-<weights>"`，而这里以前写的是 `{ id, ...payload }` —— 展开把生成的 id
+ * 盖掉了，于是 pending 表登记的是 `r1`、回包带的是 `dl-…`，两边永远对不上：
+ * 权重明明下完了（进度都报到 done），调用方却一直等到超时，界面上就是"下载卡住"。
+ */
+export function workerFrame(id: string, payload: Record<string, unknown>): string {
+  return `${JSON.stringify({ ...payload, id })}\n`;
+}
+
 async function sendToWorker(
   payload: Record<string, unknown>,
   timeoutMs: number,
 ): Promise<LayaPredictResult> {
   const w = await ensureWorker();
   if (!w) {
-    return { ok: false, error: "laya 本地运行时不可用（未安装或平台不支持）", kind: "worker" };
+    /*
+     * 分清三种"起不来"，别拿一句"未安装或平台不支持"打发所有情况。
+     *
+     * 实测踩到的就是第三种：引擎装着、平台也对，worker 因为 import 失败启动不了，
+     * 真实原因（`fatal` 带回来的那句）只进了安装日志，界面上却说"未安装" ——
+     * 照着这句去查，方向从一开始就是错的。
+     */
+    if (!platformSupported()) {
+      return { ok: false, error: "本地 JEV 运行时需要 Apple Silicon 的 macOS（MLX）", kind: "worker" };
+    }
+    if (!existsSync(venvBinary("python3"))) {
+      return { ok: false, error: "laya 本地运行时还没安装：先点「安装引擎」", kind: "worker" };
+    }
+    const detail = currentPhase === "error" && currentPhaseMessage ? `：${currentPhaseMessage}` : "";
+    return { ok: false, error: `laya 本地运行时启动失败${detail}`, kind: "worker" };
   }
   const id = `r${++w.nextId}`;
   const result = new Promise<LayaPredictResult>((resolve) => {
@@ -448,7 +483,7 @@ async function sendToWorker(
     w.pending.set(id, { resolve, timer });
   });
   try {
-    w.proc.stdin.write(new TextEncoder().encode(`${JSON.stringify({ id, ...payload })}\n`));
+    w.proc.stdin.write(new TextEncoder().encode(workerFrame(id, payload)));
     w.proc.stdin.flush?.();
   } catch (e) {
     const pending = w.pending.get(id);
@@ -525,7 +560,8 @@ export async function layaModelStates(
 /** 下载权重到 Hugging Face 缓存（进度走 `onLayaModelProgress`）。 */
 export async function layaDownloadModel(weights: string): Promise<LayaPredictResult> {
   // 下载没有上限超时：给 60 分钟，断在这也不影响 worker 继续下（缓存可续传）。
-  return sendToWorker({ msg: "download", weights, id: `dl-${weights}` }, 60 * 60_000);
+  // 不要在这里自带 id —— 请求 id 归 sendToWorker 管（见 workerFrame 的注释）。
+  return sendToWorker({ msg: "download", weights }, 60 * 60_000);
 }
 
 /** 把权重加载成常驻实例（引擎页的「启动」）：不跑推理，只付出加载成本。 */
@@ -566,7 +602,10 @@ export async function stopLayaWorker(): Promise<{ ok: boolean }> {
 
 export async function getLayaStatus(): Promise<LayaStatus> {
   const supported = platformSupported();
-  const pythonPath = supported ? await findPython() : null;
+  // 装不装得起来看的是"有没有解释器来源"：系统 Python 或 uv，有一个就够。
+  const pythonPath = supported
+    ? ((await findPython()) ?? Bun.which("uv", { PATH: getSearchPath() }))
+    : null;
   const version = await getLayaVersion();
   return {
     platformSupported: supported,
@@ -578,6 +617,51 @@ export async function getLayaStatus(): Promise<LayaStatus> {
     phase: currentPhase,
     phaseMessage: currentPhaseMessage,
   };
+}
+
+/**
+ * 一键补齐依赖：装 uv。
+ *
+ * 为什么是 uv 而不是 Python：装 Python 要么让用户自己去装 Homebrew 和 python@3.12，
+ * 要么我们去碰系统的解释器 —— 都不合适。uv 是单个二进制，装完它自己会按需下载并
+ * 缓存合规的解释器（见 `UV_PYTHON_VERSION`），引擎安装那一步就能接着往下走。
+ *
+ * 优先用 Homebrew（这台机器上有的话，装出来的东西归 brew 管，用户后面好卸）；
+ * 没有 brew 才用官方安装脚本装到 `~/.local/bin`。
+ */
+export async function installLayaDeps(): Promise<{ ok: boolean; error?: string; tool?: string }> {
+  if (!platformSupported()) {
+    return { ok: false, error: "本地 JEV 运行时需要 Apple Silicon 的 macOS（MLX），当前平台不支持" };
+  }
+  resetPythonCache();
+  if (Bun.which("uv", { PATH: getSearchPath() }) || (await findPython())) {
+    return { ok: true, tool: "already" };
+  }
+  const brew = Bun.which("brew", { PATH: getSearchPath() });
+  const cmd = brew
+    ? [brew, "install", "uv"]
+    : ["/bin/sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"];
+  emitPhase("installing", "安装 uv…");
+  emitLog(`$ ${cmd.join(" ")}`);
+  const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe", env: { ...process.env, ...proxyChildEnv() } });
+  await Promise.all([streamLines(proc.stdout), streamLines(proc.stderr, true)]);
+  const code = await proc.exited;
+  resetPythonCache();
+  const installed = Bun.which("uv", { PATH: getSearchPath() });
+  if (code !== 0 || !installed) {
+    logEvent({
+      level: "error",
+      source: "systemone",
+      event: "systemone.laya.deps_failed",
+      message: `安装 uv 失败（退出码 ${code}）`,
+      detail: { viaBrew: !!brew, exitCode: code },
+    });
+    emitPhase("error", "依赖安装失败");
+    return { ok: false, error: `安装 uv 失败（退出码 ${code}），详见安装日志` };
+  }
+  emitLog(`uv 已就绪：${installed}`);
+  emitPhase("idle", "");
+  return { ok: true, tool: brew ? "brew" : "script" };
 }
 
 let installInFlight: Promise<LayaInstallResult> | null = null;
@@ -594,9 +678,27 @@ export function installLayaRuntime(): Promise<LayaInstallResult> {
     if (!platformSupported()) {
       return { ok: false, error: "本地 JEV 运行时需要 Apple Silicon 的 macOS（MLX），当前平台不支持" };
     }
+    const uv = Bun.which("uv", { PATH: getSearchPath() });
     const python = await findPython();
-    if (!python) {
-      return { ok: false, error: "未找到 Python 3.11–3.13，请先安装（macOS: brew install python@3.12）" };
+    /*
+     * 有 uv 就不需要系统 Python。
+     *
+     * uv 自己会下载并管理解释器（`uv venv --python 3.12`），而这台机器上很可能只有
+     * macOS 自带的 3.9 —— 以前在这里直接拦住，用户看到的是"未找到 Python 3.11–3.13"，
+     * 明明装着 uv 却装不了引擎。系统 Python 合规时仍然优先用它（省一次 20 多 MB 的
+     * 解释器下载）。
+     */
+    if (!uv && !python) {
+      return {
+        ok: false,
+        error: "未找到 Python 3.11–3.13，也没有 uv。装其中一个即可（macOS: brew install python@3.12，或 brew install uv）",
+      };
+    }
+    // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+    if (!removeManifest(layaEngineDir())) {
+      const error = `无法清除上次的安装记录，请检查 ${layaEngineDir()} 是否被占用或只读`;
+      emitLog(error);
+      return { ok: false, error };
     }
     emitPhase("installing", "创建虚拟环境…");
     const engineDir = layaEngineDir();
@@ -608,11 +710,19 @@ export function installLayaRuntime(): Promise<LayaInstallResult> {
     }
 
     const enginePython = venvBinary("python3");
-    const uv = Bun.which("uv", { PATH: getSearchPath() });
     if (!existsSync(enginePython)) {
+      /*
+       * uv 的 `--python` 既收路径也收版本号：没有合规的系统解释器时就报版本，让它自己去取。
+       *
+       * `--clear` 只在目标已经是个 venv 时才用：上面刚往这个目录写了 `.installing` 标记，
+       * 对 uv 来说这就是"非 venv 的非空目录"，它会直接拒绝清（`python -m venv --clear`
+       * 不挑，所以这条路以前一直没露出来）。目录是新的就用 `--allow-existing`，
+       * 让标记文件留着。
+       */
+      const looksLikeVenv = existsSync(path.join(engineDir, "pyvenv.cfg"));
       const cmd = uv
-        ? [uv, "venv", "--clear", "--python", python, engineDir]
-        : [python, "-m", "venv", "--clear", engineDir];
+        ? [uv, "venv", looksLikeVenv ? "--clear" : "--allow-existing", "--python", python ?? UV_PYTHON_VERSION, engineDir]
+        : [python as string, "-m", "venv", "--clear", engineDir];
       emitLog(`$ ${cmd.join(" ")}`);
       const venv = Bun.spawnSync(cmd, { stdout: "pipe", stderr: "pipe" });
       if (venv.exitCode !== 0) {
@@ -663,6 +773,13 @@ export function installLayaRuntime(): Promise<LayaInstallResult> {
     }
     const version = await getLayaVersion();
     emitLog(version ? `安装成功：laya-mlx ${version}` : "安装成功");
+    writeManifest(layaEngineDir(), {
+      engine: "laya-mlx",
+      version: version ?? null,
+      platform: process.platform,
+      arch: process.arch,
+      steps: 2,
+    });
     emitPhase("idle", "");
     return { ok: true, version: version ?? undefined };
   })().finally(() => {

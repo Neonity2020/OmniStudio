@@ -16,15 +16,27 @@ import { SlidersHorizontalIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { useJevStore } from "@stores/jev";
+import { useJevMetrics } from "@stores/jev-metrics";
 import { useT } from "@stores/ui-lang";
 import { useQuery } from "@tanstack/react-query";
 import { JevAnswers, type JevRunResult } from "./answers";
 import { EngineSelector } from "./engine-panel";
 import { NaturalLanguageBox } from "./nl-box";
+import { JevPlayground } from "./playground";
 import { QuestionEditor } from "./questions";
 import { buildCallExample, buildQuestions } from "./drafts";
 
+/**
+ * 侧栏顶部的两段切换：判定台（`JevConsole`）/ 游乐场（`JevPlayground`）。
+ * 分叉必须在这一层：判定台自己有一批 hook，若在它内部按 view 提前 return，
+ * 切到游乐场的那次渲染就会少跑一批 hook（Rendered fewer hooks than expected）。
+ */
 export function JevScreen() {
+  const view = useJevStore((s) => s.view);
+  return view === "playground" ? <JevPlayground /> : <JevConsole />;
+}
+
+function JevConsole() {
   const t = useT();
   const queryClient = useQueryClient();
   // 状态放 store：侧栏点示例要改这里正在编辑的草稿，两处隔着 MainLayout 的层级。
@@ -47,13 +59,24 @@ export function JevScreen() {
   const example = useMemo(() => buildCallExample(state, built.questions), [state, built.questions]);
 
   const run = useMutation({
-    mutationFn: (override?: { state: string; questions: Record<string, unknown> }) =>
-      rpcClient.systemoneRun({
+    mutationFn: async (override?: { state: string; questions: Record<string, unknown> }) => {
+      // 计时放在这里而不是后端：驾驶舱要的是"点下运行到看见答案"的端到端耗时。
+      const started = performance.now();
+      const result = await rpcClient.systemoneRun({
         // 生成路径要把"刚生成的那一份"立刻发出去（此刻 store 还没重新渲染完）。
         state: override?.state ?? state,
         questions: override?.questions ?? built.questions,
         ...(model.trim() ? { model: model.trim() } : {}),
-      }),
+      });
+      useJevMetrics.getState().record({
+        at: Date.now(),
+        ms: Math.round(performance.now() - started),
+        ok: result.ok,
+        backend: result.ok ? result.backend : null,
+        source: "console",
+      });
+      return result;
+    },
     onSuccess: (data) => {
       setResult(data);
       // 每次调用都记一行用量（价格 0，只记 tokens 与次数），用完刷新账本。

@@ -189,6 +189,7 @@ function browserOriginAllowed(req: Request): boolean {
   // 给页面自己的 JS/CSS 也带上 `Origin: https://<隧道域名>`。不认这条，公网打开 /chat
   // 就是整页资源 403、界面白屏（curl 不带 Origin，所以只测接口是发现不了的）。
   if (isOwnExposedOrigin(origin)) return true;
+  if (isSameOriginOnBoundHost(req, origin)) return true;
   const tokens = authTokens();
   if (tokens.length === 0) return !isPubliclyExposed();
   return authOk(req, tokens);
@@ -199,6 +200,29 @@ function isOwnExposedOrigin(origin: string): boolean {
   if (!publicExposureHost) return false;
   try {
     return normalizeHostName(new URL(origin).host) === publicExposureHost;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 请求的 `Origin` 与它自己的 `Host` 同源，且网关是被显式绑到非回环地址的
+ * （用户有意对外服务，与 `hostHeaderAllowed` 最后一行同一个判据）。
+ *
+ * 存在的理由与 `isOwnExposedOrigin` 完全一样：vite 产物的 `<script crossorigin>`
+ * 会让浏览器给**页面自己的** JS/CSS 带上 `Origin`，而静态资源请求不带
+ * `Authorization` —— 不放行这条，局域网打开 /chat 就是整页资源 403、白屏
+ * （curl 不带 Origin，所以只测接口发现不了）。
+ *
+ * 安全性：只放行「Origin 的主机名 == 这次请求打到的 Host」，即真正的同源请求。
+ * 第三方页面发起的跨站请求带的是它自己的域名，与 Host 不同，照样被拒。
+ */
+function isSameOriginOnBoundHost(req: Request, origin: string): boolean {
+  if (isLoopbackHost(boundHost)) return false;
+  const host = req.headers.get("host");
+  if (!host) return false;
+  try {
+    return normalizeHostName(new URL(origin).host) === normalizeHostName(host);
   } catch {
     return false;
   }

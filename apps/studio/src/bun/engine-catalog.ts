@@ -42,6 +42,7 @@ import {
   type PythonEngineId,
 } from "./engine-paths";
 import * as EngineInstall from "./engine-install";
+import { removeManifest, verifyInstall, writeManifest, type VerifyReason } from "./install-manifest";
 import * as MlxGen from "./mlx-gen";
 import * as Laya from "./systemone-laya";
 import * as Served from "./model-servers";
@@ -138,6 +139,33 @@ const PYTHON_ENGINE_DIRS: Record<"vllm" | "sglang" | "mlx", PythonEngineId> = {
   mlx: "mlx-lm",
 };
 
+/**
+ * manifest 验证（「这次安装到底完成了没有」，见 install-manifest.ts）。
+ * 只给托管目录的引擎用：PATH / brew / conda 那份不是我们装的，不查。
+ */
+function checkManifest(
+  id: LocalEngineId,
+  managedDir: string | null,
+  expectedVersion: string | null,
+): { installComplete: boolean; installIssue?: VerifyReason } {
+  // tesseract 装进用户 Homebrew（无托管目录），没有也不该有 manifest。
+  if (id === "tesseract") return { installComplete: true };
+  if (managedDir === null) return { installComplete: true };
+  const v = verifyInstall(managedDir, { engine: id, version: expectedVersion ?? undefined });
+  if (v.ok) return { installComplete: true };
+  // 老用户（manifest 功能上线前装的）没有 manifest → reason 会是 missing，
+  // 这不是坏安装，只是旧数据。只记 info 级日志，**不阻断任何操作**（「启动」按钮不禁用），
+  // 让数据跑起来；阻断逻辑以后再说。
+  logEvent({
+    level: "info",
+    source: "server",
+    event: "engine.manage.install_incomplete",
+    message: `${localEngineSpec(id).name} 托管安装的完整性校验为 ${v.reason}`,
+    detail: { engine: id, dir: managedDir, reason: v.reason, version: expectedVersion },
+  });
+  return { installComplete: false, installIssue: v.reason };
+}
+
 async function probeInference(id: InferenceEngine): Promise<LocalEngineStatus> {
   const bin = await createRuntime(id).checkBinary();
   // 「应用自己装的那份」只看托管路径在不在，不看 runtime 报的 mode：`mode === "python"`
@@ -162,6 +190,7 @@ async function probeInference(id: InferenceEngine): Promise<LocalEngineStatus> {
     requirement: support.requirement ?? null,
     canUninstall: managed,
     upgradeKind: "latest",
+    ...checkManifest(id, managed ? managedDir : null, EngineInstall.readInstalledEngineVersion(id)),
   };
 }
 
@@ -170,10 +199,11 @@ async function probeWhisper(): Promise<LocalEngineStatus> {
   const managedDir = WhisperEngine.whisperEngineDir();
   const managed = existsSync(join(managedDir, "current"));
   const asr = await Asr.getAsrStatus();
+  const version = info.version;
   return {
     id: "whisper.cpp",
     state: stateOf(managed, info.installed),
-    version: info.version,
+    version,
     path: info.binaryPath,
     managedDir: managed ? managedDir : null,
     sizeBytes: managed ? await engineDirSize(managedDir) : null,
@@ -188,6 +218,7 @@ async function probeWhisper(): Promise<LocalEngineStatus> {
     // macOS 走 conda-forge 最新，其余平台是钉死的 Release：这里的「升级」= 重新下载一份，
     // 能修好被破坏的安装；真有新版本时也跟着上游走。
     upgradeKind: "repair",
+    ...checkManifest("whisper.cpp", managed ? managedDir : null, version),
   };
 }
 
@@ -198,10 +229,11 @@ async function probeAudioCpp(): Promise<LocalEngineStatus> {
   const managed = existsSync(TTSLocal.audioCppEngineBin());
   const asr = await AsrAudioCpp.getAsrAudioCppStatus();
   const supported = TTSLocal.audioCppSupported();
+  const version = managed ? status.version : null;
   return {
     id: "audio.cpp",
     state: stateOf(managed, status.engineInstalled),
-    version: managed ? status.version : null,
+    version,
     path: status.binaryPath,
     managedDir: managed ? dir : null,
     sizeBytes: managed ? await engineDirSize(dir) : null,
@@ -214,16 +246,18 @@ async function probeAudioCpp(): Promise<LocalEngineStatus> {
     requirement: null,
     canUninstall: managed,
     upgradeKind: "repair",
+    ...checkManifest("audio.cpp", managed ? dir : null, version),
   };
 }
 
 async function probePaddleOcr(): Promise<LocalEngineStatus> {
   const status = await PpOcr.getPpOcrStatus();
   const dir = PpOcr.engineDirPath();
+  const version = status.version || null;
   return {
     id: "paddleocr",
     state: status.engineInstalled ? "managed" : "missing",
-    version: status.version || null,
+    version,
     path: status.engineDir,
     managedDir: status.engineInstalled ? dir : null,
     sizeBytes: status.engineInstalled ? await engineDirSize(dir) : null,
@@ -234,6 +268,7 @@ async function probePaddleOcr(): Promise<LocalEngineStatus> {
     requirement: "需要本机有 Python 3.10–3.12（应用会建独立虚拟环境安装）；识别模型分开下载",
     canUninstall: status.engineInstalled,
     upgradeKind: "repair",
+    ...checkManifest("paddleocr", status.engineInstalled ? dir : null, version),
   };
 }
 
@@ -254,6 +289,8 @@ async function probeTesseract(): Promise<LocalEngineStatus> {
     requirement: "由 Homebrew 装到系统里，应用不接管它的升级与卸载",
     canUninstall: false,
     upgradeKind: "repair",
+    // 系统安装（Homebrew）不写 manifest，恒为 true。
+    installComplete: true,
   };
 }
 
@@ -274,6 +311,7 @@ async function probeMflux(): Promise<LocalEngineStatus> {
     requirement: "需要本机有 Python 3.10+（应用会建独立虚拟环境安装）",
     canUninstall: status.engineInstalled,
     upgradeKind: "latest",
+    ...checkManifest("mflux", status.engineInstalled ? dir : null, status.version),
   };
 }
 
@@ -283,10 +321,11 @@ async function probeLaya(): Promise<LocalEngineStatus> {
     ? await Laya.getLayaStatus()
     : ({ installed: false, version: "", workerRunning: false } as const);
   const dir = Laya.layaEngineDirPath();
+  const version = status.version || null;
   return {
     id: "laya-mlx",
     state: status.installed ? "managed" : "missing",
-    version: status.version || null,
+    version,
     path: status.installed ? dir : null,
     managedDir: status.installed ? dir : null,
     sizeBytes: status.installed ? await engineDirSize(dir) : null,
@@ -300,6 +339,7 @@ async function probeLaya(): Promise<LocalEngineStatus> {
     canUninstall: status.installed,
     // 版本跟着 PyPI 走（pip install --upgrade laya-mlx）。
     upgradeKind: "latest",
+    ...checkManifest("laya-mlx", status.installed ? dir : null, version),
   };
 }
 
@@ -323,6 +363,7 @@ async function probeCloudflared(): Promise<LocalEngineStatus> {
     canUninstall: managed,
     // 版本随应用内置（`CLOUDFLARED_VERSION`）：升级 = 重新下载这个版本。
     upgradeKind: "repair",
+    ...checkManifest("cloudflared", managed ? dir : null, Cloudflared.CLOUDFLARED_VERSION),
   };
 }
 
@@ -432,7 +473,69 @@ const INSTALLER_EMITS_TERMINAL: ReadonlySet<LocalEngineId> = new Set<LocalEngine
  * 升级与安装走同一条路：各引擎的"最新"来源不同（llama.cpp 是官方 Release，pip 引擎是
  * PyPI，whisper.cpp / audio.cpp / cloudflared 的版本钉在代码里），差别只体现在
  * `probe` 的 `upgradeKind` 上，界面据此把按钮叫「升级」还是「重新下载」。
+ *
+ * 动手前先清掉 manifest（各安装器内部 / 这里统一做）：清不掉 = 目录被占用或只读，
+ * 继续装只会留下「残留 manifest + 半新文件」的矛盾状态，所以直接中止。
  */
+/** 某引擎的托管目录（tesseract 没有 —— 它装进用户 Homebrew，应用不接管）。 */
+function managedEngineDir(id: LocalEngineId): string | null {
+  switch (id) {
+    case "llama.cpp":
+      return llamaCppRootDir();
+    case "vllm":
+    case "sglang":
+      return pythonEngineDir(PYTHON_ENGINE_DIRS[id]);
+    case "mlx":
+      return pythonEngineDir("mlx-lm");
+    case "whisper.cpp":
+      return WhisperEngine.whisperEngineDir();
+    case "audio.cpp":
+      return TTSLocal.audioCppEngineDir();
+    case "paddleocr":
+      return PpOcr.engineDirPath();
+    case "tesseract":
+      return null;
+    case "mflux":
+      return MlxGen.engineDirPath();
+    case "laya-mlx":
+      return Laya.layaEngineDirPath();
+    case "cloudflared":
+      return Cloudflared.cloudflaredRootDir();
+  }
+}
+
+/** 安装/升级成功后的 manifest 收尾（写失败只记日志，安装已经成功）。 */
+function finishInstallManifest(id: LocalEngineId, version: string | null): void {
+  if (id === "tesseract") return;
+  const dir = managedEngineDir(id);
+  if (dir === null) return;
+  if (!writeManifest(dir, { engine: id, version, platform: process.platform, arch: process.arch, steps: 2 })) {
+    logEvent({
+      level: "warn",
+      source: "server",
+      event: "engine.install.manifest_write_failed",
+      message: `${localEngineSpec(id).name} 安装成功，但安装完整性标记没写进（下次验证会显示「未完成」）`,
+      detail: { engine: id, dir, version },
+    });
+  }
+}
+
+/** 安装开始前的 manifest 清除（返回 true 才能继续；false = 目录被占用/只读，中止）。 */
+async function preinstallClearManifest(id: LocalEngineId): Promise<boolean> {
+  const dir = managedEngineDir(id);
+  if (dir === null) return true;
+  const ok = removeManifest(dir);
+  if (!ok) {
+    logEvent({
+      level: "warn",
+      source: "server",
+      event: "engine.install.manifest_locked",
+      message: `${localEngineSpec(id).name} 安装中止：无法清除上次的安装记录`,
+      detail: { engine: id, dir },
+    });
+  }
+  return ok;
+}
 export async function installLocalEngine(
   id: LocalEngineId,
   options: { upgrade?: boolean } = {},
@@ -447,6 +550,11 @@ export async function installLocalEngine(
   emitPhase(id, "preparing", `准备${verb} ${spec.name}`);
   try {
     const result = await dispatchInstall(id, upgrade);
+    if (result.ok && !INSTALLER_EMITS_TERMINAL.has(id) && id !== "tesseract") {
+      // 推理引擎（llama.cpp / vLLM / SGLang / MLX）的 manifest 由 engine-install / python-engine 写；
+      // 其余引擎在这里统一收尾。版本以安装器实际返回的为准（null = 没探到）。
+      finishInstallManifest(id, result.version ?? null);
+    }
     if (!INSTALLER_EMITS_TERMINAL.has(id)) {
       emitPhase(
         id,
@@ -483,6 +591,13 @@ async function dispatchInstall(
   id: LocalEngineId,
   upgrade: boolean,
 ): Promise<{ ok: boolean; error?: string; version?: string }> {
+  // 动任何文件之前清掉上次的 manifest（tesseract 无托管目录，直接跳过）。
+  if (!(await preinstallClearManifest(id))) {
+    return {
+      ok: false,
+      error: `无法清除上次的安装记录，请检查 ${managedEngineDir(id) ?? "引擎目录"} 是否被占用或只读`,
+    };
+  }
   if (isInferenceEngineId(id)) {
     return await EngineInstall.installInferenceEngine(id, { upgrade });
   }

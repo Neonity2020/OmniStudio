@@ -92,6 +92,14 @@ mock.module("@lib/rpc", () => ({
       return { ok: true };
     },
     systemoneTest: async () => ({ ok: true, model: "laya-1", backend: "local-runtime", noul: 1, latencyMs: 3 }),
+    systemoneDiscover: async () => ({
+      reachable: true,
+      base: "http://gw.test",
+      systemone: "yes" as const,
+      models: { jev: [{ name: "jev-latest" }, { name: "openjev-27b" }], others: [] },
+      candidates: [],
+      message: "",
+    }),
   },
 }));
 
@@ -268,5 +276,127 @@ test("点侧栏示例：state 与问题一起换掉（这页最主要的使用�
   } finally {
     unmount();
     useJevStore.getState().reset();
+  }
+});
+
+test("判定台 ↔ 游乐场来回切都不炸（守住 React #300 那一类钩子数量变化）", async () => {
+  // 真实路径：侧栏点「游乐场」只改 store 里的 view，页面原地重渲染 —— 不是重新挂载。
+  // 分叉曾写在判定台组件内部（读完 view 就 return 游乐场），于是切过去的那一帧
+  // 少跑了后面十几个钩子：React #300「Rendered fewer hooks than expected」，
+  // 整页被错误边界吃掉，连切回来都不行。所以这里必须在同一次挂载里来回切。
+  useJevStore.getState().setView("console");
+  const { container, unmount } = await mount(<JevScreen />);
+  try {
+    expect(container.textContent ?? "").toContain(zh("jev.engine"));
+    await act(async () => {
+      useJevStore.getState().setView("playground");
+    });
+    // 没选场景时游乐场是空态 —— 能看到这行字就说明它真的渲染出来了。
+    expect(container.textContent ?? "").toContain(zh("jev.playground.empty"));
+    // 切回去同样是重渲染，判定台的钩子得一个不少地回来。
+    await act(async () => {
+      useJevStore.getState().setView("console");
+    });
+    expect(container.textContent ?? "").toContain(zh("jev.engine"));
+  } finally {
+    unmount();
+    useJevStore.getState().setView("console");
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 侧栏：判定模型选择 + 数据驾驶舱
+// ---------------------------------------------------------------------------
+
+const { useJevMetrics } = await import("@stores/jev-metrics");
+
+test("侧栏能选本地 / 云端，选择写进设置（两处改的是同一份配置）", async () => {
+  settingsPatches.length = 0;
+  settingsWriteError = null;
+  useJevStore.getState().setEngineTab("local");
+  const { container, unmount } = await mount(<JevSidebar />);
+  try {
+    const text = container.textContent ?? "";
+    expect(text).toContain(zh("jev.picker.title"));
+    expect(text).toContain(zh("jev.picker.local"));
+    expect(text).toContain(zh("jev.picker.cloud"));
+
+    const cloud = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes(zh("jev.picker.cloud")));
+    expect(cloud).toBeTruthy();
+    await act(async () => {
+      cloud!.click();
+    });
+    // 选云端 = 把后端写成 cloud，和主区面板改的是同一个设置项。
+    expect(settingsPatches.some((patch) => patch.SYSTEMONE_BACKEND === "cloud")).toBe(true);
+    expect(useJevStore.getState().engineTab).toBe("cloud");
+  } finally {
+    unmount();
+    useJevStore.getState().setEngineTab("local");
+  }
+});
+
+test("驾驶舱：没跑过是空态，跑过之后给出延迟与趋势", async () => {
+  useJevMetrics.getState().clear();
+  const empty = await mount(<JevSidebar />);
+  try {
+    expect(empty.container.textContent ?? "").toContain(zh("jev.metrics.empty"));
+    // 空态不画趋势图。
+    expect(empty.container.querySelector("svg[role='img']")).toBeNull();
+  } finally {
+    empty.unmount();
+  }
+
+  await act(async () => {
+    for (const ms of [120, 240, 360]) {
+      useJevMetrics.getState().record({ at: Date.now(), ms, ok: true, backend: "cloud", source: "playground" });
+    }
+    useJevMetrics.getState().record({ at: Date.now(), ms: 0, ok: false, backend: null, source: "playground" });
+  });
+
+  const filled = await mount(<JevSidebar />);
+  try {
+    const text = filled.container.textContent ?? "";
+    // 头条是最近一次成功的耗时；平均只算成功的三次。
+    expect(text).toContain("360");
+    expect(text).toContain("240 ms");
+    expect(text).toContain(zh("jev.metrics.p95"));
+    // 四次调用里有一次失败，数字要如实写出来。
+    expect(text).toContain("4 次 · 1 次失败");
+    // 趋势：一次一根，失败那次也占一根（画成警示色）。
+    const bars = filled.container.querySelectorAll("svg[role='img'] rect");
+    expect(bars).toHaveLength(4);
+  } finally {
+    filled.unmount();
+    useJevMetrics.getState().clear();
+  }
+});
+
+test("同名模型按出处分得开：每条带地址路径，选别的路径会连地址一起换", async () => {
+  // 实测过的坑：一台网关后面挂着三个判定服务，它们全都自称 jev-latest —— 只看
+  // 名字点下去，跑的还是原来那台。
+  settingsPatches.length = 0;
+  settingsWriteError = null;
+  useJevStore.getState().setEngineTab("cloud");
+  const { container, unmount } = await mount(<JevSidebar />);
+  try {
+    const discoverButton = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("aria-label") === zh("systemone.discover"),
+    );
+    expect(discoverButton).toBeTruthy();
+    await act(async () => {
+      discoverButton!.click();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    // 下拉是 radix 的，列表在展开后才进 DOM —— 这里直接验行为：选中候选路径上的
+    // 那条，设置里必须同时出现模型名与新地址。
+    const picker = await import("./model-picker");
+    expect(picker.pathHint("http://120.76.139.101:38003/jev/openjev-27b")).toBe("/jev/openjev-27b");
+    // 根路径上的服务没有路径可取，退回 host（总比空着强）。
+    expect(picker.pathHint("https://api.typesafe.ai")).toBe("api.typesafe.ai");
+    expect(picker.pathHint("")).toBe("");
+  } finally {
+    unmount();
+    useJevStore.getState().setEngineTab("local");
   }
 });

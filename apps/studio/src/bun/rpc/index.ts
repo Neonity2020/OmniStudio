@@ -5,7 +5,7 @@ import { existsSync, rmSync, copyFileSync, mkdirSync } from "fs";
 
 import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
-import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
+import { getAllSettings, getSetting, isConfigured, updateSettings, type SettingsKey } from "../db/settings";
 import {
   getImagesBaseDir,
   getUploadsBaseDir,
@@ -211,6 +211,13 @@ import {
 } from "../benchmark";
 import { listEvalSuites, type EvalSuiteInfo } from "../eval";
 import { downloadManager, type DownloadTask } from "../download-manager";
+import {
+  buildLaunchPlanKeyFromSettings,
+  refreshLaunchPlan,
+  type LaunchPlan,
+} from "../launch-plan";
+import { effectiveFlashAttnForPlan } from "../runtimes/llama";
+import { readGgufMeta, type GgufReadFailure } from "../gguf-meta";
 import * as Voice from "../voice";
 import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
 import * as Asr from "../asr";
@@ -233,7 +240,7 @@ import type {
 import * as PpOcr from "../ppocr";
 import type { PpOcrModelSize } from "../../shared/ocr";
 import * as SystemOne from "../systemone";
-import type { SystemOneAvailability } from "../systemone";
+import type { SystemOneAvailability, SystemOneDiscovery } from "../systemone";
 import * as Laya from "../systemone-laya";
 import * as SystemOneDraft from "../systemone-draft";
 import {
@@ -646,6 +653,11 @@ export type AppRPC = {
         response: SystemOneAvailability;
       };
       /** 一键安装本地运行时（venv + laya-mlx；Apple Silicon / macOS）。 */
+      /** 依赖缺失时一键补齐（装 uv，它再按需取解释器）。 */
+      systemoneInstallDeps: {
+        params: undefined;
+        response: { ok: boolean; error?: string; tool?: string };
+      };
       systemoneInstallRuntime: {
         params: undefined;
         response: { ok: boolean; error?: string; version?: string };
@@ -693,6 +705,15 @@ export type AppRPC = {
         response:
           | { ok: true; model: string; backend: string; noul: number; latencyMs: number }
           | { ok: false; status: number; message: string; backend: string | null };
+      };
+      /**
+       * 自动发现：把一个地址上有哪些模型、判定端点挂在哪读出来（不写设置）。
+       * 参数留空就用已保存的云端配置 —— 用户刚填完 Base URL 还没失焦时，界面把
+       * 正在输入的那一份直接传进来。
+       */
+      systemoneDiscover: {
+        params: { baseUrl?: string; apiKey?: string } | undefined;
+        response: SystemOneDiscovery;
       };
       clearServerLogs: {
         params: undefined;
@@ -1833,6 +1854,12 @@ export type AppRPC = {
           size?: number | null;
           /** 用户单独点的文件插队优先（批量下载不传）。 */
           explicit?: boolean;
+          /**
+           * 「下载整个模型」时把仓库文件清单带过来（`listModelFiles` 的同款数据，
+           * `{path, size}`）。下载开跑前写成 manifest，完成后拿它和磁盘比对；
+           * 单文件下载不传（写不出来也没法比，不如只记这一个文件）。
+           */
+          manifestFiles?: Array<{ path?: string; name?: string; size?: number | null }>;
         };
         response: { task: DownloadTask };
       };
@@ -1855,6 +1882,17 @@ export type AppRPC = {
       listInstalledModels: {
         params: undefined;
         response: { models: InstalledModel[] };
+      };
+      /**
+       * 「运行模型」页的自动启动参数预览（SERVER_AUTO_TUNE）：用当前设置 + 硬件画像
+       * 现算一份 llama.cpp 启动计划返回给 UI。算不出来（不是 GGUF / 读不到 / 元数据不足）
+       * 返回 ok:false + 原因，不抛 —— UI 据此显示「将使用手动参数」而不是崩掉页面。
+       * key 的构造与 llama.ts 启动时用的是同一个 `buildLaunchPlanKeyFromSettings`，
+       * 预览到的就是真正会用的那份计划。
+       */
+      getLaunchPlanPreview: {
+        params: { path: string };
+        response: { ok: true; plan: LaunchPlan } | { ok: false; error: string; reason: string };
       };
       toggleFavoriteModel: {
         params: { path: string };
@@ -3530,6 +3568,12 @@ const rpcRequests: NonNullable<
     return SystemOneDraft.draftSystemOneRequest({ instruction, text: text ?? "" });
   },
 
+  systemoneInstallDeps: async () => {
+    const result = await Laya.installLayaDeps();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
   systemoneInstallRuntime: async () => {
     const result = await Laya.installLayaRuntime();
     SystemOne.invalidateLocalModels();
@@ -3566,6 +3610,14 @@ const rpcRequests: NonNullable<
     if (weights?.trim()) await Laya.layaUnloadModel(weights.trim());
     SystemOne.invalidateLocalModels();
     return { ok: true };
+  },
+
+  systemoneDiscover: async (params) => {
+    const cfg = SystemOne.systemOneConfig();
+    // 界面会把正在编辑的那一份传进来（还没失焦保存）；没传就用已保存的配置。
+    const baseUrl = params?.baseUrl?.trim() || cfg.cloudBaseUrl;
+    const apiKey = params?.apiKey?.trim() || cfg.cloudApiKey;
+    return SystemOne.discoverSystemOne({ baseUrl, apiKey });
   },
 
   systemoneTest: async () => {
@@ -4903,8 +4955,8 @@ const rpcRequests: NonNullable<
     return { tasks: downloadManager.list() };
   },
 
-  startModelDownload: async ({ repo, fileName, category, source, size, explicit }) => {
-    return { task: downloadManager.start(repo, fileName, category, source, { size, explicit }) };
+  startModelDownload: async ({ repo, fileName, category, source, size, explicit, manifestFiles }) => {
+    return { task: downloadManager.start(repo, fileName, category, source, { size, explicit, manifestFiles }) };
   },
 
   pauseModelDownload: async ({ id }) => {
@@ -4925,6 +4977,36 @@ const rpcRequests: NonNullable<
 
   listInstalledModels: async () => {
     return { models: ModelStore.listInstalledModels() };
+  },
+
+  getLaunchPlanPreview: async ({ path }) => {
+    const modelPath = path.trim();
+    if (modelPath === "") {
+      return { ok: false as const, error: "no model path", reason: "not-found" };
+    }
+    // 与 llama.ts 启动时完全同源的 key：同一函数、同一设置读法、同一个
+    // 「设置 + 上次实测」的 FA 折算（预览端没有 Runtime 实例，实测值读设置里回写的
+    // SERVER_FLASH_ATTN_EFFECTIVE —— 启动过之后两者必然相等）。
+    const key = buildLaunchPlanKeyFromSettings(
+      modelPath,
+      (k) => getSetting(k as SettingsKey),
+      effectiveFlashAttnForPlan(
+        getSetting("SERVER_FLASH_ATTN") as "" | "off" | "on",
+        getSetting("SERVER_FLASH_ATTN_EFFECTIVE") as "" | "off" | "on" | null | undefined,
+      ),
+    );
+    const plan = await refreshLaunchPlan(key);
+    if (plan !== null) return { ok: true as const, plan };
+
+    // refreshLaunchPlan 对「读不到 GGUF」静默返回 null，这里补一次读取只为拿到
+    // 失败原因码（该读取自身有 mtime 缓存，成本可忽略）。
+    const read = await readGgufMeta(modelPath);
+    if (read.ok) {
+      // GGUF 读得到但计划算不出来：元数据不足以估算 KV cache。
+      return { ok: false as const, error: read.data.filePath, reason: "no-metadata" };
+    }
+    const reason: GgufReadFailure = read.reason;
+    return { ok: false as const, error: read.error, reason };
   },
 
   toggleFavoriteModel: async ({ path }) => {
