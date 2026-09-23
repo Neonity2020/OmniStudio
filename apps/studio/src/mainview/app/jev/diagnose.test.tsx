@@ -97,6 +97,7 @@ const { EngineSelector } = await import("./engine-panel");
 const { useJevStore } = await import("@stores/jev");
 const { useChatStore } = await import("@stores/chat");
 const { useAppStore } = await import("@stores/app");
+const { useRouter } = await import("@stores/router");
 const { useSystemOneInstallStore } = await import("@stores/systemone-install");
 const { translate } = await import("../../../shared/i18n");
 
@@ -160,6 +161,7 @@ test("点诊断：开新会话、把现场填进输入框、切到 Agent —— 
   createdSessions.length = 0;
   useChatStore.getState().setPendingPrompt(null);
   useAppStore.getState().setActiveApp("jev");
+  useRouter.getState().setRoute({ path: "settings" });
   useJevStore.getState().setEngineTab("local");
   // 安装日志里放一条能认出来的行，验证现场确实被带过去了。
   useSystemOneInstallStore.getState().clearLogs();
@@ -187,8 +189,10 @@ test("点诊断：开新会话、把现场填进输入框、切到 Agent —— 
     // 安装日志末尾也一并带过去 —— 卡在哪一步全写在这几行里。
     expect(prompt).toContain("uv venv --allow-existing");
 
-    // 3) 视图切到了 Agent，用户一抬头就在能回答的地方。
+    // 3) 视图切到了 Agent，用户一抬头就在能回答的地方 —— 而且路由也要回到主区：
+    //    从「设置」里点下去时只切 activeApp，界面纹丝不动（真机上踩到过）。
     expect(useAppStore.getState().activeApp).toBe("agent");
+    expect(useRouter.getState().route.path).toBe("index");
   } finally {
     unmount();
     useChatStore.getState().setPendingPrompt(null);

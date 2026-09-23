@@ -13,7 +13,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle2Icon,
   CpuIcon,
-  BotIcon,
   CloudIcon,
   DownloadIcon,
   Loader2Icon,
@@ -25,8 +24,6 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
-import { useAppStore } from "@stores/app";
-import { useChatStore } from "@stores/chat";
 import { useT } from "@stores/ui-lang";
 import { useJevStore } from "@stores/jev";
 import { useJevMetrics } from "@stores/jev-metrics";
@@ -34,7 +31,7 @@ import { useSystemOneInstallStore } from "@stores/systemone-install";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { cn } from "@/mainview/lib/utils";
-import { activateNewSession } from "../agent/new-session";
+import { AgentDiagnoseButton } from "@/mainview/components/agent-diagnose-button";
 import type { SystemOneAvailability, SystemOneDiscovery } from "../../../bun/systemone";
 
 type EngineTab = "local" | "cloud";
@@ -665,14 +662,7 @@ function DiscoveryResult({
   );
 }
 
-/**
- * 「让 Agent 诊断」：把这次报错连同环境一起，开一个新的 Agent 会话填进输入框。
- *
- * 为什么是**填而不是发**：诊断要动这台机器上的环境（装解释器、改 venv、看日志），
- * 该由用户看一眼再决定发不发，顺手还能补一句自己的情况。带过去的东西都是排查真正
- * 要用的：报错原文、平台与引擎目录、解释器来源、laya-mlx 版本，以及安装日志的末尾
- * —— 这些正是本会话排查同一个问题时一条条去查的。
- */
+/** JEV 本地运行时的现场：运行时状态 + 安装日志（按钮本身是共用的 `AgentDiagnoseButton`）。 */
 function DiagnoseButton({
   status,
   error,
@@ -683,42 +673,18 @@ function DiagnoseButton({
   logs: string[];
 }) {
   const t = useT();
-  const queryClient = useQueryClient();
-  // 和 Agent 页用同一个 queryKey：那边已经取过的话这里直接命中缓存。
-  const defaultWorkspace = useQuery({
-    queryKey: ["agent-workspace"],
-    queryFn: () => rpcClient.getAgentWorkspace(undefined),
-  });
-
-  const diagnose = useMutation({
-    mutationFn: async () => {
-      const prompt = [
-        t("jev.local.diagnosePrompt"),
-        "",
-        `报错：${error}`,
+  return (
+    <AgentDiagnoseButton
+      intro={t("jev.local.diagnosePrompt")}
+      label={t("jev.local.diagnose")}
+      error={error}
+      context={[
         `平台：${navigator.platform || "macOS"}`,
         `本地运行时：${status.localRuntimeInstalled ? `已安装 ${status.localRuntimeVersion}` : "未安装"}`,
         `平台支持：${status.localRuntimeSupported ? "是" : "否"}`,
         `当前阶段：${status.localRuntimePhase}${status.localRuntimePhaseMessage ? ` (${status.localRuntimePhaseMessage})` : ""}`,
-        logs.length > 0 ? `\n安装日志（末尾 ${Math.min(logs.length, 40)} 行）：\n${logs.slice(-40).join("\n")}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n");
-      const { session } = await rpcClient.createAgentSession({});
-      return { session, prompt };
-    },
-    onSuccess: ({ session, prompt }) => {
-      activateNewSession(queryClient, session, defaultWorkspace.data?.workspace ?? "");
-      // 输入框由 Agent 的编辑器消费这份草稿（与"回到这条提问"同一套机制）。
-      useChatStore.getState().setPendingPrompt(prompt);
-      useAppStore.getState().setActiveApp("agent");
-    },
-  });
-
-  return (
-    <Button size="sm" variant="outline" className="gap-1" disabled={diagnose.isPending} onClick={() => diagnose.mutate()}>
-      {diagnose.isPending ? <Loader2Icon className="size-3 animate-spin" aria-hidden /> : <BotIcon className="size-3" aria-hidden />}
-      {t("jev.local.diagnose")}
-    </Button>
+      ]}
+      logs={logs}
+    />
   );
 }

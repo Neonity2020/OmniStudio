@@ -1,5 +1,5 @@
 import type { Subprocess } from "bun";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readdirSync, statSync } from "fs";
 import { basename, dirname, join } from "path";
 import { EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
@@ -19,7 +19,7 @@ import {
   type LaunchPlanKey,
 } from "../launch-plan";
 import { llamaCppBinaryPath } from "../engine-paths";
-import { isMmprojFile, modelNameForPath } from "../model-scan";
+import { isMmprojFile, mainGgufInDir, modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
@@ -126,6 +126,20 @@ export const DEFAULT_CUSTOM_SERVER_ARGS: ServerArgs = {
 
 
 
+/**
+ * llama.cpp 的 `-m` 只收文件。目标是目录时（扫描器把「主模型 + mmproj」的 GGUF 仓库
+ * 聚成了目录条目），换成目录里的主 GGUF；找不到就原样返回，让 llama-server 报它的错。
+ * 见 `mainGgufInDir` 的注释 —— 那是一个真实起不来的模型。
+ */
+export function llamaLoadablePath(target: string): string {
+  try {
+    if (!statSync(target).isDirectory()) return target;
+  } catch {
+    return target;
+  }
+  return mainGgufInDir(target) ?? target;
+}
+
 export class LlamaRuntime implements Runtime {
   readonly id = "llama.cpp";
   readonly label = "llama-server";
@@ -231,7 +245,7 @@ export class LlamaRuntime implements Runtime {
       if (existsSync(target)) {
         return {
           kind: "local",
-          path: target,
+          path: llamaLoadablePath(target),
           alias: this.overrides.servedName ?? slugModelFileName(modelNameForPath(target)),
         };
       }
@@ -242,7 +256,11 @@ export class LlamaRuntime implements Runtime {
     if (localPath) {
       const name = getSetting("LOCAL_MODEL_NAME");
       const alias = name || localPath.split(/[\\/]/).pop()?.replace(/\.gguf$/i, "") || "model";
-      return { kind: "local", path: localPath, alias: alias.toLowerCase().replace(/[^a-z0-9_.-]/g, "-") };
+      return {
+        kind: "local",
+        path: llamaLoadablePath(localPath),
+        alias: alias.toLowerCase().replace(/[^a-z0-9_.-]/g, "-"),
+      };
     }
 
     const profileId = getSetting("VLLM_MODEL_PROFILE");

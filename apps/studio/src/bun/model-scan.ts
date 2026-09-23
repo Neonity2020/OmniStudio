@@ -148,6 +148,44 @@ export function firstSplitShardPath(filePath: string): string | null {
   return existsSync(first) ? first : null;
 }
 
+/**
+ * GGUF 目录里该交给 llama.cpp 的那一个文件。
+ *
+ * 为什么需要：扫描器会把「主模型 + mmproj」这类 GGUF 仓库聚成一条**目录**条目
+ * （`runtimeTarget` 就是 snapshot 目录）—— vLLM / MLX 要的正是目录，但 llama.cpp 的
+ * `-m` 只认文件，给目录就是 `gguf_init_from_reader: failed to read magic`，界面上只剩
+ * 一句 "exiting due to model loading error"。实测 Qwopus3.5-4B-Coder-MTP-GGUF 就是这样
+ * 起不来的，换成目录里的主文件 13 秒就加载完。
+ *
+ * 规则：排除 mmproj；分片只认第一片；只剩一个就是它；同目录多个量化时取最大的那个
+ * （同一仓库里越大通常精度越高，挑哪个都比"启动失败"强，调用方会把选中的文件写进日志）。
+ * 目录里没有可加载的 GGUF 时返回 null，交给上层按原路径报错。
+ */
+export function mainGgufInDir(dir: string): string | null {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return null;
+  }
+  const models = names.filter((n) => {
+    if (!/\.gguf$/i.test(n) || isMmprojFile(n)) return false;
+    const split = SPLIT_GGUF_RE.exec(n);
+    return !split || split[2] === "00001";
+  });
+  if (models.length === 0) return null;
+  if (models.length === 1) return path.join(dir, models[0] as string);
+  const sized = models.map((n) => {
+    let size = 0;
+    try {
+      size = statSync(path.join(dir, n)).size;
+    } catch {}
+    return { n, size };
+  });
+  sized.sort((a, b) => b.size - a.size || a.n.localeCompare(b.n));
+  return path.join(dir, (sized[0] as { n: string }).n);
+}
+
 /** 多模态投影文件的命名(mmproj-f16.gguf 等),与分片命名一样是「目录内配置」不是独立模型。 */
 export function isMmprojFile(name: string): boolean {
   return /^mmproj-[^/]*\.gguf$/i.test(name);
