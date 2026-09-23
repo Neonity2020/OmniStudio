@@ -811,6 +811,15 @@ export function paddleCenter(state: BreakoutState): number {
   return state.paddleX + BREAKOUT_PADDLE_W / 2;
 }
 
+/** 板子已经贴着左 / 右墙(两边各留 2 个单位,见 `applyBreakoutAction` 的夹取)。 */
+export function paddleAtLeftWall(state: BreakoutState): boolean {
+  return state.paddleX <= 2.001;
+}
+
+export function paddleAtRightWall(state: BreakoutState): boolean {
+  return state.paddleX >= BREAKOUT_W - BREAKOUT_PADDLE_W - 2.001;
+}
+
 export function bricksLeft(state: BreakoutState): number {
   return state.bricks.reduce((sum, brick) => sum + (brick.alive ? 1 : 0), 0);
 }
@@ -954,8 +963,8 @@ export function breakoutState(state: BreakoutState): Record<string, unknown> {
     // 同一件事再给一个分类说法：数值比较靠的是"符号"，写成词能让 criteria 对得更实。
     landing_side: offset > BREAKOUT_PADDLE_W / 2 ? "right" : offset < -BREAKOUT_PADDLE_W / 2 ? "left" : "centred",
     // 已经贴着墙了：再往那边选就是空转一整段（模型看不见这件事就会一直顶着墙）。
-    paddle_at_left_edge: state.paddleX <= 2.001,
-    paddle_at_right_edge: state.paddleX >= BREAKOUT_W - BREAKOUT_PADDLE_W - 2.001,
+    paddle_at_left_edge: paddleAtLeftWall(state),
+    paddle_at_right_edge: paddleAtRightWall(state),
     // 板子这一段最多能挪多远 —— 差得比这还多，就是"追不上了"。
     paddle_reach_per_decision: Math.round(BREAKOUT_PADDLE_SPEED * state.decideEvery * 10) / 10,
     bricks_left: bricksLeft(state),
@@ -1045,9 +1054,12 @@ export function breakoutVisionState(state: BreakoutState, image: string): Record
           {
             type: "text",
             text:
-              "This is the current frame of a Breakout game. The bricks are at the top, the ball " +
-              "is the small white dot, and the paddle is the wide bar at the bottom. The paddle " +
-              "must be under the ball when it comes down, or a life is lost. " +
+              "This is the current frame of a Breakout game. The bricks are at the top, the " +
+              "white square is the ball and the wide teal bar at the bottom is the paddle. The " +
+              "fading grey dots behind the ball are where it was a moment ago, so the ball is " +
+              "moving away from them; it bounces off the side walls and the top. The paddle " +
+              "must be under the ball when it comes down, or a life is lost. When the paddle " +
+              "already touches a side wall it cannot move any further that way. " +
               `This decision is held for the next ${state.decideEvery} frames.`,
           },
           { type: "image_url", image_url: { url: image } },
@@ -1060,22 +1072,63 @@ export function breakoutVisionState(state: BreakoutState, image: string): Record
 /**
  * 视觉版的问题。criteria 里**一个数字字段都不许提** —— 提了就等于把答案用文字喂回去,
  * 那就不是在考视觉了。三条说明各自描述一种"看上去是什么样"。
+ *
+ * 板子已经贴墙时,"往墙里推"这个选项**直接不给**:那一整段板子一动不动,本来就不是
+ * 一个可选的动作。数字版靠 `paddle_at_*_edge` 让模型自己避开;视觉版试过在文字里讲
+ * "贴墙推不动"、加拖尾、把图放大,35B 仍有约四分之一的步数顶着墙(最长连续 12~17 步,
+ * 就是用户看到的"板子卡在边上不动")。把它从选项里拿掉之后顶墙归零,落点方向的一致率
+ * 也从 38% 升到 63% —— 省下来的概率质量回到了真正可选的两个动作上。
  */
-export function breakoutVisionQuestions(): SystemOneQuestions {
+export function breakoutVisionQuestions(state: BreakoutState): SystemOneQuestions {
+  const question = breakoutVisionChoice();
+  const criteria = { ...question.criteria };
+  if (paddleAtLeftWall(state)) delete criteria.left;
+  if (paddleAtRightWall(state)) delete criteria.right;
+  return { paddle_move: { ...question, criteria } };
+}
+
+function breakoutVisionChoice(): SystemOneChoiceQuestion {
   return {
-    paddle_move: {
-      type: "choice",
-      instructions:
-        "Look at the picture. Which way should the paddle move so that it ends up under the ball " +
-        "when the ball reaches the bottom?",
-      criteria: {
-        left: "In the picture the ball is to the LEFT of the paddle, so the paddle has to move left.",
-        stay: "In the picture the ball is already above the paddle, so the paddle should hold still.",
-        right:
-          "In the picture the ball is to the RIGHT of the paddle, so the paddle has to move right.",
-      },
+    type: "choice",
+    instructions:
+      "Look at the picture and follow the ball's direction of travel (away from its grey trail) " +
+      "down to the bottom, allowing for bounces off the side walls. Which way must the paddle " +
+      "move to be under the spot where the ball will come down?",
+    criteria: {
+      left:
+        "In the picture the ball is heading for a spot to the LEFT of the paddle, so the paddle " +
+        "has to move left.",
+      stay:
+        "In the picture the ball is heading down onto the paddle where it already is, so the " +
+        "paddle should hold still.",
+      right:
+        "In the picture the ball is heading for a spot to the RIGHT of the paddle, so the " +
+        "paddle has to move right.",
     },
   };
+}
+
+/** 左右两项的概率差小于这个数,就算"没看出来"。 */
+export const BREAKOUT_COIN_FLIP_GAP = 0.2;
+
+/**
+ * 这一步模型是不是在左右之间**掷硬币**:两个方向都在选项里,排前两名的正好是左和右,
+ * 而且差距不到 `BREAKOUT_COIN_FLIP_GAP`。
+ *
+ * 视觉版实测(35B,150×110 的图):约一半的步数左右各 0.4~0.5,"不动"始终只有
+ * 0.05~0.09 —— 它看不出球往哪飞,取最大的那个就是左一下右一下,界面上表现为板子
+ * 在球下面来回抖。贴墙时只剩两个选项(其中一个是"不动"),不算。
+ */
+export function isBreakoutCoinFlip(probabilities: Record<string, number>): boolean {
+  const left = probabilities.left;
+  const right = probabilities.right;
+  if (left === undefined || right === undefined) return false;
+  const top = Object.entries(probabilities)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([name]) => name);
+  if (!top.includes("left") || !top.includes("right")) return false;
+  return Math.abs(left - right) < BREAKOUT_COIN_FLIP_GAP;
 }
 
 export type BreakoutMove = {

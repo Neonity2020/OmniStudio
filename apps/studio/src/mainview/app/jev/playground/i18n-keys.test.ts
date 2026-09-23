@@ -99,6 +99,7 @@ const PLAYGROUND_UI_KEYS = [
   "jev.playground.breakoutVision.noCanvas",
   "jev.playground.breakoutVision.hint",
   "jev.playground.breakoutVision.legend",
+  "jev.playground.breakoutVision.noSignal",
   // 运行日志
   "jev.playground.log.empty",
   "jev.playground.log.step",
@@ -124,6 +125,7 @@ const PLACEHOLDERS: Record<string, string[][]> = {
   "jev.playground.breakout.legendLeft": [["n"]],
   "jev.playground.breakoutVision.legend": [["w", "h"]],
   "jev.playground.breakout.noSignal": [["wasted", "steps", "confidence"]],
+  "jev.playground.breakoutVision.noSignal": [["flips", "steps"]],
   "jev.playground.log.confidence": [["value"]],
 };
 
@@ -143,6 +145,7 @@ const SAMPLE_VALUES: Record<string, string> = {
   w: "150",
   h: "110",
   wasted: "9",
+  flips: "11",
   score: "120",
   lives: "2",
 };

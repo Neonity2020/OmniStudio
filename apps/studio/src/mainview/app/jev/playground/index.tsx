@@ -57,6 +57,7 @@ import {
   breakoutQuestions,
   breakoutState,
   breakoutVisionQuestions,
+  isBreakoutCoinFlip,
   breakoutVisionState,
   newBreakout,
   BREAKOUT_EVERY_MAX,
@@ -169,7 +170,7 @@ export function JevPlayground() {
    * 那不是场景的问题，是这个模型对这类题没有信号，得换一个模型，所以这里把
    * "撞了几步、置信度多低"数出来，到了阈值就直说。
    */
-  const [tally, setTally] = useState({ steps: 0, wasted: 0, confidence: 0 });
+  const [tally, setTally] = useState({ steps: 0, wasted: 0, confidence: 0, coinFlips: 0 });
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<{ status: number; message: string } | null>(null);
   const [done, setDone] = useState(false);
@@ -213,7 +214,7 @@ export function JevPlayground() {
     setBallFrames([]);
     setVisionFrame(null);
     setLastMove(null);
-    setTally({ steps: 0, wasted: 0, confidence: 0 });
+    setTally({ steps: 0, wasted: 0, confidence: 0, coinFlips: 0 });
     setLog([]);
     setRunning(false);
     setError(null);
@@ -257,6 +258,7 @@ export function JevPlayground() {
         inBounds: move.inBounds,
       }));
       setTally((prev) => ({
+        ...prev,
         steps: prev.steps + 1,
         wasted: prev.wasted + (move.moved ? 0 : 1),
         confidence: prev.confidence + (choice?.confidence ?? 0),
@@ -340,7 +342,7 @@ export function JevPlayground() {
           return "error";
         }
         setVisionFrame(frame);
-        request = { state: breakoutVisionState(game, frame), questions: breakoutVisionQuestions() };
+        request = { state: breakoutVisionState(game, frame), questions: breakoutVisionQuestions(game) };
       } else {
         request = { state: breakoutState(game), questions: breakoutQuestions(game) };
       }
@@ -362,10 +364,12 @@ export function JevPlayground() {
       const stuck =
         (action === "left" && game.paddleX <= 2.001) ||
         (action === "right" && game.paddleX >= BREAKOUT_W - BREAKOUT_PADDLE_W - 2.001);
+      const coinFlip = isBreakoutCoinFlip(choice?.probabilities ?? {});
       setTally((prev) => ({
         steps: prev.steps + 1,
         wasted: prev.wasted + (stuck ? 1 : 0),
         confidence: prev.confidence + (choice?.confidence ?? 0),
+        coinFlips: prev.coinFlips + (coinFlip ? 1 : 0),
       }));
       setLog((prev) => [
         ...prev,
@@ -431,7 +435,7 @@ export function JevPlayground() {
     setBallFrames([]);
     setVisionFrame(null);
     setLastMove(null);
-    setTally({ steps: 0, wasted: 0, confidence: 0 });
+    setTally({ steps: 0, wasted: 0, confidence: 0, coinFlips: 0 });
     setLog([]);
     setRunning(false);
     setError(null);
@@ -457,6 +461,12 @@ export function JevPlayground() {
    * 门槛放到 8 次 —— 开局球在上面飞，前几次往一边靠是正常的。
    */
   const breakoutNoSignal = tally.steps >= 8 && tally.wasted / tally.steps >= 0.5;
+  /**
+   * 视觉版没法"顶墙"(贴墙时那个选项不给),它没信号的样子是左右掷硬币 —— 板子在球下面
+   * 来回抖。同样 8 次起算;四成以上的步数左右几乎一样,就直说是它看不出球往哪飞。
+   */
+  const visionCoinFlips =
+    scenario.id === "breakout-vision" && tally.steps >= 8 && tally.coinFlips / tally.steps >= 0.4;
 
   const marketTotal = marketSteps(marketState);
   const stepNumber =
@@ -566,6 +576,15 @@ export function JevPlayground() {
               wasted: String(tally.wasted),
               steps: String(tally.steps),
               confidence: (tally.confidence / Math.max(1, tally.steps)).toFixed(3),
+            })}
+          </div>
+        ) : null}
+
+        {visionCoinFlips ? (
+          <div className="jev-note warn">
+            {t("jev.playground.breakoutVision.noSignal", {
+              flips: String(tally.coinFlips),
+              steps: String(tally.steps),
             })}
           </div>
         ) : null}

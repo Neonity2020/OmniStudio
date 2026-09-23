@@ -46,6 +46,9 @@ import {
   bricksLeft,
   clampBreakoutEvery,
   newBreakout,
+  isBreakoutCoinFlip,
+  paddleAtLeftWall,
+  paddleAtRightWall,
   paddleCenter,
   predictLanding,
   breakoutVisionQuestions,
@@ -779,7 +782,7 @@ describe("breakout-vision：只给图，不给数字", () => {
     const result = validateSystemOneRequest({
       state,
       model: "jev-latest",
-      questions: breakoutVisionQuestions(),
+      questions: breakoutVisionQuestions(game),
     });
     expect(result.ok).toBe(true);
     const messages = state.messages as { role: string; content: Record<string, unknown>[] }[];
@@ -799,7 +802,8 @@ describe("breakout-vision：只给图，不给数字", () => {
   });
 
   test("三个选项说的都是「图上看起来怎样」，不提任何 state 字段名", () => {
-    const criteria = (breakoutVisionQuestions().paddle_move as SystemOneChoiceQuestion).criteria;
+    const game = newBreakout({ decideEvery: 5 });
+    const criteria = (breakoutVisionQuestions(game).paddle_move as SystemOneChoiceQuestion).criteria;
     expect(Object.keys(criteria)).toEqual([...BREAKOUT_ACTIONS]);
     for (const [, description] of Object.entries(criteria)) {
       expect(String(description)).toContain("picture");
@@ -812,6 +816,43 @@ describe("breakout-vision：只给图，不给数字", () => {
 
   test("同一局面下，视觉版与数字版问的是同一件事、用的是同一套动作", () => {
     const game = newBreakout({ decideEvery: 5 });
-    expect(Object.keys(breakoutVisionQuestions())).toEqual(Object.keys(breakoutQuestions(game)));
+    expect(Object.keys(breakoutVisionQuestions(game))).toEqual(Object.keys(breakoutQuestions(game)));
+  });
+
+  test("板子贴墙时不给「往墙里推」：那一步白推，正是板子卡在边上不动的来源", () => {
+    const game = newBreakout({ decideEvery: 5 });
+    const options = (state: BreakoutState) =>
+      Object.keys((breakoutVisionQuestions(state).paddle_move as SystemOneChoiceQuestion).criteria);
+    expect(options(game)).toEqual(["left", "stay", "right"]);
+    // 一直往右推到夹住为止
+    let right = game;
+    for (let i = 0; i < 40; i++) right = applyBreakoutAction(right, "right").next;
+    expect(paddleAtRightWall(right)).toBe(true);
+    expect(options(right)).toEqual(["left", "stay"]);
+    let left = game;
+    for (let i = 0; i < 40; i++) left = applyBreakoutAction(left, "left").next;
+    expect(paddleAtLeftWall(left)).toBe(true);
+    expect(options(left)).toEqual(["stay", "right"]);
+    // 两个都还是合法请求
+    for (const state of [right, left]) {
+      const result = validateSystemOneRequest({
+        state: breakoutVisionState(state, IMAGE),
+        model: "jev-latest",
+        questions: breakoutVisionQuestions(state),
+      });
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  test("掷硬币：左右排前两名且差不到 0.2 才算；贴墙只剩两项、或有一边明显占优都不算", () => {
+    // 实测 35B 的典型一步
+    expect(isBreakoutCoinFlip({ left: 0.46, stay: 0.09, right: 0.46 })).toBe(true);
+    expect(isBreakoutCoinFlip({ left: 0.51, stay: 0.09, right: 0.4 })).toBe(true);
+    expect(isBreakoutCoinFlip({ left: 0.23, stay: 0.07, right: 0.7 })).toBe(false);
+    // "不动"排第一，左右只是并列第二 —— 那是它看出来了要守住，不是掷硬币
+    expect(isBreakoutCoinFlip({ left: 0.2, stay: 0.62, right: 0.18 })).toBe(false);
+    // 贴墙：只剩两项
+    expect(isBreakoutCoinFlip({ left: 0.5, stay: 0.5 })).toBe(false);
+    expect(isBreakoutCoinFlip({})).toBe(false);
   });
 });
