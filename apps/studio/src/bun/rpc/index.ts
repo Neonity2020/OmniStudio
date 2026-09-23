@@ -244,6 +244,7 @@ import {
 } from "../../shared/systemone";
 import type { SystemOneQuestions, SystemOneResponse } from "../../shared/systemone";
 import * as BgRemove from "../bg-remove";
+import * as Upscale from "../upscale";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
 import * as MediaSetup from "../media-setup";
@@ -2269,6 +2270,40 @@ export type AppRPC = {
           error?: string;
         };
       };
+      // 本地 AI 超分（放大糊图 / 老照片）—— 与抠图同一条路线：模型在本机跑，不出进程
+      upscaleModels: {
+        params: {};
+        response: {
+          models: Upscale.UpscaleModelStatus[];
+          defaultModel: string;
+          /** 当前可用模型：优先默认模型，否则任意一个已下载的；都没有时 null。 */
+          ready: string | null;
+          /** 正在跑的超分进度（块数）；空闲时 null。小应用靠轮询它显示进度。 */
+          progress: { done: number; total: number } | null;
+        };
+      };
+      upscaleDownloadModel: {
+        params: { model: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 把用户刚在系统对话框里选中的图片收进 images/ 并返回 ref（小应用靠它拿到可加载的 URL）。 */
+      upscaleStageSource: {
+        params: { path: string };
+        response: { ref?: string; url?: string; error?: string };
+      };
+      upscaleRun: {
+        params: { ref: string; model?: string; tile?: number };
+        response: {
+          out?: { ref: string; url: string; dataUrl?: string };
+          width?: number;
+          height?: number;
+          model?: string;
+          scale?: number;
+          inferenceMs?: number;
+          totalMs?: number;
+          error?: string;
+        };
+      };
       // AI 生图
       stageEditImage: {
         params: { paths: string[] };
@@ -3247,6 +3282,8 @@ export type AppRPC = {
       ppOcrModelProgress: PpOcr.PpOcrModelProgress;
       /** 本地抠图模型下载进度（字节 + 百分比），模型卡与抠图页实时进度条。 */
       bgRemoveProgress: BgRemove.BgDownloadProgress;
+      /** 本地超分模型下载进度（字节 + 百分比），模型卡实时进度条。 */
+      upscaleProgress: Upscale.UpscaleDownloadProgress;
       /** Tesseract 引擎一键安装（brew install）日志，实时推送。 */
       tesseractInstallLog: { lines: string[] };
       /** 推理引擎一键安装（llama.cpp 下载官方构建 / Python 引擎建 venv）的日志与阶段。 */
@@ -3298,6 +3335,23 @@ let bgRemoveProgressSink: ((p: BgRemove.BgDownloadProgress) => void) | null = nu
 const bgRemoveProgress = {
   push: (p: BgRemove.BgDownloadProgress) => bgRemoveProgressSink?.(p),
 };
+
+let upscaleProgressSink: ((p: Upscale.UpscaleDownloadProgress) => void) | null = null;
+const upscaleProgress = {
+  push: (p: Upscale.UpscaleDownloadProgress) => upscaleProgressSink?.(p),
+};
+
+/**
+ * 超分结果图内联回小应用的体积上限。超过就不内联（改走媒体 URL）—— 4096px 的 PNG
+ * 可能有几十 MB，塞进 RPC 响应既慢又没必要（那种尺寸本来就该用 URL 引用）。
+ */
+const MAX_INLINE_RESULT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * 正在跑的超分进度（块数）。小应用收不到推送，只能轮询 —— `upscaleModels` 会把它
+ * 一起带回去（与模型下载进度靠 localBytes 轮询是同一套路）。跑完/出错清空。
+ */
+let upscaleActive: { done: number; total: number } | null = null;
 
 const rpcRequests: NonNullable<
   Parameters<typeof BrowserView.defineRPC<AppRPC>>[0]["handlers"]["requests"]
@@ -5550,6 +5604,104 @@ const rpcRequests: NonNullable<
     }
   },
 
+  // 本地 AI 超分：模型清单 / 下载 / 暂存源图 / 跑一次（放大）
+  upscaleModels: async () => {
+    return {
+      models: Upscale.listUpscaleModels(),
+      defaultModel: Upscale.DEFAULT_UPSCALE_MODEL,
+      ready: Upscale.anyReadyUpscaleModel(),
+      // 正在跑的话带上进度：界面靠轮询这个值显示"第 n/N 块"。
+      progress: upscaleActive,
+    };
+  },
+
+  upscaleDownloadModel: async ({ model }) => {
+    return Upscale.downloadUpscaleModel(model, {
+      onProgress: (p) => upscaleProgress.push(p),
+    });
+  },
+
+  upscaleStageSource: async ({ path }) => {
+    try {
+      const staged = await ImageGen.stageEditImage(
+        acceptedDialogPaths("image", "upscale.stage", [path]),
+      );
+      const first = staged[0];
+      if (!first) {
+        return { error: "图片无法读取：仅支持 PNG / JPG / WebP" };
+      }
+      return { ref: first.ref, url: first.url };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logEvent({
+        level: "warn",
+        source: "image",
+        event: "upscale.stage.failed",
+        message: `超分源图暂存失败：${message}`,
+        detail: { error: message },
+      });
+      return { error: message };
+    }
+  },
+
+  upscaleRun: async ({ ref, model, tile }) => {
+    try {
+      const abs = resolveImageRef(ref);
+      if (!abs) return { error: `找不到图片：${ref}` };
+      upscaleActive = { done: 0, total: 0 };
+      const res = await Upscale.upscaleImage({
+        imagePath: abs,
+        model,
+        tile,
+        onProgress: (p) => {
+          upscaleActive = p;
+        },
+      });
+      upscaleActive = null;
+      if (!res.ok) return { error: res.error };
+      const r = res.result;
+      // 结果图**同时**给媒体 URL 与一个内联 dataUrl。
+      //
+      // 为什么要 dataUrl：媒体服务是固定端口，当**另一个实例**（不同数据目录）占着它时，
+      // 按设计会拒绝服务这台的图片 —— 于是小应用里结果图预览不出来、保存也失败，
+      // 而模型其实已经跑完了。内联一份结果图让小应用不依赖那个端口，单实例时两者都可用。
+      // 体积上限压过：超过 MAX_INLINE 就不内联（宁可让页面用 URL 兜底，也不塞巨型 base64）。
+      let dataUrl: string | undefined;
+      try {
+        const outAbs = resolveImageRef(r.outRef);
+        if (outAbs) {
+          const file = Bun.file(outAbs);
+          const size = file.size;
+          if (size > 0 && size <= MAX_INLINE_RESULT_BYTES) {
+            dataUrl = `data:image/png;base64,${Buffer.from(await file.arrayBuffer()).toString("base64")}`;
+          }
+        }
+      } catch {
+        // 内联失败不是错误：URL 那条路还在。
+      }
+      return {
+        out: { ref: r.outRef, url: chatImageUrl(r.outRef), dataUrl },
+        width: r.width,
+        height: r.height,
+        model: r.model,
+        scale: r.scale,
+        inferenceMs: r.inferenceMs,
+        totalMs: r.totalMs,
+      };
+    } catch (e) {
+      upscaleActive = null;
+      const message = e instanceof Error ? e.message : String(e);
+      logEvent({
+        level: "error",
+        source: "image",
+        event: "upscale.run.failed",
+        message,
+        detail: { ref, model, error: e },
+      });
+      return { error: message };
+    }
+  },
+
   // AI 生图
   stageEditImage: async ({ paths }) => {
     const files = await ImageGen.stageEditImage(
@@ -7244,6 +7396,7 @@ export function initRemoteBroadcast(broadcast: (name: string, payload: unknown) 
   initPpOcrBroadcast(fakeWin);
   initSystemOneBroadcast(fakeWin);
   initBgRemoveBroadcast(fakeWin);
+  initUpscaleBroadcast(fakeWin);
   initTessInstallBroadcast(fakeWin);
   initSkillsBroadcast(fakeWin);
   initBackupBroadcast(fakeWin);
@@ -7383,6 +7536,16 @@ export function initBgRemoveBroadcast(win: BrowserWindowWithRPC) {
     } catch {}
   });
   bgRemoveProgressSink = (p) => send.push(p);
+}
+
+/** 超分模型下载进度，推送到前端（合并推送：整个下载只关心最新百分比）。 */
+export function initUpscaleBroadcast(win: BrowserWindowWithRPC) {
+  const send = throttleLatest<[Upscale.UpscaleDownloadProgress]>((p) => {
+    try {
+      win.webview.rpc?.send.upscaleProgress(p);
+    } catch {}
+  });
+  upscaleProgressSink = (p) => send.push(p);
 }
 
 /** Tesseract 引擎一键安装日志，推送到前端（整批，同 MLX）。 */

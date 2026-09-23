@@ -364,10 +364,16 @@ async function ensureWorker(): Promise<Worker | null> {
       stderr: "pipe",
       stdin: "pipe",
       // 权重首次加载要下 Hugging Face，必须继承代理设置（子进程只认环境变量）。
+      // HF_ENDPOINT 走与 MLX 引擎同一把可调开关（默认 hf-mirror）：单设 HF_ENDPOINT
+      // 而不用 snapshot_download 显式传 endpoint，是为了置空即回落官方 huggingface.co。
       env: {
         ...process.env,
         ...proxyChildEnv(),
         LAYA_DTYPE: getSetting("SYSTEMONE_LOCAL_DTYPE") || "float16",
+        ...(() => {
+          const hf = (getSetting("MLX_HF_ENDPOINT") || "").trim();
+          return hf ? { HF_ENDPOINT: hf } : {};
+        })(),
       },
     }) as unknown as PipeProc;
   } catch (e) {

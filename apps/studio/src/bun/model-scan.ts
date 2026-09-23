@@ -3,6 +3,7 @@ import path from "path";
 
 import {
   fileKind,
+  isMmprojFileName,
   isModelWeightExt,
   modelDisplayName,
   type ModelFileKind,
@@ -148,10 +149,11 @@ export function firstSplitShardPath(filePath: string): string | null {
   return existsSync(first) ? first : null;
 }
 
-/** 多模态投影文件的命名(mmproj-f16.gguf 等),与分片命名一样是「目录内配置」不是独立模型。 */
-export function isMmprojFile(name: string): boolean {
-  return /^mmproj-[^/]*\.gguf$/i.test(name);
-}
+/**
+ * 多模态投影文件的命名(mmproj-f16.gguf 等),与分片命名一样是「目录内配置」不是独立模型。
+ * 判名规则与市场页共用 `isMmprojFileName`（唯一真源），避免两边认出来的文件不一样。
+ */
+export const isMmprojFile = isMmprojFileName;
 
 /**
  * 加载目标路径的展示名（服务名 slug 的来源）：分批 GGUF 指向第一个分片，
@@ -285,18 +287,22 @@ function walkWeights(root: string): { files: WalkHit[]; others: WalkHit[]; trunc
 }
 
 /**
- * 扫描一棵目录树，产出两类结果：
+ * 扫描一棵目录树，产出三类结果：
  *   - `repos`：整仓库模型目录（vLLM / SGLang / MLX 加载的粒度），一条 = 一个模型；
- *   - `files`：能单独加载的权重文件（GGUF 量化、`.bin` / `.pt` 这类单文件模型）。
+ *   - `files`：能单独加载的权重文件（GGUF 量化、`.bin` / `.pt` 这类单文件模型）；
+ *   - `mmproj`：投影文件（多模态配件，不能单独加载，登记到同目录模型条目的
+ *     `supportFiles` 上，见 `scanPlainDir`）。
  * 命中仓库目录后不再往下走：里面的分片和子目录都属于同一个模型。
  */
 function walkModelTree(root: string): {
   repos: { dir: string; files: WalkHit[]; others: WalkHit[] }[];
   files: WalkHit[];
+  mmproj: WalkHit[];
   truncated: boolean;
 } {
   const repos: { dir: string; files: WalkHit[]; others: WalkHit[] }[] = [];
   const files: WalkHit[] = [];
+  const mmproj: WalkHit[] = [];
   const seenReal = new Set<string>();
   let truncated = false;
 
@@ -333,16 +339,18 @@ function walkModelTree(root: string): {
         seenReal.add(real);
         visit(full, depth + 1);
       } else if (isModelWeightExt(name)) {
-        // mmproj-*.gguf 是嵌入模型的投影配件（嵌入实例启动时按同目录自动配对注入，
-        // 见 runtimes/llama.ts），不是能单独加载的模型，不单列一条。
-        // 仓库目录走 walkWeights 聚合、不经过这里 —— 市场页「已下载」判定不受损。
-        if (!isMmprojFile(name)) files.push({ path: full, size: st.size });
+        // mmproj-*.gguf 是投影配件（多模态模型启动时按同目录自动配对注入，
+        // 见 runtimes/llama.ts），不是能单独加载的模型：不单列一条，但也不能丢掉 ——
+        // 它是市场页「下过没有」判定的一部分，藏起来会让一张下完的卡片永远还差这一个文件，
+        // 而且用户从中看不出模型缺的就是它。
+        if (isMmprojFile(name)) mmproj.push({ path: full, size: st.size });
+        else files.push({ path: full, size: st.size });
       }
     }
   };
 
   visit(root, 0);
-  return { repos, files, truncated };
+  return { repos, files, mmproj, truncated };
 }
 
 /** repo 标签：相对扫描根目录的路径；根目录下的文件用根目录名。 */
@@ -366,7 +374,7 @@ function repoDirLabel(root: string, dir: string): string {
  * 其余能单独加载的权重逐文件一条（GGUF 量化、`.bin` / `.pt` 单文件模型）。
  */
 export function scanPlainDir(root: string, origin: ModelOrigin): ScannedModel[] {
-  const { repos, files } = walkModelTree(root);
+  const { repos, files, mmproj } = walkModelTree(root);
 
   const out: ScannedModel[] = repos.map((r) => ({
     repo: repoDirLabel(root, r.dir),
@@ -394,6 +402,12 @@ export function scanPlainDir(root: string, origin: ModelOrigin): ScannedModel[] 
       runtimeTarget: resolveRuntimeTarget(e.path),
       isDir: false,
       files: e.members,
+      // 同目录的投影文件并进 supportFiles：它跟着这个模型一起下、也一起被加载
+      // （启动时按同目录自动配对，见 runtimes/llama.ts），但没有它模型照样能跑文本，
+      // 所以不算权重、不进 files。按目录配对：不同子目录里的模型互不牵连。
+      supportFiles: mmproj
+        .filter((m) => path.dirname(m.path) === path.dirname(e.path))
+        .map((m) => path.basename(m.path)),
     });
   }
 

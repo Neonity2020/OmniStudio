@@ -81,6 +81,15 @@ export const MLX_MODELS: MlxModelInfo[] = [
     defaultSteps: 50,
     approxSizeGb: 24,
   },
+  {
+    id: "qwen-image-2.1",
+    label: "Qwen-Image-2.1 (7B+VL)",
+    description: "阿里统一文生图 + 图像编辑模型，原生 2K、可出透明 PNG；BF16 全量约 31GB、峰值约 46GB，紧内存用 -q 8，默认 1024",
+    cmd: "mflux-generate-qwen-2.1",
+    modelArg: null,
+    defaultSteps: 40,
+    approxSizeGb: 31,
+  },
 ];
 
 export function findMlxModel(id: string): MlxModelInfo | null {
@@ -687,6 +696,7 @@ const MLX_MODEL_REPOS: Record<string, string> = {
   "flux-schnell": "black-forest-labs/FLUX.1-schnell",
   "flux2-klein-9b": "black-forest-labs/FLUX.2-klein-9B",
   "flux-dev": "black-forest-labs/FLUX.1-dev",
+  "qwen-image-2.1": "Qwen/Qwen-Image-2.1",
 };
 
 /** HF 仓库对应的本地缓存 snapshots 目录。 */

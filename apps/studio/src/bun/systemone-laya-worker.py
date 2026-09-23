@@ -70,6 +70,13 @@ WEIGHT_PATTERNS = [
 ]
 
 
+# 权重走 Hugging Face（laya-mlx 权重只挂 HF）。国内网络 huggingface.co 常直接不可达：
+# 直连时 snapshot_download 会一直卡在连接上，界面看着就是「一点反应没有、0% 不动」。
+# 与 mlx-worker.py 同一策略：默认走 hf-mirror 镜像，主进程显式传的 HF_ENDPOINT 优先
+# （置空则在系统环境里回落到本默认值）。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+
 def dir_size(path: Any) -> int:
     """一个目录（含软链接指向的目标）的总字节数。"""
     from pathlib import Path

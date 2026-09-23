@@ -1,10 +1,11 @@
 import type { Subprocess } from "bun";
-import { existsSync, readdirSync } from "fs";
+import { closeSync, existsSync, openSync, readdirSync, readSync } from "fs";
 import { dirname, join } from "path";
 import { EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { logEvent } from "../app-log";
 import { getSetting } from "../db/settings";
+import { hasUnfinishedDownload } from "../downloader";
 import { llamaCppBinaryPath } from "../engine-paths";
 import { isMmprojFile, modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
@@ -109,6 +110,73 @@ const DEFAULT_CUSTOM_SERVER_ARGS: ServerArgs = {
   noMmprojOffload: true,
 };
 
+/**
+ * 与本地模型同目录的投影文件（mmproj）—— 多模态 GGUF 的**视觉塔**就装在这个独立文件里。
+ *
+ * 配对单位是**目录**：下载目录是「一个仓库一个目录」，同一目录里的所有量化共用
+ * 同一个投影文件，所以同目录即配对，不问文件名（Unsloth 导出的就叫 `mmproj-F16.gguf`，
+ * 名字里没有模型名可对）。多文件时优先 f16：bf16 的名字里也含 "f16" 子串，
+ * 直接 includes 会选错，所以要求 f16 前面不是字母；都没有时退回字典序首个。
+ *
+ * 两道剔除是必须的 —— llama-server 遇到加载不了的投影文件会**直接退出**
+ * （`[mtmd] failed to load multimodal model` → `exiting due to model loading error`，
+ * 实测 0.4.0/b10809），所以一个坏文件足以把本来能跑的模型变成起不来的模型：
+ *   - 没下完的（有侧车的半成品 / 内容为空）不配 —— 市场页的下载卡还在等着补它；
+ *   - 头部不是 GGUF 魔数的（放错位置的杂物）不配。
+ * 另一个真实风险是「投影文件是别的模型的」：文件本身合法、llama-server 却在加载
+ * CLIP 时失败，这只能靠启动失败后去掉投影重试兜底（见 start()）。
+ */
+export function resolveMmprojFor(modelPath: string): string | null {
+  const dir = dirname(modelPath);
+  try {
+    const candidates = readdirSync(dir).filter(isMmprojFile).sort();
+    const usable = candidates.filter((n) => isUsableMmproj(join(dir, n)));
+    const f16 = usable.find((n) => /(?:^|[^a-z])f16/i.test(n));
+    const picked = f16 ?? usable[0];
+    return picked ? join(dir, picked) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 头部四个字节是 GGUF 魔数：清掉「放错位置 / 内容不是 gguf」的杂物。 */
+function isUsableMmproj(filePath: string): boolean {
+  // 有侧车且字节没齐 = 半成品：拿它启动必然加载失败，不如当作「还没有」。
+  if (hasUnfinishedDownload(filePath)) return false;
+  let fd: number | null = null;
+  try {
+    fd = openSync(filePath, "r");
+    const head = Buffer.alloc(4);
+    if (readSync(fd, head, 0, 4, 0) !== 4) return false;
+    return head.toString("binary") === "GGUF";
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 关不上只影响这个 fd，判据已经拿到了
+      }
+    }
+  }
+}
+
+/**
+ * 启动失败是不是「投影文件用不了」造成的。
+ *
+ * 只认 llama.cpp 自己打的那几句：mtmd / mmproj / CLIP / multimodal —— 这是决定
+ * 要不要去掉 `--mmproj` 重试的唯一依据，判宽了会把「模型本身加载不了」也重试一遍
+ * （多花一次加载时间，且第二次的报错会与第一次混在一起）。
+ * 实测原文（0.4.0/b10809，文件坏与文件不匹配两种都是硬退出）：
+ *   `E mtmd_init_from_file: error: Failed to load CLIP model from …/mmproj-f16.gguf`
+ *   `E srv load_model: failed to load multimodal model, '…/mmproj-f16.gguf'`
+ *   `E srv llama_server: exiting due to model loading error`
+ */
+export function isProjectorFailure(logs: string): boolean {
+  return /mtmd|mmproj|clip_init|CLIP model|multimodal/i.test(logs);
+}
+
 
 
 export class LlamaRuntime implements Runtime {
@@ -122,6 +190,12 @@ export class LlamaRuntime implements Runtime {
   private serverLogs = "";
   private lastError = "";
   private lastDownloadActivityAt = 0;
+  /**
+   * 带投影文件启动失败过一次 → 这次会话不再猜它（见 start() 的重试）。
+   * 只在 stop() 里复位：用户看到「视觉不可用」的原因后去修文件 / 换模型，
+   * 下一次显式重启就该重新配对，不该把一次失败钉死到进程生命周期。
+   */
+  private mmprojSuppressed = false;
 
   private logListeners = new Set<LogListener>();
   private statusListeners = new Set<StatusListener>();
@@ -295,21 +369,15 @@ export class LlamaRuntime implements Runtime {
 
     if (model.kind === "local") {
       args.push("-m", model.path, "--alias", model.alias);
-      // 多模态嵌入（mmproj）：嵌入实例 + 本地模型时，按模型同目录自动配对投影文件。
-      // spike（llama-server b9410）实证 `--embeddings --pooling last --mmproj` 共存可用；
-      // 聊天实例永不注入；hf ref 走 -hf 自管缓存拿不到本地路径，不注入（Non-Goal）。
-      if (embedding) {
-        const dir = dirname(model.path);
-        try {
-          const candidates = readdirSync(dir).filter(isMmprojFile).sort();
-          // 多文件优先 f16：bf16 的名字里也含 "f16" 子串，直接 includes 会选错
-          const f16 = candidates.find((n) => /(?:^|[^a-z])f16/i.test(n));
-          const picked = f16 ?? candidates[0];
-          if (picked) args.push("--mmproj", join(dir, picked));
-        } catch {
-          // 目录读不到（模型文件被移走等）就不注入，行为与「无投影文件」一致
-        }
-      }
+      // 多模态投影文件（mmproj）：本地模型按同目录自动配对。
+      // **聊天实例与嵌入实例都要注入**：GGUF 的视觉塔本来就在这个独立文件里，不传
+      // --mmproj 的 VLM 起得来、纯文本也正常，只有上传图片时被服务端拒（「该模型不支持
+      // 多模态输入」）—— 用户看到的现场就是「提示缺 mmproj，可文件明明已经下好了」。
+      // 判据是「同目录里有投影文件」而不是模型名：名字里根本没有视觉线索的模型
+      // （`Qwen3.8-27B-Q4_K_M.gguf`）占多数，按名字猜只会把能用的视觉模型继续挡在门外。
+      // hf ref 走 -hf 自管缓存，拿不到本地目录，不注入（Non-Goal）。
+      const picked = this.mmprojSuppressed ? null : resolveMmprojFor(model.path);
+      if (picked) args.push("--mmproj", picked);
     } else if (model.ref) {
       args.push("-hf", model.ref);
     }
@@ -428,6 +496,33 @@ export class LlamaRuntime implements Runtime {
     }
 
     const args = this.buildArgs(model, serverArgs);
+    const hadMmproj = args.includes("--mmproj");
+    let result = await this.spawnAndWait(llamaPath, args);
+
+    // 投影文件是按目录猜的，猜错的那一种（文件合法、但不是这个模型的）只有运行时
+    // 才暴露：llama-server 在加载 CLIP 时失败并**直接退出**。没有这一步，一个放错
+    // 位置的 mmproj 就能把本来跑得好好的模型变成"起不来"，而且报错还指向模型。
+    // 去掉投影重试一次：视觉能力没了，模型可用 —— 这是可接受的降级，反过来不是。
+    if (!result.ok && hadMmproj && isProjectorFailure(this.serverLogs)) {
+      const reason = extractStartupError(this.serverLogs, "failed to load multimodal projector");
+      this.mmprojSuppressed = true;
+      const message = `投影文件（mmproj）加载失败，已去掉它重试 —— 本模型本次运行不接受图片输入。原因：${reason}`;
+      this.appendLog(`\n[omni] ${message}\n`);
+      logEvent({
+        level: "warn",
+        source: "server",
+        event: "engine.mmproj.rejected",
+        message,
+        detail: { model: model.kind === "local" ? model.path : model.ref, reason },
+      });
+      result = await this.spawnAndWait(llamaPath, this.buildArgs(model, serverArgs));
+    }
+
+    return result;
+  }
+
+  /** 启动一次并等到就绪（或失败）。带投影与去掉投影的重试各调一次，别无他用。 */
+  private async spawnAndWait(llamaPath: string, args: string[]): Promise<StartResult> {
     this.lastError = "";
     this.setStatus("starting");
     this.appendLog(`$ llama-server ${args.join(" ")}\n`);
@@ -514,6 +609,9 @@ export class LlamaRuntime implements Runtime {
   }
 
   async stop(): Promise<void> {
+    // 用户显式停一次就是「重新配对」的时机：上一次因为投影文件起不来而压制的注入
+    // 在这里复位，修好文件 / 换了模型再启动就会重新带上 --mmproj。
+    this.mmprojSuppressed = false;
     if (!this.serverProcess) {
       this.setStatus("stopped");
       return;

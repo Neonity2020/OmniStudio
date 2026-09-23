@@ -65,6 +65,7 @@ import {
   ModelCategoryChips,
   type CategoryChipValue,
 } from "@components/model-category-chips";
+import { CopyButton } from "@components/copy-button";
 import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
 
 /**
@@ -1094,26 +1095,35 @@ export function CloudProviderPanel() {
                             <tr key={entry.id} className="border-b border-muted/50 last:border-0">
                               {/* 模型 id 是这条记录的唯一标识（要拿去填 API、要在相似型号之间
                                   区分），任何情况下都完整显示：列窄了就换行，不出现省略号，也不
-                                  靠悬浮提示兜底 —— 别名（`name`）再长也只是补充，不许把 id 挤掉。 */}
-                              <td
-                                className="px-2 py-1.5"
-                                data-model-id={entry.id}
-                                title={entry.remark || entry.id}
-                              >
-                                {entry.name && entry.name !== entry.id ? (
-                                  <span className="flex flex-col gap-0.5">
-                                    <span className="text-[11px] wrap-anywhere">
-                                      {entry.name}
-                                    </span>
-                                    <span className="font-mono text-[10px] wrap-anywhere text-muted-foreground">
-                                      {entry.id}
-                                    </span>
+                                  靠悬浮提示兜底 —— 别名（`name`）再长也只是补充，不许把 id 挤掉。
+                                  整页禁用了文字选择（body user-select:none），光靠拖选复制不走，
+                                  所以这里给 id 打开选择，并在行内放一个一键复制按钮。 */}
+                              <td className="px-2 py-1.5" data-model-id={entry.id}>
+                                <div className="flex items-start gap-1">
+                                  <span className="min-w-0 flex-1 select-text" title={entry.remark || entry.id}>
+                                    {entry.name && entry.name !== entry.id ? (
+                                      <span className="flex flex-col gap-0.5">
+                                        <span className="text-[11px] wrap-anywhere">
+                                          {entry.name}
+                                        </span>
+                                        <span className="font-mono text-[10px] wrap-anywhere text-muted-foreground">
+                                          {entry.id}
+                                        </span>
+                                      </span>
+                                    ) : (
+                                      <span className="block font-mono text-[11px] wrap-anywhere">
+                                        {entry.id}
+                                      </span>
+                                    )}
                                   </span>
-                                ) : (
-                                  <span className="block font-mono text-[11px] wrap-anywhere">
-                                    {entry.id}
-                                  </span>
-                                )}
+                                  <CopyButton
+                                    text={entry.id}
+                                    iconOnly
+                                    size="icon-xs"
+                                    className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground"
+                                    tooltip={t("cloud.copyModelId")}
+                                  />
+                                </div>
                               </td>
                               {/* 用途可改：自动识别认不出（other）或认错时，用户在这里
                                   定死它属于哪个功能页。改完功能页的选择器立即跟着变。 */}

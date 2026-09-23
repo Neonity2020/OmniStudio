@@ -8,6 +8,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+### Added / 新增
+
+- **小应用中心新增「高清修复」：把糊照片、老照片用本地 AI 放大 4 倍并补充细节**（对应开源软件 Upscayl / Real-ESRGAN 的能力，做成一键小应用）。照片、动漫图、壁纸都能救，专治"放大全是马赛克"；重点是**完全本地运行、不上传** —— 与抠图换底同一套路线：Real-ESRGAN 的 ONNX 权重在主进程里用 `onnxruntime-web` 的 WASM 后端跑（`bun/upscale.ts`），图片不出进程、不需要任何云端厂商配置。
+  - **三个模型、三档速度**（都是 4×）：`realesrgan-x4plus`（通用画质最好，适合老照片 / 糊照片）、`realesrgan-x4plus-anime`（动漫 / 插画，均衡，默认）、`realesr-animevideov3`（最轻最快）。权重首次使用时在页面里下载（与抠图的 downloader 同一套：多源轮换 + 断点续传 + 进度轮询），之后离线可用。
+  - **开 WASM 多线程 + 逐块进度**：超分比抠图重得多，单线程实测 ~73s/块，一张 600×800 要 4 块就是 5 分钟 —— 界面只显示一句"正在放大"，用户会以为卡死。现在 `ort.env.wasm.numThreads` 按核数开（上限 8，起不来退回单线程），实测 8 线程 10.2s/块（~7×）；同时每跑完一块上报进度，小应用轮询 `upscale.status` 显示「第 n/N 块」。
+  - **超大图也能跑**：推理按模型声明的输入边长切片（社区导出多为**固定 512×512**）、相邻块留重叠带、拼接时**加权平均**（`blendTiles`）—— 否则 512px 的硬拼缝在照片上就是明显的横竖条纹。输出长边上限 4096，源图据此预缩放。几千像素的扫描件不会一次吃满内存。
+  - **按模型声明的类型喂张量**：社区 Real-ESRGAN ONNX 导出不少是 **fp16**，喂 `tensor(float32)` 会被 ORT 直接拒（`Unexpected input data type … expected: (tensor(float16))`）；输出侧同理，新 ORT 给 `Float16Array`（值已是浮点）、旧版本给 `Uint16Array`（半精度位模式），两种都处理。固定 512 的模型还必须正好喂 512（喂 128 报 shape 不匹配）。
+  - **结果图内联一份 dataUrl**：媒体服务是固定端口，当**另一个实例**（不同数据目录）占着它时按设计会拒绝服务本实例的图片 —— 此时预览/保存都会失败，而模型其实跑完了。所以 `upscale.run` 同时返回媒体 URL 与内联 PNG（≤20MB），小应用两者择一，不再被端口冲突卡死。
+  - 三档入口全连通：小应用卡片（`shared/miniapps.ts`，能力 `upscale` 本地永就绪）、`omni.upscale` 运行时动作、`upscale.*` RPC（模型清单 / 下载 / 暂存源图 / 放大）。回归：`upscale.test.ts`（切片网格 / 区域提取 / NCHW→8bit / 重叠加权平均 / 半精度往返）。
+
+### Fixed / 修复
+
+- **本地 GGUF 视觉模型上传图片不再报「缺 mmproj」——投影文件现在真的被用上了**。现场是：投影文件（如 `mmproj-Qwen3.8-27B-BF16.gguf`）已经下好躺在模型目录里，可一上传图片就被拒，提示缺 mmproj。根因是 `--mmproj` 只在**嵌入实例**上注入（原先注释里写死"聊天实例永不注入"）：GGUF 的视觉塔本来就在这个独立文件里，不传 `--mmproj` 的多模态模型**起得来、纯文本也完全正常**，只有图片请求会被服务端拒 —— 所以看起来像"文件没生效"，实际是它从来没进过命令行。现在聊天实例与嵌入实例走同一套按目录自动配对，不看模型名（`Qwen3.8-27B-Q4_K_M.gguf` 这类名字里根本没有视觉线索，按名字猜只会继续把能用的视觉模型挡在门外）。
+  - **判名放宽到三种上游写法**（`shared/modelscope.ts` 的 `isMmprojFileName`，市场页与扫描层共用同一份）：`mmproj-F16.gguf`、`mmproj-model-f16.gguf`，以及模型名在前的 `Qwen3-VL-4B-Instruct-mmproj-BF16.gguf`（ModelScope 镜像常见，旧的 `^mmproj-` 前缀会整个漏掉）。
+  - **配对前先剔除坏文件**：llama-server 遇到加载不了的投影文件会**直接退出**（实测 0.4.0/b10809：文件内容不是 GGUF、以及文件合法但不属于这个模型，两种都是 `[mtmd] failed to load multimodal model` → `exiting due to model loading error`）——猜错一次就能把本来跑得好好的模型变成"起不来"。所以内容非 GGUF 的、以及**没下完的**（侧车字节没齐，尺寸看不出）一律不配；万一还是配错（文件合法但属于别的模型，只有运行时才暴露），启动失败时**去掉投影重试一次**并说明「本模型本次运行不接受图片输入」——视觉没了但模型可用，反过来不行。`engine.mmproj.rejected` 记入 `app.log`。
+  - **下载卡把投影文件算成模型的一部分**（`model-detail/download-button.tsx`）：GGUF 的单模型下载卡原先只下推荐的量化，投影文件得用户自己在一堆文件行里找到 —— 只下权重正是"缺 mmproj"的一半现场。现在权重与投影一起下、一起算「已下载」（扫描层把它登记为同目录模型条目的 `supportFiles`：不单列成模型，但市场页的判定能看见它，否则下完那张卡会永远差这一个文件）。
+  - **Agent 的视觉能力判定与启动注入对齐**（`chat-model.ts`）：本地模型目录里有 mmproj 就直接算支持图片输入 —— 否则模型带着视觉能力起来了，Agent 却因为名字猜不出来而不给 `view_image` 工具。
+  - **回归**：`llama.test.ts`（聊天实例注入 / 三种命名 / 坏文件与半成品不配 / `isProjectorFailure` 只认投影相关日志）、`model-scan.tests.ts`（不单列但登记进同目录条目的 supportFiles、按目录配对）、`installed-models.test.ts`（投影文件算「已下载」）。
+
 ## [0.1.4] - 2026-09-21
 
 ### Added / 新增

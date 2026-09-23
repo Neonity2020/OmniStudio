@@ -385,9 +385,47 @@ test("模型列里的 id 一定完整：换行不省略，也不靠悬浮提示�
   // 没有别名的条目：id 就是正文，同样完整
   const plain = view.container.querySelector<HTMLElement>('[data-model-id="BAAI/bge-m3"]');
   expect(plain!.textContent).toBe("BAAI/bge-m3");
-  const plainLine = plain!.querySelector<HTMLElement>("span");
+  // 取最内层那一行（外层的包裹 span 文本内容相同，但它不管换行）
+  const idLines = [...plain!.querySelectorAll<HTMLElement>("span")].filter(
+    (s) => s.textContent === "BAAI/bge-m3",
+  );
+  const plainLine = idLines[idLines.length - 1];
+  expect(plainLine).toBeDefined();
   expect(plainLine!.className).toContain("wrap-anywhere");
   expect(plainLine!.className).not.toContain("truncate");
+
+  await view.unmount();
+});
+
+test("模型行里有一键复制：点一下把完整 id 写进剪贴板", async () => {
+  const view = await renderPanel();
+
+  // 全站禁用了文字选择（body user-select:none），拖选这条路走不通 —— 复制按钮是唯一入口
+  const written: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: (text: string) => {
+        written.push(text);
+        return Promise.resolve();
+      },
+    },
+  });
+
+  const cell = view.container.querySelector<HTMLElement>('[data-model-id="Qwen/Qwen3-8B"]');
+  expect(cell).not.toBeNull();
+  // id 本身可拖选（select-text），不是只给一个按钮
+  expect(cell!.querySelector(".select-text")).not.toBeNull();
+
+  const copy = cell!.querySelector<HTMLButtonElement>("button");
+  expect(copy).not.toBeNull();
+  await act(async () => {
+    copy!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  // 复制的是纯 id，不是别名、不带空白
+  expect(written).toEqual(["Qwen/Qwen3-8B"]);
 
   await view.unmount();
 });

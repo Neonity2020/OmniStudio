@@ -51,7 +51,7 @@ mock.module("../stats", () => ({
   markServerStarted: () => {},
 }));
 
-const { LlamaRuntime } = await import("./llama");
+const { LlamaRuntime, isProjectorFailure } = await import("./llama");
 
 const tmpDir = mkdtempSync(join(tmpdir(), "llama-runtime-test-"));
 const chatModel = join(tmpDir, "e2e-chat.gguf");
@@ -61,18 +61,38 @@ writeFileSync(embedModel, "gguf");
 
 /**
  * mmproj 注入场景目录：每个目录自包含（模型 + 不同投影文件组合），
- * 验证嵌入实例的自动配对与选择规则（多文件优先 f16）。
+ * 验证自动配对与选择规则（多文件优先 f16）—— 聊天与嵌入实例走同一套规则。
+ * 内容写 GGUF 魔数：配对前会校验文件头，假文件不该被当成投影文件配上去。
  */
 function scenarioDir(name: string, files: string[]): string {
   const dir = join(tmpDir, name);
   mkdirSync(dir, { recursive: true });
-  for (const f of files) writeFileSync(join(dir, f), "gguf");
+  for (const f of files) writeFileSync(join(dir, f), "GGUF");
   return dir;
 }
 
 const mmprojBothDir = scenarioDir("mmproj-both", ["model.gguf", "mmproj-f16.gguf", "mmproj-bf16.gguf"]);
 const mmprojBf16OnlyDir = scenarioDir("mmproj-bf16-only", ["model.gguf", "mmproj-bf16.gguf"]);
 const mmprojNoneDir = scenarioDir("mmproj-none", ["model.gguf"]);
+// 上游常见的第三种命名：模型名在前（ModelScope 镜像多这么叫）。
+const mmprojSuffixDir = scenarioDir("mmproj-suffix", [
+  "Qwen3-VL-4B-Q4_K_M.gguf",
+  "Qwen3-VL-4B-mmproj-BF16.gguf",
+]);
+// 名字像投影文件、内容不是 GGUF（放错位置 / 下到一半的杂物）。
+const mmprojJunkDir = scenarioDir("mmproj-junk", ["model.gguf", "mmproj-f16.gguf"]);
+writeFileSync(join(mmprojJunkDir, "mmproj-f16.gguf"), "not-a-gguf");
+// 带侧车、字节没齐的半成品：文件头是 GGUF，拿它启动必然失败（最终文件一开始就被
+// 预分配到完整大小，看尺寸看不出没下完 —— 侧车里的 parts 才是权威口径）。
+const mmprojPartialDir = scenarioDir("mmproj-partial", ["model.gguf", "mmproj-f16.gguf"]);
+writeFileSync(
+  join(mmprojPartialDir, "mmproj-f16.gguf.download.json"),
+  JSON.stringify({
+    total: 1_000_000,
+    flushed: 0,
+    parts: [{ index: 0, start: 0, end: 1_000_000, have: 0 }],
+  }),
+);
 
 /** 与实现同一规则的二进制解析（快照断言需要完整命令行）。 */
 const bin =
@@ -245,10 +265,49 @@ describe("buildArgs / mmproj 注入", () => {
     expect(cmd).not.toContain("--mmproj");
   });
 
-  test("聊天实例永不注入：同目录有投影文件也不传 --mmproj", () => {
+  /**
+   * 聊天实例必须注入 —— 这正是「上传图片提示缺 mmproj，可文件明明已经下好」的根因：
+   * GGUF 的视觉塔在独立文件里，不传 --mmproj 的 VLM 起得来、纯文本也正常，
+   * 只有图片请求被服务端拒。旧行为（聊天永不注入）已作废。
+   */
+  test("聊天实例也注入：同目录有投影文件时带上 --mmproj", () => {
     setChatSettings();
     const rt = new LlamaRuntime({ model: join(mmprojBothDir, "model.gguf"), port: "18406" });
     const cmd = rt.buildCommandLine();
+    expect(cmd).toContain(`--mmproj ${join(mmprojBothDir, "mmproj-f16.gguf")}`);
+    // 聊天形态不变：采样参数与 --image-max-tokens 仍在，注入的是多一个投影文件
+    expect(cmd).toContain("--temp 0.1");
+    expect(cmd).toContain("--image-max-tokens 2048");
+    expect(cmd).not.toContain("--embeddings");
+  });
+
+  test("聊天实例：模型名在前命名的投影文件（Qwen3-VL-4B-mmproj-BF16.gguf）也认", () => {
+    setChatSettings();
+    const rt = new LlamaRuntime({ model: join(mmprojSuffixDir, "Qwen3-VL-4B-Q4_K_M.gguf"), port: "18407" });
+    const cmd = rt.buildCommandLine();
+    expect(cmd).toContain(`--mmproj ${join(mmprojSuffixDir, "Qwen3-VL-4B-mmproj-BF16.gguf")}`);
+  });
+
+  test("聊天实例：同目录没有投影文件 → 不带 --mmproj（纯文本模型零变化）", () => {
+    setChatSettings();
+    const cmd = new LlamaRuntime({ model: chatModel, port: "18408" }).buildCommandLine();
+    expect(cmd).not.toContain("--mmproj");
+  });
+
+  /**
+   * 配对是猜的，所以宁可少配也不配错：llama-server 遇到加载不了的投影文件会直接
+   * 退出（实测 0.4.0/b10809：`[mtmd] failed to load multimodal model` →
+   * `exiting due to model loading error`），一个坏文件就能把能跑的模型变成起不来。
+   */
+  test("内容不是 GGUF 的同名文件不配（放错位置的杂物）", () => {
+    setChatSettings();
+    const cmd = new LlamaRuntime({ model: join(mmprojJunkDir, "model.gguf"), port: "18409" }).buildCommandLine();
+    expect(cmd).not.toContain("--mmproj");
+  });
+
+  test("下到一半的投影文件（有侧车、字节没齐）不配", () => {
+    setChatSettings();
+    const cmd = new LlamaRuntime({ model: join(mmprojPartialDir, "model.gguf"), port: "18410" }).buildCommandLine();
     expect(cmd).not.toContain("--mmproj");
   });
 
@@ -262,5 +321,33 @@ describe("buildArgs / mmproj 注入", () => {
     const cmd = rt.buildCommandLine();
     expect(cmd).toContain("-hf unsloth/gme-Qwen2-VL-2B-GGUF");
     expect(cmd).not.toContain("--mmproj");
+  });
+});
+
+/**
+ * 去掉投影重试的唯一触发条件（见 llama.ts start()）。判宽了会把「模型本身加载不了」
+ * 也重试一遍：多花一次加载，第二次的报错还会和第一次混在一起。
+ * 两种真实失败都取自强 llama-server 的输出实测。
+ */
+describe("isProjectorFailure", () => {
+  test("投影文件坏 / 不匹配（实测原文）→ 命中", () => {
+    expect(
+      isProjectorFailure(
+        "E gguf_init_from_reader: invalid magic characters: 'not-', expected 'GGUF'\n" +
+          "E mtmd_init_from_file: error: Failed to load CLIP model from /m/mmproj-f16.gguf\n" +
+          "E srv load_model: failed to load multimodal model, '/m/mmproj-f16.gguf'\n" +
+          "E srv llama_server: exiting due to model loading error",
+      ),
+    ).toBe(true);
+  });
+
+  test("模型本身的问题（显存不足 / 文件缺失）→ 不命中，不重试", () => {
+    expect(
+      isProjectorFailure(
+        "E srv load_model: failed to load model '/m/model.gguf'\n" +
+          "E llama_model_load: error loading model: unable to allocate CUDA0 buffer\n" +
+          "E srv llama_server: exiting due to model loading error",
+      ),
+    ).toBe(false);
   });
 });
