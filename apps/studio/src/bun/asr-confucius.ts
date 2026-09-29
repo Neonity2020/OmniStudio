@@ -6,7 +6,7 @@
  * 这里用一个**专用** llama-server 实例（与聊天/嵌入的推理服务互不干扰）：
  *
  *   llama-server -m <main.gguf> --mmproj <mmproj.gguf> \
- *     --host 127.0.0.1 --port <ASR_CONFUCIUS_PORT> --ctx-size 8192 --parallel 1
+ *     --host 127.0.0.1 --port <ASR_CONFUCIUS_PORT> --ctx-size 32768 --parallel 1
  *
  * 转写走 llama.cpp 原生支持 `/v1/chat/completions` 的 `input_audio` 内容块
  * （miniaudio 解码 wav/flac/mp3），与 OpenAI 官方 SDK 的音频消息同构。
@@ -85,7 +85,9 @@ export function buildConfuciusServerArgs(input: {
     "--mmproj", input.mmprojPath,
     "--host", "127.0.0.1",
     "--port", String(input.port),
-    "--ctx-size", "8192",
+    // 音频编码 token 密度高（实测几分钟音频就 8434 tokens 顶爆 8192）；
+    // 1.7B 模型 KV 很小，直接给 32k（约 40 分钟音频）。
+    "--ctx-size", "32768",
     "--parallel", "1",
   ];
 }
@@ -105,7 +107,9 @@ export function buildConfuciusRequestBody(wavBase64: string): {
         content: [{ type: "input_audio", input_audio: { data: wavBase64 } }],
       },
     ],
-    max_tokens: 1024,
+    // 单块上限 120 秒音频，中文约 600 字 ≈ 900 token；2048 留足裕量，
+    // 否则长块的转写会在半截被 finish_reason=length 静默截断。
+    max_tokens: 2048,
     temperature: 0,
   };
 }
@@ -376,7 +380,170 @@ export function cleanTranscriptText(text: string): string {
   return s.replace(/\s+/g, " ").trim();
 }
 
-/** 用 Confucius4-R2T2 本地引擎转写（输入先转成 16k 单声道 WAV）。 */
+// ---------------------------------------------------------------------------
+// 长音频切块：16k mono WAV → 若干 ≤2 分钟的块（切点对齐静音处），逐块转写拼接。
+// 不切块的话两处会截断内容：音频编码 token 顶爆上下文（HTTP 400），或转写文本
+// 超过 max_tokens 被 finish_reason=length 静默截成一半 —— 用户看到的就是"只识别了一半"。
+// ---------------------------------------------------------------------------
+
+/** 单块时长（秒）。1.7B 模型 2 分钟块的音频编码 + 生成都在秒级完成。 */
+export const ASR_CHUNK_SECONDS = 120;
+
+/** 解析 WAV 的 data chunk 位置（ensure16kWav 已保证 16k mono 16-bit PCM）。 */
+function readWavDataChunk(buf: Buffer): { dataOffset: number; dataLen: number } {
+  let off = 12; // 跳过 RIFF 头
+  while (off + 8 <= buf.length) {
+    const id = buf.toString("ascii", off, off + 4);
+    const size = buf.readUInt32LE(off + 4);
+    if (id === "data") {
+      return { dataOffset: off + 8, dataLen: Math.min(size, buf.length - off - 8) };
+    }
+    off += 8 + size + (size % 2);
+  }
+  throw new Error("音频文件缺少 WAV data 块");
+}
+
+/** 每 10ms 帧的 RMS 能量（用于找静音切点）。 */
+function frameRms(buf: Buffer, dataOffset: number, sampleCount: number): Float32Array {
+  const frames = Math.max(1, Math.ceil(sampleCount / 160));
+  const rms = new Float32Array(frames);
+  for (let f = 0; f < frames; f++) {
+    const start = dataOffset + f * 320;
+    const end = Math.min(start + 320, dataOffset + sampleCount * 2);
+    let sum = 0;
+    let n = 0;
+    for (let i = start; i < end; i += 2) {
+      const v = buf.readInt16LE(i);
+      sum += v * v;
+      n++;
+    }
+    rms[f] = n > 0 ? Math.sqrt(sum / n) : 0;
+  }
+  return rms;
+}
+
+/** 在目标切点 ±4s 内找能量最低的 10ms 帧 —— 尽量把句子切在停顿上而不是词中间。 */
+function quietCutPoint(rms: Float32Array, targetSec: number, totalSec: number): number {
+  const lo = Math.max(0, Math.floor((targetSec - 4) * 100));
+  const hi = Math.min(rms.length - 1, Math.ceil((targetSec + 4) * 100));
+  let best = Math.min(Math.floor(targetSec * 100), rms.length - 1);
+  let bestE = Infinity;
+  for (let f = lo; f <= hi; f++) {
+    // 5 帧小窗均值，避免把切点落在单帧突发噪声上
+    let e = 0;
+    let n = 0;
+    for (let k = f; k < Math.min(f + 5, rms.length); k++) {
+      e += rms[k]!;
+      n++;
+    }
+    if (n > 0 && e / n < bestE) {
+      bestE = e / n;
+      best = f;
+    }
+  }
+  return Math.min(best / 100, totalSec);
+}
+
+/**
+ * 把 16k mono WAV 切成 ≤chunkSeconds 的若干块（返回完整 WAV Buffer，含修正过的头）。
+ * 时长不足块长的 1.2 倍时原样返回（不值得为一两秒多打一次请求）。
+ */
+export function sliceWav16kToChunks(buf: Buffer, chunkSeconds = ASR_CHUNK_SECONDS): Buffer[] {
+  const { dataOffset, dataLen } = readWavDataChunk(buf);
+  const sampleCount = Math.floor(dataLen / 2);
+  const totalSec = sampleCount / 16000;
+  if (totalSec <= chunkSeconds * 1.2) return [buf];
+
+  const rms = frameRms(buf, dataOffset, sampleCount);
+  // WAV 头 = data chunk 之前的全部字节（标准 44B，容错非标的额外 chunk）
+  const header = Buffer.from(buf.subarray(0, dataOffset));
+
+  const cuts: number[] = [0];
+  let t = quietCutPoint(rms, chunkSeconds, totalSec);
+  while (t < totalSec - 8) {
+    cuts.push(t);
+    t = quietCutPoint(rms, t + chunkSeconds, totalSec);
+  }
+  cuts.push(totalSec);
+
+  const chunks: Buffer[] = [];
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const from = dataOffset + Math.floor(cuts[i]! * 16000) * 2;
+    const to = dataOffset + Math.floor(cuts[i + 1]! * 16000) * 2;
+    const out = Buffer.concat([header, buf.subarray(from, to)]);
+    out.writeUInt32LE(out.length - 8, 4); // RIFF size
+    out.writeUInt32LE(out.length - dataOffset, dataOffset - 4); // data size
+    chunks.push(out);
+  }
+  return chunks;
+}
+
+/** 拼接各块转写文本：CJK 边界直接相连，西文边界补一个空格；空块跳过。 */
+export function joinTranscriptParts(parts: string[]): string {
+  const cjk = (ch: string) => /[\u3000-\u9fff\uff00-\uffef]/.test(ch);
+  let out = "";
+  for (const raw of parts) {
+    const p = raw.trim();
+    if (!p) continue;
+    if (!out) {
+      out = p;
+      continue;
+    }
+    out += cjk(out[out.length - 1]!) || cjk(p[0]!) ? p : ` ${p}`;
+  }
+  return out;
+}
+
+/** 单块转写：POST 一块 16k WAV，返回清洗后的文本。 */
+async function transcribeChunk(base: string, wav: Buffer): Promise<string> {
+  const body = buildConfuciusRequestBody(wav.toString("base64"));
+
+  let res: Response;
+  try {
+    // 单块 ≤2 分钟音频（约 1500 audio tokens）+ 生成，10 分钟超时绰绰有余。
+    res = await fetch(`${base}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(600_000),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    logEvent({ source: "asr", event: "asr.confucius_request_failed", message: `Confucius4-R2T2 转写请求失败：${msg}` });
+    throw new Error(`Confucius4-R2T2 转写失败：${msg}`, { cause: e });
+  }
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    logEvent({
+      source: "asr",
+      event: "asr.confucius_error",
+      message: `Confucius4-R2T2 转写返回 ${res.status}`,
+      detail: { status: res.status, body: detail.slice(-500) },
+    });
+    if (detail.includes("exceed_context_size_error") || detail.includes("exceeds the available context")) {
+      // 切块后单块只有 2 分钟，正常到不了这里；到达只能是 ctx 被人为调小了。
+      throw new Error("转写上下文不足：请检查引擎端口是否被其它服务占用（可尝试重启引擎）。");
+    }
+    throw new Error(`Confucius4-R2T2 转写失败（HTTP ${res.status}）${detail.slice(-200)}`);
+  }
+
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: string }; finish_reason?: string }[];
+  };
+  const choice = json.choices?.[0];
+  const raw = choice?.message?.content ?? "";
+  if (choice?.finish_reason === "length") {
+    logEvent({
+      source: "asr",
+      event: "asr.confucius_truncated",
+      message: "单块转写输出达到 max_tokens 上限，文本可能不完整",
+    });
+  }
+  return cleanTranscriptText(raw);
+}
+
+/** 用 Confucius4-R2T2 本地引擎转写：先转 16k mono WAV，超过 2 分钟自动切块、逐块识别、按序拼接。 */
 export async function transcribeWithConfucius(input: {
   audioPath: string;
   language?: string;
@@ -396,44 +563,41 @@ export async function transcribeWithConfucius(input: {
 
   const wavPath = await ensure16kWav(input.audioPath);
   const base = `http://127.0.0.1:${confuciusPort()}`;
-  const data = await Bun.file(wavPath).arrayBuffer();
-  const b64 = Buffer.from(data).toString("base64");
+  const full = Buffer.from(await Bun.file(wavPath).arrayBuffer());
+  const chunks = sliceWav16kToChunks(full);
+  const startedAt = Date.now();
+  logEvent({
+    source: "asr",
+    event: "asr.confucius_transcribe",
+    message:
+      chunks.length > 1
+        ? `长音频切块转写：${chunks.length} 块（每块 ≤${ASR_CHUNK_SECONDS}s）`
+        : "单块转写",
+    detail: { chunks: chunks.length },
+  });
 
-  const body = buildConfuciusRequestBody(b64);
-
-  let res: Response;
-  try {
-    res = await fetch(`${base}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(120_000),
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    logEvent({ source: "asr", event: "asr.confucius_request_failed", message: `Confucius4-R2T2 转写请求失败：${msg}` });
-    throw new Error(`Confucius4-R2T2 转写失败：${msg}`, { cause: e });
+  const parts: string[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const text = await transcribeChunk(base, chunks[i]!);
+    parts.push(text);
+    if (chunks.length > 1) {
+      logEvent({
+        source: "asr",
+        event: "asr.confucius_chunk_done",
+        message: `第 ${i + 1}/${chunks.length} 块转写完成`,
+      });
+    }
   }
 
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    logEvent({
-      source: "asr",
-      event: "asr.confucius_error",
-      message: `Confucius4-R2T2 转写返回 ${res.status}`,
-      detail: { status: res.status, body: detail.slice(-500) },
-    });
-    throw new Error(`Confucius4-R2T2 转写失败（HTTP ${res.status}）${detail.slice(-200)}`);
-  }
-
-  const json = (await res.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-  const raw = json.choices?.[0]?.message?.content ?? "";
-  const text = cleanTranscriptText(raw);
+  const text = joinTranscriptParts(parts);
   if (!text) {
     logEvent({ source: "asr", event: "asr.confucius_empty", message: "Confucius4-R2T2 未识别到语音内容" });
     return { text: "", engine: "confucius", modelLabel: resolved.entry.name };
   }
+  logEvent({
+    source: "asr",
+    event: "asr.confucius_done",
+    message: `Confucius4-R2T2 转写完成（${chunks.length} 块，${((Date.now() - startedAt) / 1000).toFixed(1)}s，${text.length} 字）`,
+  });
   return { text, engine: "confucius", modelLabel: resolved.entry.name };
 }
