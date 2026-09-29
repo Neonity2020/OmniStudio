@@ -1,8 +1,11 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckIcon,
   CopyIcon,
   ListIcon,
+  PauseIcon,
+  PlayIcon,
+  ScrollTextIcon,
   SpellCheckIcon,
   TimerIcon,
   UsersIcon,
@@ -10,6 +13,9 @@ import {
 import type { AsrSegment } from "../../bun/asr";
 import { useT } from "@stores/ui-lang";
 import { Button } from "@ui/button";
+import { Markdown } from "@components/markdown";
+import { buildMinutesMarkdown } from "@lib/minutes";
+import { findActiveSegment } from "@lib/segments";
 import { cn } from "@/mainview/lib/utils";
 
 /**
@@ -90,11 +96,14 @@ function SegmentTimeline({
   speakerMode,
   hasSpeakers,
   onJump,
+  currentTime,
 }: {
   segments: AsrSegment[];
   speakerMode: boolean;
   hasSpeakers: boolean;
   onJump: (index: number) => void;
+  /** 播放位置（秒）；有值时显示红色播放游标。 */
+  currentTime?: number;
 }) {
   const total = Math.max(segments[segments.length - 1]?.end ?? 0, 1);
   const step = niceStep(total);
@@ -121,6 +130,12 @@ function SegmentTimeline({
             />
           );
         })}
+        {currentTime != null && currentTime > 0 && (
+          <span
+            className="pointer-events-none absolute inset-y-0 w-0.5 bg-red-500 shadow-[0_0_4px_rgba(239,68,68,0.8)]"
+            style={{ left: `${Math.min((currentTime / total) * 100, 100)}%` }}
+          />
+        )}
       </div>
       <div className="relative mt-0.5 h-3.5 text-[9px] text-muted-foreground tabular-nums">
         {ticks.map((tick) => (
@@ -149,6 +164,129 @@ function useCopyFeedback(): [string | null, (kind: string, text: string) => void
   return [copied, copy];
 }
 
+/**
+ * 音频 ↔ 文字对齐的播放状态：一个 audio 元素 + 播放位置轮询。
+ * 放在 TranscriptViewer 顶层，播放头（进度 + 时间轴游标）与逐句列表的高亮
+ * 共用同一份 playCur。
+ */
+function useAudioPlayback(url: string | undefined) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playCur, setPlayCur] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [audioDur, setAudioDur] = useState(0);
+
+  useEffect(() => {
+    const el = document.createElement("audio");
+    if (url) {
+      el.src = url;
+      el.preload = "metadata";
+    }
+    el.addEventListener("timeupdate", () => setPlayCur(el.currentTime));
+    el.addEventListener("play", () => setPlaying(true));
+    el.addEventListener("pause", () => setPlaying(false));
+    el.addEventListener("loadedmetadata", () => setAudioDur(Number.isFinite(el.duration) ? el.duration : 0));
+    el.addEventListener("ended", () => setPlaying(false));
+    audioRef.current = el;
+    return () => {
+      el.pause();
+      el.src = "";
+      audioRef.current = null;
+    };
+  }, [url]);
+
+  const seekTo = (t: number) => {
+    const el = audioRef.current;
+    if (!el || !url) return;
+    el.currentTime = Math.max(0, t);
+    setPlayCur(el.currentTime);
+    void el.play().catch(() => {});
+  };
+
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el || !url) return;
+    if (el.paused) void el.play().catch(() => {});
+    else el.pause();
+  };
+
+  return { playCur, playing, audioDur, seekTo, toggle };
+}
+
+/** 播放头：常驻在结果卡顶部的音频条（播放/暂停 + 可点进度条），下方是时间轴轨道。 */
+function AudioHeader({
+  playing,
+  playCur,
+  duration,
+  total,
+  onToggle,
+  onSeek,
+  segments,
+  speakerMode,
+  hasSpeakers,
+  onJumpSegment,
+}: {
+  playing: boolean;
+  playCur: number;
+  duration: number;
+  total: number;
+  onToggle: () => void;
+  onSeek: (t: number) => void;
+  segments: AsrSegment[];
+  speakerMode: boolean;
+  hasSpeakers: boolean;
+  onJumpSegment: (index: number) => void;
+}) {
+  const t = useT();
+  const barRef = useRef<HTMLDivElement>(null);
+  const dur = duration > 0 ? duration : total;
+  const pct = dur > 0 ? Math.min((playCur / dur) * 100, 100) : 0;
+
+  const seekFromEvent = (e: React.MouseEvent) => {
+    const rect = barRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    onSeek(((e.clientX - rect.left) / rect.width) * dur);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 rounded-lg border bg-muted/30 p-3">
+      <div className="flex items-center gap-3">
+        <Button size="icon-sm" onClick={onToggle} tooltip={playing ? t("voice.asr.pause") : t("voice.asr.play")}>
+          {playing ? <PauseIcon className="size-4" /> : <PlayIcon className="size-4" />}
+        </Button>
+        <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{fmtClock(playCur)}</span>
+        <div
+          ref={barRef}
+          onClick={seekFromEvent}
+          className="group relative h-4 flex-1 cursor-pointer"
+          role="slider"
+          aria-valuemin={0}
+          aria-valuemax={dur}
+          aria-valuenow={Math.round(playCur)}
+        >
+          <div className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-full bg-muted">
+            <div className="h-full rounded-full bg-primary/70 transition-[width] duration-100" style={{ width: `${pct}%` }} />
+          </div>
+          <span
+            className="absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-background bg-primary shadow transition-[left] duration-100 group-hover:size-3.5"
+            style={{ left: `${pct}%` }}
+          />
+        </div>
+        <span className="font-mono text-[11px] text-muted-foreground tabular-nums">{fmtClock(dur)}</span>
+      </div>
+      <SegmentTimeline
+        segments={segments}
+        speakerMode={speakerMode}
+        hasSpeakers={hasSpeakers}
+        onJump={onJumpSegment}
+        currentTime={playCur}
+      />
+      <p className="text-[10px] leading-relaxed text-muted-foreground/70">
+        点击轨道或进度条跳到对应位置；播放时逐句列表自动跟随高亮。
+      </p>
+    </div>
+  );
+}
+
 export function TranscriptViewer({
   segments,
   text,
@@ -158,6 +296,7 @@ export function TranscriptViewer({
   streaming,
   onJump,
   jumpIndex,
+  audioUrl,
 }: {
   segments: AsrSegment[];
   text: string;
@@ -167,25 +306,44 @@ export function TranscriptViewer({
   streaming?: boolean;
   onJump?: (index: number) => void;
   jumpIndex?: number | null;
+  /** 转写来源音频（staged URL）；有值时顶部常驻播放头并联动高亮。 */
+  audioUrl?: string;
 }) {
   const t = useT();
-  const [view, setView] = useState<"segments" | "plain">("segments");
+  // 默认展示整理稿（Markdown 纪要）；逐句原文与纯文本作为次级视图。
+  const [view, setView] = useState<"minutes" | "segments" | "plain">("minutes");
   const [copied, copy] = useCopyFeedback();
   const listRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
 
   const hasSegs = segments.length > 0;
   const total = hasSegs ? segments[segments.length - 1]!.end : 0;
+  const { playCur, playing, audioDur, seekTo, toggle } = useAudioPlayback(audioUrl);
+  const activeSeg = useMemo(
+    () => (audioUrl && playing ? findActiveSegment(segments, playCur) : -1),
+    [audioUrl, playing, segments, playCur],
+  );
+  // 播放跟随：当前句变化时把它滚进视野（仅播放中；用户暂停浏览时不抢滚动条）。
+  useEffect(() => {
+    if (!playing || activeSeg < 0 || view !== "segments") return;
+    const el = cardRef.current?.querySelector<HTMLElement>(`[data-seg="${activeSeg}"]`);
+    el?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [activeSeg, playing, view]);
   const speakerCount = useMemo(() => {
     if (!hasSegs) return 1;
     return speakerMode && hasSpeakers
       ? new Set(segments.map((s) => s.speaker ?? 0)).size
       : 1;
   }, [segments, hasSpeakers, speakerMode, hasSegs]);
+  const minutes = useMemo(
+    () => (hasSegs ? buildMinutesMarkdown(segments, speakerMode && !!hasSpeakers, t("voice.spk")) : ""),
+    [segments, hasSpeakers, speakerMode, t],
+  );
 
   const jump = (index: number) => {
     onJump?.(index);
-    // Always scroll the clicked segment into view inside the list.
+    // 有音频时点轨道 = 定位播放；同时把该句滚进视野。
+    if (audioUrl && segments[index]) seekTo(segments[index]!.start);
     requestAnimationFrame(() => {
       const el = cardRef.current?.querySelector<HTMLElement>(`[data-seg="${index}"]`);
       el?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -199,6 +357,23 @@ export function TranscriptViewer({
 
   return (
     <div ref={cardRef} className="flex flex-col gap-3 rounded-xl border bg-card p-4 shadow-sm">
+      {/* 播放头：常驻顶部（滚动时吸顶），进度条 + 时间轴轨道 + 播放游标 */}
+      {audioUrl && hasSegs && (
+        <div className="sticky top-0 z-10 -mx-4 -mt-4 mb-1 rounded-t-xl border-b bg-card/95 px-4 py-3 backdrop-blur">
+          <AudioHeader
+            playing={playing}
+            playCur={playCur}
+            duration={audioDur}
+            total={total}
+            onToggle={toggle}
+            onSeek={seekTo}
+            segments={segments}
+            speakerMode={speakerMode}
+            hasSpeakers={!!hasSpeakers}
+            onJumpSegment={jump}
+          />
+        </div>
+      )}
       {/* Header: stats + actions */}
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
@@ -231,35 +406,41 @@ export function TranscriptViewer({
         <div className="flex flex-wrap items-center gap-1.5">
           {hasSegs && (
             <>
-              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => copy("text", fullText)}>
-                {copied === "text" ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
-                {copied === "text" ? t("voice.copied") : t("voice.asr.copyText")}
-              </Button>
+              {view === "minutes" ? (
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => copy("md", minutes)}>
+                  {copied === "md" ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
+                  {copied === "md" ? t("voice.copied") : t("voice.asr.copyMd")}
+                </Button>
+              ) : (
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => copy("text", fullText)}>
+                  {copied === "text" ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
+                  {copied === "text" ? t("voice.copied") : t("voice.asr.copyText")}
+                </Button>
+              )}
               <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => copy("srt", srt)}>
                 {copied === "srt" ? <CheckIcon className="size-3.5 text-primary" /> : <CopyIcon className="size-3.5" />}
                 {copied === "srt" ? t("voice.asr.srtCopied") : t("voice.asr.copySrt")}
               </Button>
               <div className="ml-1 flex items-center rounded-full bg-muted p-0.5">
-                <button
-                  type="button"
-                  onClick={() => setView("segments")}
-                  className={cn(
-                    "rounded-full px-2.5 py-1 text-[11px] transition-colors",
-                    view === "segments" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {t("voice.asr.viewSegments")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setView("plain")}
-                  className={cn(
-                    "rounded-full px-2.5 py-1 text-[11px] transition-colors",
-                    view === "plain" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {t("voice.asr.viewPlain")}
-                </button>
+                {(
+                  [
+                    { v: "minutes", label: t("voice.asr.viewMinutes") },
+                    { v: "segments", label: t("voice.asr.viewSegments") },
+                    { v: "plain", label: t("voice.asr.viewPlain") },
+                  ] as const
+                ).map((o) => (
+                  <button
+                    key={o.v}
+                    type="button"
+                    onClick={() => setView(o.v)}
+                    className={cn(
+                      "rounded-full px-2.5 py-1 text-[11px] transition-colors",
+                      view === o.v ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {o.label}
+                  </button>
+                ))}
               </div>
             </>
           )}
@@ -280,35 +461,43 @@ export function TranscriptViewer({
         </div>
       )}
 
-      {/* Timeline strip */}
-      {hasSegs && view === "segments" && <SegmentTimeline segments={segments} speakerMode={speakerMode} hasSpeakers={!!hasSpeakers} onJump={jump} />}
+      {/* Timeline strip（无音频来源时保留；有播放头时轨道已在顶部，避免重复） */}
+      {hasSegs && view === "segments" && !audioUrl && <SegmentTimeline segments={segments} speakerMode={speakerMode} hasSpeakers={!!hasSpeakers} onJump={jump} />}
 
       {/* No-speaker hint */}
       {hasSegs && speakerMode && !hasSpeakers && (
         <p className="text-[11px] text-muted-foreground/80">{t("voice.asr.noSpkInfo")}</p>
       )}
 
-      {/* Body */}
-      {view === "plain" || !hasSegs ? (
-        <p className="max-h-72 overflow-y-auto whitespace-pre-wrap rounded-lg bg-muted/50 px-3 py-2 text-[13px] leading-relaxed">
+      {/* Body：整理稿是自然高度（由右侧结果区滚动），逐句与纯文不再内层截断 */}
+      {view === "minutes" && hasSegs ? (
+        <div className="rounded-lg border bg-background/60 px-5 py-4">
+          <Markdown content={minutes} mode="static" />
+        </div>
+      ) : view === "plain" || !hasSegs ? (
+        <p className="whitespace-pre-wrap rounded-lg bg-muted/50 px-3 py-2 text-[13px] leading-relaxed">
           {fullText}
           {streaming && <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-primary align-middle" />}
         </p>
       ) : (
-        <div ref={listRef} className="max-h-80 overflow-y-auto rounded-lg">
+        <div ref={listRef} className="rounded-lg">
           <div className="flex flex-col gap-0.5">
             {segments.map((s, i) => {
               const spk = speakerMode && hasSpeakers && s.speaker != null ? s.speaker : 0;
               const st = speakerStyle(spk);
-              const active = jumpIndex === i;
+              const active = jumpIndex === i || activeSeg === i;
               return (
                 <div
                   key={`${i}-${s.start.toFixed(2)}`}
                   data-seg={i}
+                  onClick={() => jump(i)}
+                  role="button"
+                  title={audioUrl ? "点击播放这一句" : undefined}
                   className={cn(
                     "flex gap-3 rounded-lg border-l-2 px-3 py-2 transition-colors",
                     st.edge,
-                    active ? "bg-primary/5" : "hover:bg-muted/40",
+                    active ? "bg-primary/10 ring-1 ring-primary/30" : "hover:bg-muted/40",
+                    audioUrl && "cursor-pointer",
                   )}
                 >
                   <div className="mt-0.5 flex w-[6.5rem] shrink-0 flex-col items-start gap-1">

@@ -363,6 +363,8 @@ export function AsrTab() {
   // UI 视图态：whisper / 本地 GGUF（audio.cpp + Confucius4 合并）/ API。
   // 与设置态 ASR_ENGINE 分离 —— 点某个 GGUF 模型的「启动」时才写 ASR_ENGINE。
   const [engineMode, setEngineMode] = useState<"whisper" | "gguf" | "api">("whisper");
+  // 本地 GGUF 区块内的引擎二级选择（视图态，不写 ASR_ENGINE）。
+  const [ggufEngine, setGgufEngine] = useState<"audiocpp" | "confucius">("audiocpp");
   const [segments, setSegments] = useState<AsrSegment[]>([]);
   const [hasSpeakers, setHasSpeakers] = useState(false);
   const [plainText, setPlainText] = useState("");
@@ -424,6 +426,7 @@ export function AsrTab() {
           ? "api"
           : "whisper",
     );
+    setGgufEngine(settings.asrEngine === "confucius" ? "confucius" : "audiocpp");
   }, [settings]);
 
   const switchEngine = (mode: "whisper" | "gguf" | "api") => {
@@ -906,11 +909,22 @@ export function AsrTab() {
 
           {engineMode === "gguf" && (
             <>
-              {/* ---- audio.cpp 引擎 ---- */}
-              <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
-                <CpuIcon className="size-4 text-muted-foreground" />
-                {t("voice.asrAudiocpp.engineAcp")}
-              </h3>
+              {/* 先选 GGUF 推理引擎，下面只列该引擎的模型（不写 ASR_ENGINE，点模型「启动」才写） */}
+              <div>
+                <Label className="mb-1.5 block text-xs">{t("voice.asr.ggufEngine")}</Label>
+                <SegmentedControl
+                  variant="attached"
+                  value={ggufEngine}
+                  onChange={setGgufEngine}
+                  options={[
+                    { value: "audiocpp", label: t("voice.asrAudiocpp.engineAcp"), icon: <CpuIcon className="size-3.5" /> },
+                    { value: "confucius", label: t("voice.asrConfucius.engine"), icon: <BotIcon className="size-3.5" /> },
+                  ]}
+                />
+              </div>
+
+              {ggufEngine === "audiocpp" && (
+                <>
               {/* 引擎状态 */}
               <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
                 <CpuIcon className="size-4 text-muted-foreground" />
@@ -1012,12 +1026,11 @@ export function AsrTab() {
                   </p>
                 )}
               </div>
+                </>
+              )}
 
-              {/* ---- Confucius4-R2T2（llama.cpp 引擎） ---- */}
-              <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
-                <BotIcon className="size-4 text-muted-foreground" />
-                {t("voice.asrConfucius.engineTitle")}
-              </h3>
+              {ggufEngine === "confucius" && (
+                <>
               {/* 引擎状态（llama.cpp 托管引擎，安装在 设置 → 模型引擎） */}
               <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
                 <BotIcon className="size-4 text-muted-foreground" />
@@ -1081,6 +1094,8 @@ export function AsrTab() {
                   {t("voice.asrConfucius.license")}
                 </a>
               </div>
+                </>
+              )}
             </>
           )}
 
@@ -1245,11 +1260,11 @@ export function AsrTab() {
         </div>
       </aside>
 
-      {/* 右侧：结果区 */}
+      {/* 右侧：结果区（内容自然高度，整区滚动 —— 全量展示不截断） */}
       <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <div className="flex min-h-0 flex-1 items-start justify-center overflow-y-auto p-8">
           {plainText || segments.length > 0 ? (
-            <div className="h-full w-full max-w-3xl">
+            <div className="w-full max-w-3xl">
               <TranscriptViewer
                 segments={segments}
                 text={plainText}
@@ -1259,6 +1274,7 @@ export function AsrTab() {
                 streaming={recorder.recording && liveTranscribe.isPending}
                 jumpIndex={jumpIndex}
                 onJump={(i) => setJumpIndex(i)}
+                audioUrl={audio?.url}
               />
             </div>
           ) : (
