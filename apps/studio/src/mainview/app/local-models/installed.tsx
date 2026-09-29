@@ -310,6 +310,9 @@ function InstalledModelRow({
             <p className={cn("text-[11px]", model.origin === "managed" ? "text-muted-foreground" : "text-destructive")}>
               {model.origin === "managed" ? t("models.deleteConfirm.managed") : t("models.deleteConfirm.external")}
             </p>
+            {/* issue #18 的反馈：概览的「卸载」和这里的「删除」容易被当成一回事。
+                弹窗里明说二者差别，避免只想释放显存的用户把文件也删了。 */}
+            <p className="text-[11px] text-muted-foreground">{t("models.deleteConfirm.unloadHint")}</p>
             {deleteError && <p className="text-[11px] text-destructive">{deleteError}</p>}
           </div>
           <DialogFooter>

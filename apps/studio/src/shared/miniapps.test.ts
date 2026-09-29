@@ -43,6 +43,10 @@ const RUNTIME_API = new Set([
   "omni.bg.status",
   "omni.bg.download",
   "omni.bg.run",
+  // 高清修复（本地 WASM 超分）：模型清单 / 权重下载 / 执行
+  "omni.upscale.status",
+  "omni.upscale.download",
+  "omni.upscale.run",
   // 命名空间本身（页面注释里会写 `omni.notes.*`，逐级回溯要能命中）
   "omni.notes",
   "omni.notes.list",

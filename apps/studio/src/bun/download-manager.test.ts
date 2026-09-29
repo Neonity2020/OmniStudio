@@ -46,6 +46,8 @@ let failFirst = 0;
 /** 已启动的下载（按启动顺序），每个都闸住直到测试放行。 */
 const started: string[] = [];
 let gates: Array<() => void> = [];
+/** 置真后下载调用返回的字节数小于期望（模拟被截断的响应流）。 */
+let returnShortSize = false;
 
 await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
   modelDestPath: (repo, fileName) => join(modelsRootOf(), repo.replace("/", "__"), fileName),
@@ -53,7 +55,7 @@ await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
   // test-preload 的临时数据目录一致）—— verify 时扫的就是这里。
   getModelsBaseDir: () => modelsRootOf(),
   removePartialFiles: () => {},
-  downloadFile: async (_repo: string, fileName: string) => {
+  downloadFile: async (_repo: string, fileName: string, opts?: { total?: number | null }) => {
     if (failFirst > 0) {
       failFirst -= 1;
       throw new Error("Download failed: 500");
@@ -61,13 +63,15 @@ await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
     const gate = new Promise<void>((resolve) => gates.push(resolve));
     started.push(fileName);
     await gate;
-    return { path: `models/${fileName}`, size: 1 };
+    // 完成时按调用方给的期望大小返回（opts.total = task.size）—— 与真实下载
+    // 一致；完整性校验的用例用 returnShortSize 压成更小的值模拟截断。
+    return { path: `models/${fileName}`, size: returnShortSize ? 1 : (opts?.total ?? 1) };
   },
-  downloadHuggingFaceFile: async (_repo: string, fileName: string) => {
+  downloadHuggingFaceFile: async (_repo: string, fileName: string, opts?: { total?: number | null }) => {
     const gate = new Promise<void>((resolve) => gates.push(resolve));
     started.push(fileName);
     await gate;
-    return { path: `models/${fileName}`, size: 1 };
+    return { path: `models/${fileName}`, size: returnShortSize ? 1 : (opts?.total ?? 1) };
   },
 });
 
@@ -92,6 +96,7 @@ function reset(seedFiles: string[] = [], failures = 0) {
   mkdirSync(repoDir, { recursive: true });
   for (const name of seedFiles) writeFileSync(join(repoDir, name), Buffer.alloc(1024));
   failFirst = failures;
+  returnShortSize = false;
   started.length = 0;
   gates = [];
 }
@@ -279,6 +284,26 @@ test("重试用尽后标记失败，错误信息保留最终原因", async () =>
   await releaseAll();
 }, 15_000);
 
+test("下载收尾比期望短 → 按失败处理（issue #16 的完整性校验）", async () => {
+  // 场景：服务器/代理剥掉 content-length，单流路径拿不到权威总长，干净断流
+  // 会「成功」返回半个文件 —— 管理器必须拿清单里的期望大小兜底。
+  reset([], 0);
+  returnShortSize = true;
+  const dm = new DownloadManager();
+  const task = dm.start("some/repo", "truncated.bin", "chat", "modelscope", { size: 4_096 });
+
+  // 第一次收尾校验失败 → 排队重试（文件保留）；退避后重试仍短 → 判死，
+  // 错误信息带上实际/期望字节数。
+  await Bun.sleep(30);
+  await releaseAll(); // 第 1 次尝试返回短的字节数
+  await Bun.sleep(3_400); // 退避 3s，第 2 次尝试已在闸后
+  await releaseAll(); // 第 2 次尝试仍短
+  const done = await waitFor(dm, task.id, (t) => t.status === "failed");
+  expect(done?.status).toBe("failed");
+  expect(done?.error).toContain("下载不完整");
+  expect(done?.error).toContain("4096");
+}, 15_000);
+
 // ---------------------------------------------------------------------------
 // manifest 接入（B2b）：下载开始前写清单、完成时比对磁盘、取消时打标记。
 // manifest 与取消标记都在 OMNI_DATA_DIR（test-preload.ts 的临时目录）的
@@ -314,9 +339,6 @@ function manifestExists(repo: string): boolean {
 }
 function cancelledExists(repo: string): boolean {
   return existsSync(join(downloadsRoot(), "cancelled", recordName(repo)));
-}
-function manifestPathFor(repo: string): string {
-  return join(downloadsRoot(), "manifests", recordName(repo));
 }
 
 test("正常下载跑完：开始前 manifest 被写过，完成时比对通过，清单不留残", async () => {

@@ -425,6 +425,14 @@ export class DownloadManager {
         },
       });
 
+      // 完整性兜底（issue #16）：单流路径故意不拿清单大小当权威（只信响应头），
+      // 服务器或代理剥掉 content-length 时，干净断流会被当成「下完了」——半个
+      // 文件就这样静默变成可用模型。这里拿市场清单的期望大小收口：短了按失败
+      // 处理（文件保留，重试/「继续」走断点续传），绝不把截断文件标成完成。
+      if (task.size != null && result.size < task.size) {
+        throw new Error(`下载不完整（${result.size}/${task.size} 字节），点「继续」可断点续传`);
+      }
+
       task.status = "completed";
       task.percent = 100;
       task.received = result.size;
