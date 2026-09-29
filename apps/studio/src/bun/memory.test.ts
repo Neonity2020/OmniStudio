@@ -352,7 +352,7 @@ describe("生命周期：重要度、归档、维护", () => {
     const elapsed = performance.now() - started;
     expect(result.consolidated).toBe(1);
     expect(elapsed).toBeLessThan(2000);
-  });
+  }, 20_000);
 
   test("不同作用域的同句不会被维护合并", async () => {
     insertRaw({ content: "启动命令用 bun run dev", contentHash: null, scope: "/repo/a" });

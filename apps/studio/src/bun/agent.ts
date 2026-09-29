@@ -440,10 +440,25 @@ function ensureDefaultWorkspace(): string {
 
 /**
  * 当前生效的工作区：
- * 1. 设置里指定的目录（AGENT_WORKSPACE）—— 用户在界面上自己选的，目录不存在时自动创建；
- * 2. 否则用默认工作区 ~/.omnistudio/workspace。
+ * 1. 环境变量 OMNI_AGENT_WORKSPACE —— 无头场景的逃逸口（smoke 测试 / `bun test`
+ *    预加载用它把工作区指到临时目录；不隔离的话测试会对用户真实工作区跑
+ *    `git add -A` 做回合快照，几千个文件时一条用例就要好几秒）；
+ * 2. 设置里指定的目录（AGENT_WORKSPACE）—— 用户在界面上自己选的，目录不存在时自动创建；
+ * 3. 否则用默认工作区 ~/.omnistudio/workspace。
  */
 export function getAgentWorkspace(): string {
+  const fromEnv = (process.env.OMNI_AGENT_WORKSPACE ?? "").trim();
+  if (fromEnv) {
+    const resolved = path.resolve(fromEnv);
+    if (!existsSync(resolved)) {
+      try {
+        mkdirSync(resolved, { recursive: true });
+      } catch {
+        // 创建失败时仍然返回该路径，让工具层给出明确的写入错误。
+      }
+    }
+    return resolved;
+  }
   const configured = getSetting("AGENT_WORKSPACE").trim();
   if (configured) {
     const resolved = path.resolve(configured);
