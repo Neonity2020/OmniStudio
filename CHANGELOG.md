@@ -4,6 +4,15 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
+## [0.1.7] - 2026-09-29
+
+### Added / 新增
+
+- **Confucius4-R2T2 长音频转写**：`--ctx-size` 8192 → 32768（音频编码 token 密度高，实测几分钟音频即 8434 tokens 顶爆 8192；1.7B 模型 KV 很小，32k 约容 40 分钟音频）；`max_tokens` 1024 → 2048（单块 120s 中文约 600 字 ≈ 900 token，留足裕量，避免 `finish_reason=length` 半截静默截断）。
+- **静音对齐切块**：超过 2 分钟的 16k WAV 自动切成 ≤120s 的块，切点在目标位置 ±4s 内取能量最低帧（把切分落在停顿上而不是词中间），逐块转写后按序拼接——CJK 边界直接相连、西文边界补一个空格；单块 RIFF 头逐块修正，总时长守恒，缺 data 块直接报错。
+- **转写结果页分段展示 + 整理稿**：`lib/segments.ts` / `lib/minutes.ts` 纯函数（分段区间 + 说话人聚合纪要，同一份输入永远得到同一份 Markdown）；结果页按分段渲染，引擎页长音频说明同步更新；i18n 中英词条补齐。
+- **回归**：切块时长守恒 / 头部修正 / 切点静音对齐、拼接的 CJK 与西文边界、分段渲染与整理稿拼装（`asr-confucius.test.ts`、`voice-asr-result.test.ts`）。
+
 ## [0.1.6] - 2026-09-29
 
 ### Added / 新增
