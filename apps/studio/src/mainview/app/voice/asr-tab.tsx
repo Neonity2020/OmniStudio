@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AudioLinesIcon, MicIcon, XIcon, Loader2Icon, FileAudioIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon, TrashIcon, TimerIcon } from "lucide-react";
+import { AudioLinesIcon, MicIcon, XIcon, Loader2Icon, FileAudioIcon, SquareIcon, PlayIcon, CircleIcon, ServerIcon, DownloadCloudIcon, GlobeIcon, SaveIcon, CpuIcon, TrashIcon, TimerIcon, BotIcon } from "lucide-react";
 import { rpcClient } from "@lib/rpc";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { ResultError, ResultEmpty } from "@components/media-result";
@@ -15,8 +15,10 @@ import { useModelDownloadStore } from "@stores/model-download";
 import { useMicRecorder } from "@hooks/use-mic-recorder";
 import type { AsrModelItem, AsrSegment, AsrStatus } from "../../../bun/asr";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../../../bun/asr-audiocpp";
+import type { AsrConfuciusModelInfo, AsrConfuciusStatus } from "../../../bun/asr-confucius";
 import { TranscriptViewer, mergeSegments, fmtClock } from "../voice-asr-result";
 import { AUDIOCPP_REPO } from "@/shared/audiocpp";
+import { CONFUCIUS_ASR_REPO, CONFUCIUS_ASR_LICENSE_URL } from "@/shared/asr-confucius";
 import { DEFAULT_ASR_MODEL_FILE } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
 import { PlayAudio, SettingsValues, formatBytes } from "./parts";
@@ -111,6 +113,117 @@ function AsrModelRow({
             )}
             {running ? t("voice.asr.stop") : t("voice.asr.start")}
           </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AsrConfuciusModelRow({
+  model,
+  status,
+  pending,
+  onDownload,
+  onStart,
+  onStop,
+  onDelete,
+}: {
+  model: AsrConfuciusModelInfo;
+  status?: AsrConfuciusStatus;
+  pending: boolean;
+  onDownload: (m: AsrConfuciusModelInfo) => void;
+  onStart: (m: AsrConfuciusModelInfo) => void;
+  onStop: () => void;
+  onDelete: (m: AsrConfuciusModelInfo) => void;
+}) {
+  const t = useT();
+  const tasks = useModelDownloadStore((s) => s.tasks);
+  // 主模型 + 音频编码器是两次独立下载，任一在跑都算下载中。
+  const mainTask = tasks.find((x) => x.repo === CONFUCIUS_ASR_REPO && x.fileName === model.mainFile);
+  const mmprojTask = tasks.find((x) => x.repo === CONFUCIUS_ASR_REPO && x.fileName === model.mmprojFile);
+  const activeTask = (mainTask?.status === "downloading" || mainTask?.status === "queued")
+    ? mainTask
+    : (mmprojTask?.status === "downloading" || mmprojTask?.status === "queued")
+      ? mmprojTask
+      : undefined;
+  const downloading = !!activeTask;
+  const running = model.active && !!status?.serverRunning;
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-medium">{model.name}</p>
+          {running && (
+            <Badge variant="default" className="gap-1 text-[10px]">
+              <CircleIcon className="size-2.5 fill-current" />
+              {t("voice.local.running")}
+            </Badge>
+          )}
+          {!model.mainInstalled && mainTask?.status === "failed" && (
+            <Badge variant="destructive" className="text-[10px]">
+              {t("voice.failed")}
+            </Badge>
+          )}
+        </div>
+        <p className="mt-0.5 text-[11px] text-muted-foreground">{model.description}</p>
+        <p className="mt-0.5 text-[11px] text-muted-foreground/70 tabular-nums">
+          {model.languages.join(" / ")} · {formatBytes(model.totalInstalledSize ?? model.totalSizeBytes)}
+          {model.totalInstalledSize ? ` · ${t("voice.local.installed")}` : ""}
+        </p>
+        {/* 模型 id / 文件名全称不截断：它是用户要复述到 API 调用里的东西 */}
+        <p className="mt-0.5 break-all text-[10px] text-muted-foreground/60 tabular-nums">
+          {model.mainInstalled || model.mmprojInstalled ? "✓ " : ""}
+          {model.mainFile} + {model.mmprojFile}
+        </p>
+        {downloading && activeTask && (
+          <div className="mt-1.5 h-1.5 w-full max-w-56 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-[width] duration-300"
+              style={{ width: `${activeTask.percent ?? 0}%` }}
+            />
+          </div>
+        )}
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {!model.downloaded ? (
+          <Button size="sm" disabled={downloading || pending} onClick={() => onDownload(model)}>
+            {downloading ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : (
+              <DownloadCloudIcon data-icon="inline-start" />
+            )}
+            {downloading
+              ? `${activeTask?.percent != null ? Math.round(activeTask.percent) : 0}%`
+              : t("voice.local.download")}
+          </Button>
+        ) : (
+          <>
+            <Button
+              size="sm"
+              variant={running ? "outline" : "default"}
+              disabled={pending}
+              onClick={() => (running ? onStop() : onStart(model))}
+            >
+              {pending ? (
+                <Loader2Icon data-icon="inline-start" className="animate-spin" />
+              ) : running ? (
+                <SquareIcon data-icon="inline-start" />
+              ) : (
+                <PlayIcon data-icon="inline-start" />
+              )}
+              {running ? t("voice.local.stop") : t("voice.local.start")}
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("voice.local.delete")}
+              onClick={() => onDelete(model)}
+              disabled={pending}
+            >
+              <TrashIcon className="size-4" />
+            </Button>
+          </>
         )}
       </div>
     </div>
@@ -247,7 +360,9 @@ export function AsrTab() {
   const [meta, setMeta] = useState<string | null>(null);
   const [tError, setTError] = useState<string | undefined>();
   const [micError, setMicError] = useState<string | undefined>();
-  const [engineMode, setEngineMode] = useState<"whisper" | "audiocpp" | "api">("whisper");
+  // UI 视图态：whisper / 本地 GGUF（audio.cpp + Confucius4 合并）/ API。
+  // 与设置态 ASR_ENGINE 分离 —— 点某个 GGUF 模型的「启动」时才写 ASR_ENGINE。
+  const [engineMode, setEngineMode] = useState<"whisper" | "gguf" | "api">("whisper");
   const [segments, setSegments] = useState<AsrSegment[]>([]);
   const [hasSpeakers, setHasSpeakers] = useState(false);
   const [plainText, setPlainText] = useState("");
@@ -284,28 +399,43 @@ export function AsrTab() {
   });
   const acpModels = acpModelsData?.models ?? [];
 
+  // ---------- Confucius4-R2T2 engine (llama.cpp) ----------
+  const { data: confuciusStatus } = useQuery({
+    queryKey: ["asr-confucius-status"],
+    queryFn: () => rpcClient.getAsrConfuciusStatus(),
+    refetchInterval: 2500,
+  });
+
+  const { data: confuciusModelsData } = useQuery({
+    queryKey: ["asr-confucius-models"],
+    queryFn: () => rpcClient.listAsrConfuciusModels(),
+  });
+  const confuciusModels = confuciusModelsData?.models ?? [];
+
   // 恢复上次选择的引擎（ASR_ENGINE 设置）。
   const engineHydrated = useRef(false);
   useEffect(() => {
     if (!settings.loaded || engineHydrated.current) return;
     engineHydrated.current = true;
     setEngineMode(
-      settings.asrEngine === "audiocpp"
-        ? "audiocpp"
+      settings.asrEngine === "audiocpp" || settings.asrEngine === "confucius"
+        ? "gguf"
         : settings.asrEngine === "api"
           ? "api"
           : "whisper",
     );
   }, [settings]);
 
-  const switchEngine = (mode: "whisper" | "audiocpp" | "api") => {
+  const switchEngine = (mode: "whisper" | "gguf" | "api") => {
     setEngineMode(mode);
     setTError(undefined);
-    void rpcClient.updateSettings({ settings: { ASR_ENGINE: mode } });
-    if (mode === "audiocpp" || mode === "api") {
-      // 本地引擎与 API 模式互斥：切走时停掉 whisper-server。
-      void rpcClient.stopAsr();
+    if (mode === "gguf") {
+      // GGUF 视图不写 ASR_ENGINE：当前用哪个本地引擎由模型卡上的「启动」决定。
+      return;
     }
+    void rpcClient.updateSettings({ settings: { ASR_ENGINE: mode } });
+    // 本地引擎与 API 模式互斥：切走时停掉 whisper-server（也会停 Confucius4 实例）。
+    void rpcClient.stopAsr();
   };
 
   // 有正在使用的 audio.cpp 模型时自动选中。
@@ -328,12 +458,19 @@ export function AsrTab() {
     queryClient.invalidateQueries({ queryKey: ["asr-status"] });
     queryClient.invalidateQueries({ queryKey: ["asr-audiocpp-models"] });
     queryClient.invalidateQueries({ queryKey: ["asr-audiocpp-status"] });
+    queryClient.invalidateQueries({ queryKey: ["asr-confucius-models"] });
+    queryClient.invalidateQueries({ queryKey: ["asr-confucius-status"] });
     queryClient.invalidateQueries({ queryKey: ["voice-records"] });
   };
 
   const refreshAcp = () => {
     queryClient.invalidateQueries({ queryKey: ["asr-audiocpp-models"] });
     queryClient.invalidateQueries({ queryKey: ["asr-audiocpp-status"] });
+  };
+
+  const refreshConfucius = () => {
+    queryClient.invalidateQueries({ queryKey: ["asr-confucius-models"] });
+    queryClient.invalidateQueries({ queryKey: ["asr-confucius-status"] });
   };
 
   const downloadModel = useMutation({
@@ -421,6 +558,54 @@ export function AsrTab() {
     acpDelete.isPending;
 
   const selectedAcp = acpModels.find((m) => m.id === acpModelId);
+
+  const confuciusDownloadModel = useMutation({
+    mutationFn: (m: AsrConfuciusModelInfo) => {
+      // 主模型 + 音频编码器两个文件都入队（下载管理支持续传，进度各自展示在下载列表）。
+      void rpcClient.startModelDownload({
+        repo: CONFUCIUS_ASR_REPO,
+        fileName: m.mainFile,
+        category: "asr",
+        source: "huggingface",
+      });
+      return rpcClient.startModelDownload({
+        repo: CONFUCIUS_ASR_REPO,
+        fileName: m.mmprojFile,
+        category: "asr",
+        source: "huggingface",
+      });
+    },
+    onSuccess: refreshConfucius,
+  });
+  const confuciusStart = useMutation({
+    mutationFn: (m: AsrConfuciusModelInfo) => rpcClient.startAsrConfucius({ modelId: m.id }),
+    onSuccess: (r) => {
+      setTError(r.ok ? undefined : r.error ?? t("voice.engine.startFailed"));
+      refresh();
+    },
+    onError: (e) => setTError(String(e)),
+  });
+  const confuciusStop = useMutation({
+    mutationFn: () => rpcClient.stopAsrConfucius(),
+    onSuccess: (r) => {
+      if (r && !r.ok) setTError(r.error ?? t("voice.engine.stopFailed"));
+      refresh();
+    },
+    onError: (e) => setTError(String(e)),
+  });
+  const confuciusDelete = useMutation({
+    mutationFn: (m: AsrConfuciusModelInfo) => rpcClient.deleteAsrConfuciusModel({ modelId: m.id }),
+    onSuccess: (r) => {
+      if (!r.ok) setTError(r.error ?? t("voice.engine.deleteFailed"));
+      refreshConfucius();
+    },
+    onError: (e) => setTError(String(e)),
+  });
+  const confuciusPending =
+    confuciusDownloadModel.isPending ||
+    confuciusStart.isPending ||
+    confuciusStop.isPending ||
+    confuciusDelete.isPending;
 
   // ---------- OpenAI 兼容 API provider（厂商 + 模型，连接信息在设置里） ----------
   const [pProviderId, setPProviderId] = useState("");
@@ -598,15 +783,15 @@ export function AsrTab() {
               onChange={switchEngine}
               options={[
                 { value: "whisper", label: t("voice.asrAudiocpp.engineWhisper"), icon: <ServerIcon className="size-3.5" /> },
-                { value: "audiocpp", label: t("voice.asrAudiocpp.engineAcp"), icon: <CpuIcon className="size-3.5" /> },
+                { value: "gguf", label: t("voice.asr.engineGguf"), icon: <CpuIcon className="size-3.5" /> },
                 { value: "api", label: t("voice.asr.sourceRemote"), icon: <GlobeIcon className="size-3.5" /> },
               ]}
             />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
               {engineMode === "whisper"
                 ? t("voice.asr.desc")
-                : engineMode === "audiocpp"
-                  ? t("voice.asrAudiocpp.desc")
+                : engineMode === "gguf"
+                  ? t("voice.asr.engineGgufDesc")
                   : t("voice.asr.compatDesc")}
             </p>
           </div>
@@ -719,8 +904,13 @@ export function AsrTab() {
             </>
           )}
 
-          {engineMode === "audiocpp" && (
+          {engineMode === "gguf" && (
             <>
+              {/* ---- audio.cpp 引擎 ---- */}
+              <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                <CpuIcon className="size-4 text-muted-foreground" />
+                {t("voice.asrAudiocpp.engineAcp")}
+              </h3>
               {/* 引擎状态 */}
               <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
                 <CpuIcon className="size-4 text-muted-foreground" />
@@ -821,6 +1011,75 @@ export function AsrTab() {
                     {t("voice.asrAudiocpp.selectHint")}
                   </p>
                 )}
+              </div>
+
+              {/* ---- Confucius4-R2T2（llama.cpp 引擎） ---- */}
+              <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                <BotIcon className="size-4 text-muted-foreground" />
+                {t("voice.asrConfucius.engineTitle")}
+              </h3>
+              {/* 引擎状态（llama.cpp 托管引擎，安装在 设置 → 模型引擎） */}
+              <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+                <BotIcon className="size-4 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium">{t("voice.asrConfucius.engineTitle")}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {!confuciusStatus?.engineInstalled
+                      ? t("voice.asrConfucius.engineNone")
+                      : `${t("voice.asrConfucius.engineReady")}${
+                          confuciusStatus.llamaVersion ? ` · ${confuciusStatus.llamaVersion}` : ""
+                        } · ${t("voice.asr.port")} ${confuciusStatus.port}`}
+                    {confuciusStatus?.serverRunning
+                      ? ` · ${t("voice.local.running")}`
+                      : ` · ${t("voice.local.notStarted")}`}
+                  </p>
+                </div>
+                {confuciusStatus?.serverRunning ? (
+                  <Badge variant="default" className="gap-1 text-[10px]">
+                    <CircleIcon className="size-2.5 fill-current" />
+                    {t("voice.local.running")}
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {t("voice.local.notStarted")}
+                  </Badge>
+                )}
+              </div>
+              {!confuciusStatus?.engineInstalled && (
+                <p className="text-[11px] leading-relaxed text-amber-600">{t("voice.asrConfucius.engineHint")}</p>
+              )}
+
+              {/* Confucius4-R2T2 模型 */}
+              <div>
+                <h3 className="mb-2 flex items-center gap-2 text-sm font-medium">
+                  <AudioLinesIcon className="size-4 text-muted-foreground" />
+                  {t("voice.asrConfucius.models")}
+                  <span className="text-xs font-normal text-muted-foreground">
+                    {t("voice.asrConfucius.modelsHint")}
+                  </span>
+                </h3>
+                <div className="flex flex-col gap-2">
+                  {confuciusModels.map((m) => (
+                    <AsrConfuciusModelRow
+                      key={m.id}
+                      model={m}
+                      status={confuciusStatus}
+                      pending={confuciusPending}
+                      onDownload={(mm) => confuciusDownloadModel.mutate(mm)}
+                      onStart={(mm) => confuciusStart.mutate(mm)}
+                      onStop={() => confuciusStop.mutate()}
+                      onDelete={(mm) => confuciusDelete.mutate(mm)}
+                    />
+                  ))}
+                </div>
+                <a
+                  href={CONFUCIUS_ASR_LICENSE_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1.5 inline-block text-[10px] text-muted-foreground underline underline-offset-2"
+                >
+                  {t("voice.asrConfucius.license")}
+                </a>
               </div>
             </>
           )}

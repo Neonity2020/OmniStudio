@@ -224,6 +224,8 @@ import * as Asr from "../asr";
 import type { AsrModelItem, AsrSegment, AsrStatus } from "../asr";
 import * as AsrAudioCpp from "../asr-audiocpp";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../asr-audiocpp";
+import * as AsrConfucius from "../asr-confucius";
+import type { AsrConfuciusModelInfo, AsrConfuciusStatus } from "../asr-confucius";
 import * as WhisperEngine from "../whisper-engine";
 import * as TTSModels from "../tts-models";
 import type { TTSModelInfo } from "../tts-models";
@@ -2141,6 +2143,27 @@ export type AppRPC = {
         response: { ok: boolean; error?: string };
       };
       deleteAsrAudioCppModel: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      // Local ASR engine (Confucius4-R2T2 via llama.cpp)
+      listAsrConfuciusModels: {
+        params: undefined;
+        response: { models: AsrConfuciusModelInfo[]; error?: string };
+      };
+      getAsrConfuciusStatus: {
+        params: undefined;
+        response: AsrConfuciusStatus;
+      };
+      startAsrConfucius: {
+        params: { modelId: string };
+        response: { ok: boolean; error?: string };
+      };
+      stopAsrConfucius: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      deleteAsrConfuciusModel: {
         params: { modelId: string };
         response: { ok: boolean; error?: string };
       };
@@ -5308,6 +5331,50 @@ const rpcRequests: NonNullable<
   deleteAsrAudioCppModel: async ({ modelId }) =>
     loggedEngineCall("asr", "asr.audiocpp.delete_failed", { modelId }, () =>
       AsrAudioCpp.deleteAsrAudioCppModel(modelId),
+    ),
+
+  // Local ASR (Confucius4-R2T2 via llama.cpp)
+  listAsrConfuciusModels: async () => {
+    try {
+      return { models: AsrConfucius.listAsrConfuciusModels() };
+    } catch (e) {
+      return { models: [], error: e instanceof Error ? e.message : String(e) };
+    }
+  },
+
+  getAsrConfuciusStatus: async () => {
+    try {
+      return await AsrConfucius.getAsrConfuciusStatus();
+    } catch {
+      return {
+        engineInstalled: false,
+        binaryPath: null,
+        llamaVersion: null,
+        serverRunning: false,
+        active: false,
+        activeModelId: null,
+        port: 18085,
+      };
+    }
+  },
+
+  startAsrConfucius: async ({ modelId }) =>
+    // 本地 ASR 引擎互斥：切到 Confucius4 前先停掉 whisper-server / audio.cpp。
+    loggedEngineCall("asr", "asr.confucius.start_failed", { modelId }, async () => {
+      await Asr.stopAsr();
+      await AsrAudioCpp.stopAsrAudioCpp();
+      return AsrConfucius.startAsrConfucius(modelId);
+    }),
+
+  stopAsrConfucius: async () =>
+    loggedEngineCall("asr", "asr.confucius.stop_failed", {}, async () => {
+      await AsrConfucius.stopAsrConfucius();
+      return { ok: true };
+    }),
+
+  deleteAsrConfuciusModel: async ({ modelId }) =>
+    loggedEngineCall("asr", "asr.confucius.delete_failed", { modelId }, async () =>
+      AsrConfucius.deleteAsrConfuciusModel(modelId),
     ),
 
   // Local TTS (audio.cpp)

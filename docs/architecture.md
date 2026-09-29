@@ -311,7 +311,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 
 文档管线是 `上传 → pdfjs/canvas 逐页渲染（或 sharp 归一化）→ 信号量并发（默认 3）→ VLM 识别 → HTML/Markdown 解析 → 按 bbox 裁图存 WebP`。裁剪出的图片文件名用**内容 md5**，保证同一张图跨页去重后名字一致。
 
-**语音**：ASR 三条路径（audio.cpp / whisper.cpp / 远端），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。通话有三种模式（`VOICE_CALL_PROVIDER`）——**本地半双工**（增量转写 + 句切分 + 逐句合成，支持抢话打断）、**云端全双工**（Realtime WebSocket，服务端 VAD 与出声）、**omni**（前端能量 VAD 断句，整段音频作为 `input_audio` 直送多模态对话模型，流式收文字后仍走本地逐句 TTS）。omni 的取舍写在 `shared/voice-call-omni.ts`：省掉 ASR 这一段，代价是半双工，且这些模型只出文字。
+**语音**：ASR 四条路径（Confucius4-R2T2（llama.cpp）/ audio.cpp / whisper.cpp / 远端），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。
+
+**Confucius4-R2T2 是第四条本地 ASR 路径**（网易有道流式语音识别，Qwen3-ASR-1.7B 微调）：权重从 `netease-youdao/Confucius4-R2T2-GGUF` 下载（`bun/asr-confucius.ts` 的目录清单），音频编码器按 llama.cpp 的 mmproj 惯例单独发布，推理引擎就是应用已托管的 **llama.cpp**（不新增引擎行）。转写走一个**专用** llama-server 实例（默认端口 18085，与聊天/嵌入实例互不干扰）：`-m <主模型> --mmproj <音频编码器> --ctx-size 8192 --parallel 1`，请求是 `/v1/chat/completions` 的 `input_audio` 内容块（llama.cpp 原生支持，miniaudio 解码 wav/flac/mp3）—— 与视觉走 `--mmproj` 是同一套机制。模型实测输出形如 `language Chinese<asr_text>你好…`，清洗时把 `<asr_text>` 之前（语言声明）整体切掉。**本地 ASR 引擎互斥**：whisper 与 confucius 各有一个常驻 server，`startAsr` / `startAsrConfucius` / `stopAsr` 互相停对端实例（RPC 层与 `asr.ts` 两处收口），同一时刻只有一个在跑；实时麦克风/语音通话走与远端一致的分窗口重转写 + 客户端合并，不做官方 LSP 流式协议（llama-server 没有它的 HTTP 化）。通话有三种模式（`VOICE_CALL_PROVIDER`）——**本地半双工**（增量转写 + 句切分 + 逐句合成，支持抢话打断）、**云端全双工**（Realtime WebSocket，服务端 VAD 与出声）、**omni**（前端能量 VAD 断句，整段音频作为 `input_audio` 直送多模态对话模型，流式收文字后仍走本地逐句 TTS）。omni 的取舍写在 `shared/voice-call-omni.ts`：省掉 ASR 这一段，代价是半双工，且这些模型只出文字。
 
 三种模式的**句子切分 / Markdown 剥离 / 逐句 TTS / 打断判定是同一份**（`voice-call.ts` 的 `runTurn`），只有"正文从哪来"不同。另一处容易漏的差别在收尾：local 由 `streamChatTurn` 负责助手消息的占位、落库与 `chatChunk`/`chatDone` 推送，omni 直接打 HTTP，那三件事得自己做 —— 漏掉的表现是"听得到回答、消息列表里却一直是空的"。omni 的音频与密钥都从选中的厂商行取（`bun/omni-call.ts`），它走的是 OpenAI 兼容的 `/chat/completions`，不是实时端点。
 

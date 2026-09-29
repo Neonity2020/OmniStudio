@@ -15,6 +15,8 @@ import { normalizeApiBase } from "../shared/cloud-providers";
 import { audioVendorFor } from "../shared/tts-voices";
 import { logEvent } from "./app-log";
 import { runAsrAudioCpp } from "./asr-audiocpp";
+import { stopAsrConfuciusServer, transcribeWithConfucius } from "./asr-confucius";
+import { CONFUCIUS_ENGINE_ID } from "../shared/asr-confucius";
 import { getWhisperEngineInfo, resolveWhisperBinary } from "./whisper-engine";
 import {
   normalizeSegments,
@@ -170,6 +172,8 @@ export async function startAsr(model?: string): Promise<{ ok: boolean; error?: s
   }
 
   await stopAsr();
+  // 本地 ASR 引擎互斥：启 whisper 时停掉 Confucius4 的专用 llama-server。
+  await stopAsrConfuciusServer();
 
   const port = Number(getSetting("ASR_PORT") || 18081);
   serverStatus = "starting";
@@ -234,6 +238,8 @@ export async function startAsr(model?: string): Promise<{ ok: boolean; error?: s
 }
 
 export async function stopAsr(): Promise<void> {
+  // 本地 ASR 引擎互斥：停 whisper 时也停掉 Confucius4 的专用 llama-server。
+  await stopAsrConfuciusServer();
   const proc = serverProc;
   serverProc = null;
   serverStatus = "stopped";
@@ -731,6 +737,11 @@ export async function transcribeAudio(input: {
     return { text: r.text, engine: r.engine, segments: [], hasSpeakers: false };
   };
 
+  const runConfucius = async (): Promise<AsrTranscript> => {
+    const r = await transcribeWithConfucius({ audioPath });
+    return { text: r.text, engine: r.engine, segments: [], hasSpeakers: false };
+  };
+
   const remoteResult = (useProvider: boolean) =>
     transcribeRemote(audioPath, input.model, input.diarize, useProvider, lang);
 
@@ -743,8 +754,11 @@ export async function transcribeAudio(input: {
     );
   }
 
-  // 显式本地引擎：audio.cpp 或 whisper.cpp。
+  // 显式本地引擎：Confucius4-R2T2 / audio.cpp / whisper.cpp。
   if (source === "local") {
+    if (getSetting("ASR_ENGINE") === CONFUCIUS_ENGINE_ID) {
+      return saveRecord(await runConfucius(), getSetting("ASR_CONFUCIUS_MODEL") || null);
+    }
     if (getSetting("ASR_ENGINE") === "audiocpp") {
       return saveRecord(await runAudioCpp(), getSetting("ASR_AUDIOCPP_MODEL") || null);
     }
@@ -753,7 +767,10 @@ export async function transcribeAudio(input: {
     return saveRecord(transcript, input.model ? input.model : modelLabel);
   }
 
-  // 自动：本地引擎优先（audio.cpp → whisper.cpp），都没有时回退主推理服务。
+  // 自动：本地引擎优先（confucius → audio.cpp → whisper.cpp），都没有时回退主推理服务。
+  if (getSetting("ASR_ENGINE") === CONFUCIUS_ENGINE_ID) {
+    return saveRecord(await runConfucius(), getSetting("ASR_CONFUCIUS_MODEL") || null);
+  }
   if (getSetting("ASR_ENGINE") === "audiocpp") {
     return saveRecord(await runAudioCpp(), getSetting("ASR_AUDIOCPP_MODEL") || null);
   }
