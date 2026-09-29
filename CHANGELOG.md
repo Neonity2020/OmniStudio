@@ -4,9 +4,23 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
-## [未发布] / Unreleased
+## [0.1.6] - 2026-09-29
 
-（新条目写在这里，发布时整体归入下一个版本小节。）
+### Added / 新增
+
+- **本地 ASR 新增第四条引擎：网易有道 Confucius4-R2T2 实时语音识别**（语音 app → ASR 页的引擎切换器多一项「Confucius4-R2T2」）。Qwen3-ASR-1.7B 微调的流式识别模型，中英多语言、低延迟（实测 5–10s 音频 ~0.4s 出字）；Mac 本地跑 GGUF：主模型 Q8_0（约 1.8GB）+ 音频编码器（mmproj，约 340MB）从 `netease-youdao/Confucius4-R2T2-GGUF` 一键下载（支持 Q4_K_M 轻量量化选项），推理走应用已托管的 **llama.cpp 引擎**（不新增引擎行；未装时页面引导去 设置 → 模型引擎）。
+  - **实现**：`bun/asr-confucius.ts` 起一个**专用** llama-server 实例（默认端口 18085，与聊天/嵌入实例互不干扰），转写走 llama.cpp 原生 `/v1/chat/completions` 的 `input_audio` 内容块（音频编码器经 `--mmproj` 挂载，与视觉投影器同机制）；`transcribeAudio` 的 local/auto 分支按 `ASR_ENGINE=confucius` 分发，语音通话/实时麦克风/文件转写全部可用（实时沿用分窗口重转写 + 客户端合并）。模型输出形如 `language Chinese<asr_text>文本`，`<asr_text>` 前（语言声明）整体切掉，静音（`language None`）返回空。三个本地引擎互斥（whisper / audio.cpp / confucius 同一时刻只跑一个，`startAsr`/`stopAsr`/`startAsrConfucius` 两处收口互相停对端）。权重遵循网易有道模型使用许可（页面注明；Apache-2.0 仅覆盖代码）。
+  - **回归**：`asr-confucius.test.ts`（目录清单与 HF 文件/字节数对齐、server 参数与请求体构建、转写文本清洗：中/英/静音/特殊 token）。
+
+### Fixed / 修复
+
+- **下载完成时补上完整性校验**（issue #16 承诺的兜底）。下载器的分片路径与单流路径本来都会拿响应头核对字节数，但单流模式**故意**不信任清单里的期望大小（只信响应头）；服务器或代理剥掉 `content-length` 时，一次干净断流会被当成「下完了」，半个文件就此静默变成可用模型。现在任务收尾时拿市场清单的期望大小兜底：短了按失败处理（文件保留，重试 / 「继续」走断点续传），错误信息带上实际/期望字节数，绝不把截断文件标成完成。回归：`download-manager.test.ts` 新增「收尾比期望短 → 判死」用例。
+- **删除模型弹窗写明「删除」与「卸载」的差别**（issue #18 反馈）。概览/运行模型的「卸载」只把模型从显存/内存卸下、文件保留，而模型列表的「删除」直接删磁盘文件——两者容易混淆。删除确认弹窗现在多一行说明：这里是删除磁盘上的文件，只想释放显存的话去 概览 或 运行模型 点「卸载」。
+- **Windows 下窗口拖不动**（`apps/studio/package.json` 把 `electrobun` 从 `^1.16.0` 升到 `^1.18.1` + `bun.lock`，无其它改动）。Electrobun 1.16.0 在 Windows 上把 `hiddenInset`（无标题栏、自绘标题区）窗口建成 `WS_POPUP | WS_THICKFRAME`，没有 `WS_CAPTION`，整个窗口靠 JS 拖拽区（`.electrobun-webkit-app-region-drag` → `startWindowMove`）拖动时原生侧无法正确处理，导致窗口拖不动；electrobun 在 v1.18.x 改为 `WS_CAPTION | WS_THICKFRAME` + `WM_NCCALCSIZE` 裁掉标题栏但仍保留边框拖拽。JS 拖拽区（左侧菜单栏 / 侧栏 / 顶部 header）本身跨平台三处写法都正确，无需改动。三平台打包走既有 `release.yml` 的 macOS / Windows / Linux 原生 runner，升版本后各 job 自动使用 1.18.1。
+
+### Internal / 内部
+
+- **修掉一个测试隔离漏洞**：`OMNI_AGENT_WORKSPACE` 环境变量此前没有任何消费端（smoke 测试设了它但从未生效），`bun test` 与 smoke 都会落到用户真实的 `~/.omnistudio/workspace` 上——每条 agent 用例的回合快照对真实工作区跑 `git add -A`，几千个文件时一条用例就要好几秒（5s 测试上限被吃光、负载下成片超时），测试还会读到用户自己的文件。现在 `getAgentWorkspace()` 认这个环境变量（优先于设置项），`test-preload.ts` 把它指向临时目录；顺带给 500 条库维护的负载敏感用例单独放宽了超时。全量 2790 条从带超时失败到 0 fail，总时长 20s → 17s。
 
 ## [0.1.5] - 2026-09-23
 
